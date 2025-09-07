@@ -1,0 +1,418 @@
+{
+  "agent_type": "email_analyzer",
+  "version": "1.0.0",
+  "metadata": {
+    "name": "Email Priority Analyzer",
+    "description": "Analyzes emails and creates follow-up tasks based on importance",
+    "category": "productivity",
+    "author": "Agentic Backend",
+    "tags": ["email", "productivity", "analysis", "tasks"]
+  },
+  "data_models": {
+    "emails": {
+      "table_name": "email_analyzer_emails",
+      "fields": {
+        "id": {"type": "uuid", "required": true, "primary_key": true},
+        "message_id": {"type": "string", "required": true, "max_length": 255},
+        "subject": {"type": "string", "required": true, "max_length": 500},
+        "sender": {"type": "string", "required": true, "max_length": 255},
+        "sender_email": {"type": "string", "required": true, "max_length": 255},
+        "recipients": {"type": "json", "required": true},
+        "body": {"type": "text", "required": true},
+        "body_html": {"type": "text"},
+        "received_date": {"type": "datetime", "required": true},
+        "priority_score": {"type": "float", "required": true, "default": 0.5},
+        "sentiment": {"type": "string", "required": true, "default": "neutral"},
+        "requires_followup": {"type": "boolean", "required": true, "default": false},
+        "followup_reason": {"type": "string"},
+        "categories": {"type": "json", "required": true, "default": []},
+        "attachments": {"type": "json", "required": true, "default": []},
+        "processed_at": {"type": "datetime", "required": true},
+        "created_at": {"type": "datetime", "required": true},
+        "updated_at": {"type": "datetime", "required": true}
+      },
+      "indexes": [
+        {"fields": ["sender_email"], "name": "idx_emails_sender"},
+        {"fields": ["received_date"], "name": "idx_emails_date"},
+        {"fields": ["priority_score"], "name": "idx_emails_priority"},
+        {"fields": ["requires_followup"], "name": "idx_emails_followup"}
+      ]
+    },
+    "tasks": {
+      "table_name": "email_analyzer_tasks",
+      "fields": {
+        "id": {"type": "uuid", "required": true, "primary_key": true},
+        "email_id": {"type": "uuid", "required": true, "foreign_key": "email_analyzer_emails.id"},
+        "task_type": {"type": "string", "required": true, "max_length": 50},
+        "task_description": {"type": "text", "required": true},
+        "priority": {"type": "string", "required": true, "default": "medium"},
+        "status": {"type": "string", "required": true, "default": "pending"},
+        "due_date": {"type": "datetime"},
+        "assigned_to": {"type": "string"},
+        "tags": {"type": "json", "required": true, "default": []},
+        "metadata": {"type": "json", "required": true, "default": {}},
+        "completed_at": {"type": "datetime"},
+        "created_at": {"type": "datetime", "required": true},
+        "updated_at": {"type": "datetime", "required": true}
+      },
+      "indexes": [
+        {"fields": ["email_id"], "name": "idx_tasks_email"},
+        {"fields": ["status"], "name": "idx_tasks_status"},
+        {"fields": ["priority"], "name": "idx_tasks_priority"},
+        {"fields": ["due_date"], "name": "idx_tasks_due_date"}
+      ]
+    },
+    "processing_stats": {
+      "table_name": "email_analyzer_stats",
+      "fields": {
+        "id": {"type": "uuid", "required": true, "primary_key": true},
+        "agent_instance_id": {"type": "uuid", "required": true},
+        "processed_at": {"type": "datetime", "required": true},
+        "emails_processed": {"type": "integer", "required": true, "default": 0},
+        "tasks_created": {"type": "integer", "required": true, "default": 0},
+        "avg_processing_time": {"type": "float", "required": true},
+        "error_count": {"type": "integer", "required": true, "default": 0},
+        "metadata": {"type": "json", "required": true, "default": {}}
+      },
+      "indexes": [
+        {"fields": ["agent_instance_id"], "name": "idx_stats_agent"},
+        {"fields": ["processed_at"], "name": "idx_stats_date"}
+      ]
+    }
+  },
+  "processing_pipeline": {
+    "steps": [
+      {
+        "name": "fetch_emails",
+        "tool": "email_connector",
+        "order": 1,
+        "description": "Connect to email server and retrieve recent emails",
+        "config": {
+          "max_emails": 100,
+          "date_range": "30d",
+          "unread_only": false
+        },
+        "error_handling": {
+          "retry_count": 3,
+          "retry_delay": 60,
+          "continue_on_error": false
+        }
+      },
+      {
+        "name": "analyze_emails",
+        "tool": "email_analyzer",
+        "order": 2,
+        "description": "Analyze email content for importance and follow-up needs",
+        "dependencies": ["fetch_emails"],
+        "config": {
+          "model": "llama2",
+          "temperature": 0.3,
+          "analysis_depth": "detailed",
+          "include_sentiment": true
+        },
+        "error_handling": {
+          "retry_count": 2,
+          "retry_delay": 30,
+          "continue_on_error": true
+        }
+      },
+      {
+        "name": "create_tasks",
+        "tool": "task_creator",
+        "order": 3,
+        "description": "Create follow-up tasks based on email analysis",
+        "dependencies": ["analyze_emails"],
+        "config": {
+          "auto_assign": false,
+          "default_priority": "medium",
+          "due_date_offset_days": 7
+        },
+        "error_handling": {
+          "retry_count": 1,
+          "retry_delay": 15,
+          "continue_on_error": false
+        }
+      },
+      {
+        "name": "update_stats",
+        "tool": "stats_updater",
+        "order": 4,
+        "description": "Update processing statistics",
+        "dependencies": ["create_tasks"],
+        "config": {},
+        "error_handling": {
+          "retry_count": 1,
+          "retry_delay": 10,
+          "continue_on_error": true
+        }
+      }
+    ]
+  },
+  "tools": {
+    "email_connector": {
+      "type": "email",
+      "description": "Connects to IMAP email servers to retrieve emails",
+      "config": {
+        "service_type": "imap",
+        "host": "imap.gmail.com",
+        "port": 993,
+        "use_ssl": true,
+        "max_emails": 100,
+        "batch_size": 50
+      }
+    },
+    "email_analyzer": {
+      "type": "llm",
+      "description": "Uses LLM to analyze email content and determine importance",
+      "config": {
+        "model": "llama2",
+        "temperature": 0.3,
+        "max_tokens": 1000,
+        "system_prompt": "You are an expert email analyst. Analyze the provided email and determine its importance, sentiment, and whether it requires follow-up. Provide a priority score from 0.0 to 1.0, identify the sentiment (positive, negative, neutral), and list any specific action items or follow-up tasks needed.",
+        "analysis_criteria": {
+          "importance_threshold": 0.7,
+          "sentiment_analysis": true,
+          "action_item_detection": true,
+          "category_classification": true
+        }
+      }
+    },
+    "task_creator": {
+      "type": "database",
+      "description": "Creates follow-up tasks in the database based on email analysis",
+      "config": {
+        "table_name": "email_analyzer_tasks",
+        "auto_assign": false,
+        "default_priority": "medium",
+        "due_date_offset_days": 7,
+        "task_templates": {
+          "follow_up": "Follow up on email: {subject}",
+          "urgent_response": "URGENT: Respond to email: {subject}",
+          "review_attachment": "Review attachment in email: {subject}",
+          "schedule_meeting": "Schedule meeting regarding: {subject}"
+        }
+      }
+    },
+    "stats_updater": {
+      "type": "database",
+      "description": "Updates processing statistics and metrics",
+      "config": {
+        "table_name": "email_analyzer_stats",
+        "metrics_to_track": [
+          "emails_processed",
+          "tasks_created",
+          "processing_time",
+          "error_rate"
+        ]
+      }
+    }
+  },
+  "input_schema": {
+    "email_credentials": {
+      "type": "object",
+      "description": "Email server authentication credentials",
+      "properties": {
+        "username": {
+          "type": "string",
+          "description": "Email address/username"
+        },
+        "password": {
+          "type": "string",
+          "description": "Email password or app password"
+        },
+        "server": {
+          "type": "string",
+          "description": "IMAP server hostname",
+          "default": "imap.gmail.com"
+        },
+        "port": {
+          "type": "integer",
+          "description": "IMAP server port",
+          "default": 993
+        }
+      },
+      "required": ["username", "password"]
+    },
+    "processing_options": {
+      "type": "object",
+      "description": "Email processing configuration",
+      "properties": {
+        "date_range": {
+          "type": "string",
+          "description": "Date range for email retrieval (e.g., '30d', '1w', '2024-01-01:2024-01-31')",
+          "default": "30d"
+        },
+        "max_emails": {
+          "type": "integer",
+          "description": "Maximum number of emails to process",
+          "default": 100,
+          "minimum": 1,
+          "maximum": 1000
+        },
+        "unread_only": {
+          "type": "boolean",
+          "description": "Process only unread emails",
+          "default": false
+        },
+        "folders": {
+          "type": "array",
+          "description": "Email folders to process",
+          "items": {"type": "string"},
+          "default": ["INBOX"]
+        },
+        "importance_threshold": {
+          "type": "number",
+          "description": "Minimum importance score to create tasks (0.0-1.0)",
+          "default": 0.7,
+          "minimum": 0.0,
+          "maximum": 1.0
+        }
+      }
+    },
+    "task_options": {
+      "type": "object",
+      "description": "Task creation configuration",
+      "properties": {
+        "auto_assign": {
+          "type": "boolean",
+          "description": "Automatically assign tasks",
+          "default": false
+        },
+        "default_assignee": {
+          "type": "string",
+          "description": "Default task assignee"
+        },
+        "due_date_offset_days": {
+          "type": "integer",
+          "description": "Days to add to current date for task due dates",
+          "default": 7
+        },
+        "priority_mapping": {
+          "type": "object",
+          "description": "Map importance scores to task priorities",
+          "properties": {
+            "high_threshold": {"type": "number", "default": 0.8},
+            "medium_threshold": {"type": "number", "default": 0.6}
+          }
+        }
+      }
+    }
+  },
+  "output_schema": {
+    "processing_summary": {
+      "type": "object",
+      "description": "Summary of email processing results",
+      "properties": {
+        "emails_processed": {
+          "type": "integer",
+          "description": "Total number of emails processed"
+        },
+        "emails_analyzed": {
+          "type": "integer",
+          "description": "Number of emails that were analyzed"
+        },
+        "tasks_created": {
+          "type": "integer",
+          "description": "Number of follow-up tasks created"
+        },
+        "high_priority_tasks": {
+          "type": "integer",
+          "description": "Number of high-priority tasks created"
+        },
+        "processing_time_seconds": {
+          "type": "number",
+          "description": "Total processing time in seconds"
+        },
+        "error_count": {
+          "type": "integer",
+          "description": "Number of errors encountered"
+        }
+      }
+    },
+    "email_results": {
+      "type": "array",
+      "description": "Detailed results for each processed email",
+      "items": {
+        "type": "object",
+        "properties": {
+          "email_id": {"type": "string"},
+          "subject": {"type": "string"},
+          "sender": {"type": "string"},
+          "priority_score": {"type": "number"},
+          "sentiment": {"type": "string"},
+          "requires_followup": {"type": "boolean"},
+          "followup_reason": {"type": "string"},
+          "categories": {"type": "array", "items": {"type": "string"}},
+          "tasks_created": {"type": "array", "items": {"type": "string"}}
+        }
+      }
+    },
+    "task_results": {
+      "type": "array",
+      "description": "Details of created tasks",
+      "items": {
+        "type": "object",
+        "properties": {
+          "task_id": {"type": "string"},
+          "email_id": {"type": "string"},
+          "task_type": {"type": "string"},
+          "description": {"type": "string"},
+          "priority": {"type": "string"},
+          "due_date": {"type": "string"},
+          "tags": {"type": "array", "items": {"type": "string"}}
+        }
+      }
+    },
+    "errors": {
+      "type": "array",
+      "description": "Any errors encountered during processing",
+      "items": {
+        "type": "object",
+        "properties": {
+          "step": {"type": "string"},
+          "error_type": {"type": "string"},
+          "error_message": {"type": "string"},
+          "email_id": {"type": "string"}
+        }
+      }
+    }
+  },
+  "error_handling": {
+    "max_retries": 3,
+    "retry_delay_seconds": 60,
+    "continue_on_step_failure": true,
+    "failure_threshold": 0.8,
+    "notification_settings": {
+      "notify_on_failure": true,
+      "notify_on_completion": false,
+      "notification_channels": ["database", "logs"]
+    }
+  },
+  "monitoring": {
+    "metrics_enabled": true,
+    "performance_tracking": true,
+    "error_tracking": true,
+    "audit_logging": true,
+    "health_checks": {
+      "email_connectivity": true,
+      "database_connectivity": true,
+      "llm_availability": true
+    }
+  },
+  "security": {
+    "credential_encryption": true,
+    "data_sanitization": true,
+    "rate_limiting": {
+      "max_emails_per_hour": 1000,
+      "max_api_calls_per_minute": 60
+    },
+    "input_validation": {
+      "email_format_validation": true,
+      "content_filtering": true,
+      "size_limits": {
+        "max_email_size": "10MB",
+        "max_batch_size": 100
+      }
+    }
+  }
+}

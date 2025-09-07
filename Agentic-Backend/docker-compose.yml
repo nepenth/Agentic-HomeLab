@@ -1,0 +1,163 @@
+
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ai_db
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: secret
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d ai_db"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  api:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    expose:
+      - "8000"
+    runtime: nvidia
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://postgres:secret@db:5432/ai_db
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - OLLAMA_BASE_URL=http://whyland-ai.nakedsun.xyz:11434
+      - SECRET_KEY=your-secret-key-change-in-production
+      - LOG_LEVEL=INFO
+      - DEBUG=true
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - .:/app
+      - ./logs:/app/logs
+      - knowledge_base_media:/app/media_cache
+      - knowledge_base_models:/app/models_cache
+      - ollama_models:/root/.ollama
+      - playwright_cache:/home/app/.cache
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  worker:
+    build: .
+    restart: unless-stopped
+    runtime: nvidia
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://postgres:secret@db:5432/ai_db
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - OLLAMA_BASE_URL=http://whyland-ai.nakedsun.xyz:11434
+      - SECRET_KEY=your-secret-key-change-in-production
+      - LOG_LEVEL=INFO
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - .:/app
+      - ./logs:/app/logs
+      - knowledge_base_media:/app/media_cache
+      - knowledge_base_models:/app/models_cache
+      - ollama_models:/root/.ollama
+      - playwright_cache:/home/app/.cache
+    command: celery -A app.celery_app worker --loglevel=info --concurrency=4
+    healthcheck:
+      disable: true
+
+  flower:
+    build: .
+    restart: unless-stopped
+    expose:
+      - "5555"
+    environment:
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+    depends_on:
+      - redis
+    volumes:
+      - .:/app
+    command: celery -A app.celery_app flower --port=5555
+    healthcheck:
+      disable: true
+
+  nginx:
+    image: nginx:alpine
+    restart: unless-stopped
+    ports:
+      - "8443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/ssl:/etc/nginx/ssl:ro
+    depends_on:
+      - api
+      - flower
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+volumes:
+  db_data:
+  redis_data:
+  knowledge_base_media:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ./media_cache
+  knowledge_base_models:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ./models_cache
+  ollama_models:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ./ollama_cache
+  playwright_cache:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ./playwright_cache

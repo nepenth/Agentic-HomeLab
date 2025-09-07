@@ -1,0 +1,37 @@
+services:
+  # Frontend
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        VITE_API_BASE_URL: https://whyland-ai.nakedsun.xyz:8443
+        VITE_WS_URL: wss://whyland-ai.nakedsun.xyz:8443/ws
+        VITE_API_TIMEOUT: 300000
+        VITE_WS_MAX_MESSAGES_PER_MINUTE: 100
+        VITE_WS_RATE_LIMIT_WINDOW_MS: 60000
+        VITE_WS_HEARTBEAT_INTERVAL: 30000
+        VITE_WS_CONNECTION_TIMEOUT: 90000
+        VITE_WS_MAX_RECONNECT_ATTEMPTS: 5
+        VITE_WS_RECONNECT_DELAY: 1000
+        VITE_APP_NAME: Agentic Frontend
+        VITE_APP_VERSION: 0.1.0
+    restart: unless-stopped
+    ports:
+      - "443:443"
+    environment:
+      - VITE_API_BASE_URL=https://whyland-ai.nakedsun.xyz:8443
+      - VITE_WS_URL=wss://whyland-ai.nakedsun.xyz:8443/ws
+      - VITE_API_TIMEOUT=300000
+      - VITE_WS_MAX_MESSAGES_PER_MINUTE=100
+      - VITE_WS_RATE_LIMIT_WINDOW_MS=60000
+      - VITE_WS_HEARTBEAT_INTERVAL=30000
+      - VITE_WS_CONNECTION_TIMEOUT=90000
+      - VITE_WS_MAX_RECONNECT_ATTEMPTS=5
+      - VITE_WS_RECONNECT_DELAY=1000
+      - VITE_APP_NAME=Agentic Frontend
+      - VITE_APP_VERSION=0.1.0
+    volumes:
+      - ./frontend/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./frontend/ssl/fullchain.pem:/etc/ssl/certs/fullchain.pem:ro
+      - ./frontend/ssl/privkey.pem:/etc/ssl/private/privkey.pem:ro
