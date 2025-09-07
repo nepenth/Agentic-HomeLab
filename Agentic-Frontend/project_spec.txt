@@ -1,0 +1,187 @@
+# Project Specification: Modular AI Agent Frontend Skeleton
+
+## 1. Project Overview
+
+This project develops a skeleton web-based frontend that integrates with the existing backend (FastAPI API, Celery workers, Ollama, PostgreSQL with pgvector, and Redis) to serve as a unified interface for multiple AI/agentic workflows. It is designed for extensibility, allowing seamless addition of new modules like the AI Email Assistant or other agentic tasks (e.g., document analysis, task automation). The frontend follows modern agentic design principles: modularity (plug-and-play components for workflows), composability (reusable UI elements for agents), observability (dashboard for cross-workflow insights), and persistence (leverage backend DB for state across sessions).
+
+Key features include a central dashboard for surfacing aggregated insights from workflows, a navigation bar for accessing specific agents, and a utility page for backend management tools. The UI adopts a global theme inspired by Apple's design language: clean minimalism, elegant typography (SF Pro-inspired fonts), subtle animations, rounded elements, ample white space, and functional aesthetics prioritizing usability and beauty.
+
+The frontend will be dockerized and integrated into the existing Docker Compose setup for portability on Ubuntu Server, ensuring a cohesive full-stack deployment.
+
+## 2. Requirements
+
+### Functional Requirements
+- **Dashboard**: Main page aggregating key information from connected workflows (e.g., recent tasks, alerts from email assistant like "3 urgent emails", summaries from other agents). Support dynamic widgets/modules that can be added per workflow.
+- **Navigation**: Persistent navigation bar (sidebar or top nav) with links to workflow-specific pages (e.g., "Email Assistant", "Document Analyzer"). Include search for quick access.
+- **Workflow Modules**: Skeleton placeholders for agents; e.g., a base template page that can be extended for each workflow.
+- **Utility Page**: Display and link to backend management endpoints in a visually appealing table (based on provided markdown). Use external links or iframes for access (e.g., to Swagger, Flower).
+- **Authentication**: Integrate with backend JWT for user sessions; login page to secure access.
+- **Real-Time Updates**: Use WebSockets for live notifications (e.g., task completion from Celery).
+- **Theme and UX**: Global styling with Apple-inspired design: fluid layouts, high-contrast readability, touch-friendly for future mobile.
+
+### Non-Functional Requirements
+- **Performance**: Lazy loading for modules; efficient API calls with caching.
+- **Security**: Secure API interactions (auth tokens); no direct exposure of backend creds.
+- **Accessibility**: ARIA labels, keyboard navigation, color contrast per WCAG.
+- **Extensibility**: Modular structure for adding new workflows without refactoring core.
+- **Portability**: Dockerized; compatible with existing backend services.
+- **Maintainability**: Type-safe code, component reusability, automated tests.
+
+### Assumptions
+- Backend API will be extended minimally (e.g., endpoints for dashboard data aggregation, WebSockets).
+- Initial workflows: Placeholder for Email Assistant; others added later.
+- Local development; no production scaling yet (e.g., no CDN).
+
+## 3. Technology Stack
+
+- **Frontend Framework**: React 18 with TypeScript (for modularity and type safety).
+- **State Management**: Redux Toolkit (global state for user, workflows) + React Query (for API data fetching/caching).
+- **UI Library**: Material-UI (MUI) v5, customized with ThemeProvider for Apple-inspired styles (e.g., rounded buttons, SF-like fonts via @fontsource/roboto or similar; subtle shadows, vibrant accents sparingly).
+- **Routing**: React Router v6 (for navigation and protected routes).
+- **Real-Time**: Socket.io-client (pair with backend Socket.io).
+- **API Client**: Axios with interceptors for auth.
+- **Styling**: CSS-in-JS via MUI's styled components; global theme file.
+- **Other Libraries**: React-Toastify (notifications), Day.js (dates), React-Resizable (for dashboard widgets).
+- **Build Tool**: Vite (fast builds, HMR).
+- **Testing**: Jest + React Testing Library; Cypress for E2E.
+- **Containerization**: Docker with Nginx for serving built assets.
+
+Rationale:
+- React's component model aligns with agentic modularity (e.g., composable agent UIs).
+- MUI provides flexible theming to emulate Apple's elegance (minimalist, functional).
+- React Query handles async data from backend, fitting agentic workflows' event-driven nature.
+
+## 4. Architecture
+
+### High-Level Design
+The frontend is a single-page application (SPA) consuming the backend API. It emphasizes separation: core shell (nav, dashboard), pluggable modules (workflows), and shared utilities (theme, auth).
+
+Text-based diagram:
+
+```
+[User Browser] <--> [React Frontend (SPA)]
+                    |
+                    v
+[Backend API (FastAPI)] <--> [Celery/Ollama/DB]  (Existing)
+```
+
+- **Agentic Principles**:
+  - **Modularity**: Workflows as lazy-loaded routes/modules.
+  - **Composability**: Reusable components (e.g., TaskCard for displaying agent outputs).
+  - **Observability**: Dashboard pulls aggregated states via API (e.g., query DB for cross-workflow metrics).
+  - **Extensibility**: Use context providers for injecting workflow-specific logic.
+
+- **Workflow Integration Example**:
+  1. Dashboard fetches summary data via API `/dashboard/summary`.
+  2. Nav links to `/workflows/email-assistant`, loading module dynamically.
+  3. Module triggers Celery tasks via API, displays results with real-time updates.
+
+## 5. Components
+
+### 5.1 Core UI Elements
+- **Theme**: Defined in `theme.ts` (MUI ThemeProvider): Palette (neutral grays, blue accents), typography (sans-serif, weights 400/500/600), components (rounded borders, hover effects with subtle transitions).
+- **Navigation**: Sidebar (MUI Drawer) with icons/links: Home (Dashboard), Workflows (submenu for agents), Utilities, Settings, Logout.
+- **Dashboard Page**: Grid of widgets (e.g., cards for workflow summaries); resizable/reorderable for customization.
+- **Workflow Template**: Base page with header, content area, and sidebar for tools; extend for specific agents (e.g., EmailAssistant component).
+- **Utility Page**: Render the management table as a MUI DataGrid or styled table; each row links to URLs (e.g., `<a href="http://localhost:8000/docs">`).
+- **Auth**: Login form; protected routes via PrivateRoute wrapper.
+
+### 5.2 Backend Extensions (Minimal)
+- API: Add `/dashboard/summary` (aggregate workflow data), WebSocket endpoint for notifications.
+- DB: Add `dashboard_widgets` table for user-customized views.
+
+## 6. Docker Setup
+
+### Docker Compose Extensions
+Extend the provided `docker-compose.yml` to include:
+- `frontend`: Serves React build.
+- `adminer`: Add for DB UI (as per utility table).
+
+Updated snippet (add to existing):
+
+```yaml
+services:
+  # Existing: db, redis, api, worker, flower
+
+  adminer:
+    image: adminer:latest
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      ADMINER_DEFAULT_SERVER: db
+      ADMINER_DESIGN: pepa-linha
+    depends_on:
+      db:
+        condition: service_healthy
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "3000:80"  # Nginx serves on 80
+    environment:
+      - VITE_API_BASE_URL=http://api:8000
+      - VITE_WS_URL=ws://api:8000/ws
+    depends_on:
+      - api
+    volumes:
+      - ./frontend/nginx.conf:/etc/nginx/conf.d/default.conf:ro  # Optional proxy config
+```
+
+- **Dockerfile for Frontend**:
+  Multi-stage: Build with Node, copy to Nginx for production serve.
+
+### Setup Instructions
+1. Add `frontend/` dir.
+2. Build: `docker-compose build`.
+3. Run: `docker-compose up -d`.
+4. Access: `http://localhost:3000`.
+5. For dev: Run Vite locally, proxy to Docker backend.
+
+Best Practices:
+- Environment vars for configurable URLs.
+- Healthchecks for frontend if needed.
+- Volumes for logs/hot reload in dev.
+
+## 7. Implementation Guidelines
+
+- **Code Structure**:
+  ```
+  project/
+  ├── backend/          # Existing
+  ├── frontend/
+  │   ├── src/
+  │   │   ├── components/  # Reusable: NavBar, WidgetCard
+  │   │   ├── pages/       # Dashboard, Utility, WorkflowTemplate
+  │   │   ├── modules/     # Workflow-specific: email-assistant/
+  │   │   ├── services/    # API clients, auth
+  │   │   ├── store/       # Redux slices
+  │   │   ├── theme/       # theme.ts
+  │   │   ├── App.tsx
+  │   │   └── main.tsx
+  │   ├── public/
+  │   ├── Dockerfile
+  │   ├── vite.config.ts
+  │   └── package.json
+  ├── docker-compose.yml  # Updated
+  └── README.md
+  ```
+- **Theme Customization**: Override MUI defaults for Apple feel (e.g., `borderRadius: 12`, `shadows: subtle`).
+- **Testing**: Unit for components; integration for API flows.
+- **CI/CD**: Lint (ESLint), test on push.
+- **Error Handling**: Toast notifications for API failures.
+- **Performance**: Code splitting for modules.
+
+## 8. Future Expansions
+
+- **New Workflows**: Add modules (e.g., RAG-based search agent) by creating subdirs in `modules/`.
+- **Advanced Dashboard**: AI-driven insights (e.g., LLM-summarized overviews).
+- **Mobile Responsiveness**: Enhance for iOS-like touch interactions.
+- **Multi-User**: Role-based access in auth.
+- **Integrations**: Add more utils (e.g., Grafana for metrics).
+- **Theming**: Dynamic themes (light/dark mode).
+
+This skeleton provides a flexible base, starting with core structure and expanding per workflow needs. Implement MVP: Auth, nav, dashboard placeholder, utility page.
