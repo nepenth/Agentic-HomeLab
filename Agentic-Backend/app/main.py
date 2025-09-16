@@ -1,34 +1,95 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
+import asyncio
+import uvloop
+import logging
+import sys
 from app.config import settings
 from app.utils.logging import setup_logging
 from app.api.middleware import LoggingMiddleware
 from app.api.security_middleware import AgentSecurityMiddleware, RequestValidationMiddleware
 from app.api.routes import api_router, ws_router
 from app.utils.logging import get_logger
+from app.db.database import check_database_health, engine
 
 # Setup logging
 setup_logging()
 logger = get_logger("main")
 
+# Configure event loop for optimal async performance
+def configure_event_loop():
+    """Configure event loop with optimal settings for async/SQLAlchemy compatibility."""
+    try:
+        # Use uvloop for better performance if available
+        if sys.platform != 'win32':
+            uvloop.install()
+            logger.info("uvloop installed for enhanced async performance")
+        
+        # Get the current event loop
+        loop = asyncio.get_event_loop()
+        
+        # Configure loop policies for better greenlet compatibility
+        if hasattr(asyncio, 'WindowsSelectorEventLoopPolicy'):
+            # Windows-specific optimization
+            asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
+        elif hasattr(asyncio, 'DefaultEventLoopPolicy'):
+            # Unix-specific optimization
+            policy = asyncio.DefaultEventLoopPolicy()
+            asyncio.set_event_loop_policy(policy)
+            
+    except Exception as e:
+        logger.warning(f"Event loop configuration failed: {e}")
+
+# Configure the event loop early
+configure_event_loop()
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Application lifespan events."""
+    """
+    Enhanced application lifespan events with proper async resource management.
+    
+    This ensures database connections are properly initialized and cleaned up,
+    preventing greenlet spawn errors during application lifecycle.
+    """
     logger.info(f"Starting {settings.app_name} v{settings.app_version}")
     
     # Startup
     try:
-        # Initialize database, redis connections, etc.
+        # Initialize database connection pool
+        logger.info("Initializing database connection pool...")
+        
+        # Test database connectivity
+        db_healthy = await check_database_health()
+        if not db_healthy:
+            logger.error("Database health check failed")
+            raise RuntimeError("Database connection failed")
+        
+        logger.info("Database connection established successfully")
+        
+        # Store engine reference in app state for access
+        app.state.db_engine = engine
+        
         logger.info("Application startup complete")
         yield
+        
     except Exception as e:
         logger.error(f"Startup failed: {e}")
         raise
     finally:
-        # Shutdown
-        logger.info("Shutting down application")
+        # Shutdown - Clean up database connections
+        logger.info("Shutting down application...")
+        
+        try:
+            # Dispose of database engine connections
+            if hasattr(app.state, 'db_engine'):
+                await app.state.db_engine.dispose()
+                logger.info("Database connections disposed")
+        except Exception as e:
+            logger.error(f"Error during shutdown: {e}")
+        
+        logger.info("Application shutdown complete")
 
 
 # Create FastAPI app

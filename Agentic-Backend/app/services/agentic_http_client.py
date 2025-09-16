@@ -683,7 +683,7 @@ class AgenticHttpClient:
         return {
             "total_requests": self.request_count,
             "recent_requests": len(self.request_log),
-            "circuit_breaker_state": self.circuit_breaker.state.value,
+            "circuit_breaker_state": getattr(self.circuit_breaker, 'state', CircuitBreakerState.CLOSED).value,
             "rate_limiter_active": self.rate_limiter is not None,
             "session_active": self.session is not None
         }

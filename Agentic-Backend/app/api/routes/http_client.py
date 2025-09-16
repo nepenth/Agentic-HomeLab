@@ -205,7 +205,7 @@ async def get_http_metrics() -> HttpMetricsModel:
 
         response_model = HttpMetricsModel(
             total_requests=metrics.get("total_requests", 0),
-            recent_requests=len(metrics.get("recent_requests", [])),
+            recent_requests=metrics.get("recent_requests", 0),
             circuit_breaker_state=metrics.get("circuit_breaker_state", "unknown"),
             rate_limiter_active=metrics.get("rate_limiter_active", False),
             session_active=metrics.get("session_active", False)

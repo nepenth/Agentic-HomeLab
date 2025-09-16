@@ -682,6 +682,45 @@ class DataEncryptor:
         return secrets.token_hex(length)
 
 
+@dataclass
+class SecurityLimits:
+    """Security limits configuration."""
+    max_concurrent_agents: int = 8
+    max_agent_execution_time: int = 1800
+    max_pipeline_execution_time: int = 3600
+    max_step_execution_time: int = 300
+    max_agent_memory_mb: int = 131072
+    max_total_memory_mb: int = 262144
+    max_data_model_memory_mb: int = 65536
+    max_table_rows: int = 1000000
+    max_concurrent_queries: int = 50
+    max_query_execution_time: int = 300
+    max_external_requests_per_hour: int = 1000
+    max_request_size_kb: int = 1024
+    max_gpu_memory_mb: int = 8192
+    max_concurrent_gpu_tasks: int = 4
+    max_data_models: int = 100
+    max_fields_per_model: int = 50
+    max_pipeline_steps: int = 20
+    max_tools_per_agent: int = 10
+    max_nested_json_depth: int = 5
+    allowed_domains: Optional[set] = None
+
+
+@dataclass
+class SecurityIncident:
+    """Security incident record."""
+    incident_id: str
+    agent_id: Optional[str]
+    agent_type: Optional[str]
+    violation_type: str
+    severity: str
+    description: str
+    timestamp: datetime
+    resolved: bool = False
+    resolution_notes: Optional[str] = None
+
+
 class SecurityService:
     """Main security service coordinating all security features."""
 
@@ -692,6 +731,9 @@ class SecurityService:
         self.security_monitor = SecurityMonitor()
         self.data_encryptor = DataEncryptor()
         self.security_level = SecurityLevel.MODERATE
+        self.limits = SecurityLimits()
+        self.security_incidents: List[SecurityIncident] = []
+        self.active_agents: List[str] = []
 
     async def initialize(self):
         """Initialize the security service."""

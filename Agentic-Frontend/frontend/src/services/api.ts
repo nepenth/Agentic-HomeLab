@@ -1781,6 +1781,12 @@ class ApiClient {
       spam_threshold?: number;
       create_tasks?: boolean;
       schedule_followups?: boolean;
+      // Timeout settings
+      analysis_timeout?: number;
+      task_timeout?: number;
+      ollama_timeout?: number;
+      max_retries?: number;
+      retry_delay?: number;
     };
   }) {
     const response = await this.client.post('/api/v1/email/workflows/start', workflowData);
@@ -1821,6 +1827,16 @@ class ApiClient {
     return response.data;
   }
 
+  async getEmailWorkflowLogs(params?: {
+    workflow_id?: string;
+    level?: string;
+    limit?: number;
+    offset?: number;
+  }) {
+    const response = await this.client.get('/api/v1/email/logs', { params });
+    return response.data;
+  }
+
   // Task Management
   async getEmailTasks(params?: {
     status?: string;
@@ -1840,6 +1856,16 @@ class ApiClient {
 
   async completeEmailTask(taskId: string) {
     const response = await this.client.post(`/api/v1/email/tasks/${taskId}/complete`);
+    return response.data;
+  }
+
+  async getTaskEmailContent(taskId: string) {
+    const response = await this.client.get(`/api/v1/email/tasks/${taskId}/email-content`);
+    return response.data;
+  }
+
+  async markTaskNotImportant(taskId: string) {
+    const response = await this.client.post(`/api/v1/email/tasks/${taskId}/mark-not-important`);
     return response.data;
   }
 
@@ -1863,6 +1889,22 @@ class ApiClient {
 
   async getOverdueEmailTasks() {
     const response = await this.client.get('/api/v1/email/tasks/overdue');
+    return response.data;
+  }
+
+  // Email Cleanup Operations
+  async cleanupAllTasks() {
+    const response = await this.client.delete('/api/v1/email/cleanup/tasks');
+    return response.data;
+  }
+
+  async cleanupProcessingHistory() {
+    const response = await this.client.delete('/api/v1/email/cleanup/processing-history');
+    return response.data;
+  }
+
+  async completeCleanupReset() {
+    const response = await this.client.delete('/api/v1/email/cleanup/complete-reset');
     return response.data;
   }
 
@@ -2082,11 +2124,88 @@ class ApiClient {
   }
 
   async updateEmailSettings(settings: {
-    processing_rules?: any;
-    notification_settings?: any;
-    automation_settings?: any;
+    server: string;
+    port: number;
+    username: string;
+    password: string;
+    use_ssl?: boolean;
+    mailbox?: string;
   }) {
     const response = await this.client.put('/api/v1/email/settings', settings);
+    return response.data;
+  }
+
+  async startEmailWorkflowWithSavedSettings(processingOptions?: any) {
+    const response = await this.client.post('/api/v1/email/workflows/start-with-saved-settings', {
+      processing_options: processingOptions || {}
+    });
+    return response.data;
+  }
+
+  async getDefaultEmailWorkflowSettings() {
+    const response = await this.client.get('/api/v1/email/workflow-settings/default');
+    return response.data;
+  }
+
+  async updateDefaultEmailWorkflowSettings(settings: {
+    settings_name?: string;
+    description?: string;
+    max_emails_per_workflow?: number;
+    importance_threshold?: number;
+    spam_threshold?: number;
+    default_task_priority?: string;
+    analysis_timeout_seconds?: number;
+    retry_attempts?: number;
+    retry_delay_seconds?: number;
+    process_attachments?: boolean;
+  }) {
+    const response = await this.client.put('/api/v1/email/workflow-settings/default', settings);
+    return response.data;
+  }
+
+  async createEmailWorkflowSettings(settings: {
+    settings_name: string;
+    description?: string;
+    max_emails_per_workflow?: number;
+    importance_threshold?: number;
+    spam_threshold?: number;
+    default_task_priority?: string;
+    analysis_timeout_seconds?: number;
+    retry_attempts?: number;
+    retry_delay_seconds?: number;
+    process_attachments?: boolean;
+  }) {
+    const response = await this.client.post('/api/v1/email/workflow-settings', settings);
+    return response.data;
+  }
+
+  // Workflow Management & Cleanup
+  async getWorkflowSummary() {
+    const response = await this.client.get('/api/v1/email/workflows/summary');
+    return response.data;
+  }
+
+  async cleanupStaleWorkflows(maxAgeHours?: number) {
+    const response = await this.client.post('/api/v1/email/workflows/cleanup-stale', {
+      max_age_hours: maxAgeHours || 24
+    });
+    return response.data;
+  }
+
+  async clearAllWorkflows(confirm?: boolean) {
+    const response = await this.client.delete('/api/v1/email/workflows/clear-all', {
+      params: confirm ? { confirm: true } : undefined
+    });
+    return response.data;
+  }
+
+  async deleteWorkflow(workflowId: string) {
+    const response = await this.client.delete(`/api/v1/email/workflows/${workflowId}`);
+    return response.data;
+  }
+
+  async forceCompleteWorkflow(workflowId: string) {
+    const response = await this.client.post(`/api/v1/email/workflows/${workflowId}/force-complete`);
     return response.data;
   }
 
@@ -2118,6 +2237,61 @@ class ApiClient {
     priority?: number;
   }) {
     const response = await this.client.post('/api/v1/email/settings/rules', ruleData);
+    return response.data;
+  }
+
+  // ==========================================
+  // MONITORING & OBSERVABILITY
+  // ==========================================
+
+  async getDetailedHealthCheck() {
+    const response = await this.client.get('/api/v1/monitoring/health/detailed');
+    return response.data;
+  }
+
+  async getServiceHealthCheck() {
+    const response = await this.client.get('/api/v1/monitoring/health/services');
+    return response.data;
+  }
+
+  async getWorkflowMetrics() {
+    const response = await this.client.get('/api/v1/monitoring/metrics/workflow');
+    return response.data;
+  }
+
+  async getStructuredLogs(params?: {
+    component?: string;
+    level?: string;
+    workflow_id?: string;
+    task_id?: string;
+    limit?: number;
+    offset?: number;
+    start_time?: string;
+    end_time?: string;
+  }) {
+    const response = await this.client.get('/api/v1/monitoring/logs/structured', { params });
+    return response.data;
+  }
+
+  async testAlertSystem(alertData: {
+    alert_type?: string;
+    message?: string;
+    severity?: string;
+  }) {
+    const response = await this.client.post('/api/v1/monitoring/alerts/test', alertData);
+    return response.data;
+  }
+
+  async getWorkflowPerformance(params?: {
+    workflow_type?: string;
+    time_range?: string;
+  }) {
+    const response = await this.client.get('/api/v1/monitoring/performance/workflow', { params });
+    return response.data;
+  }
+
+  async getDetailedSystemResources() {
+    const response = await this.client.get('/api/v1/monitoring/system/resources/detailed');
     return response.data;
   }
 

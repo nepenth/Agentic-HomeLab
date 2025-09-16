@@ -243,7 +243,7 @@ const ContentProcessing: React.FC = () => {
             Content Processing Hub
           </Typography>
           <Typography variant="body1" color="text.secondary">
-            Discover, process, and analyze content from diverse sources using AI-powered tools.
+            Discover, process, and analyze content from diverse sources using AI-powered tools. Configure content sources, set up automated discovery workflows, and leverage advanced AI processing for insights and analysis.
           </Typography>
         </Box>
         <Box sx={{ display: 'flex', gap: 2 }}>
@@ -347,6 +347,10 @@ const ContentProcessing: React.FC = () => {
             Content Sources
           </Typography>
 
+          <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>
+            Configure and manage different types of content sources. Each source type has specific configuration options and processing capabilities.
+          </Typography>
+
           <Grid container spacing={2}>
             {contentSources.map((source) => (
               <Grid item xs={12} sm={6} md={3} key={source.type}>
@@ -365,6 +369,12 @@ const ContentProcessing: React.FC = () => {
                     </Avatar>
                     <Typography variant="h6" sx={{ fontWeight: 600, mb: 1 }}>
                       {source.name}
+                    </Typography>
+                    <Typography variant="body2" color="text.secondary" sx={{ mb: 2, minHeight: 40 }}>
+                      {source.type === 'web' && 'RSS feeds, news sites, and web content aggregation'}
+                      {source.type === 'social' && 'Twitter, Reddit, and social media monitoring'}
+                      {source.type === 'communication' && 'Email, Slack, and messaging platform integration'}
+                      {source.type === 'filesystem' && 'Local files, documents, and file system scanning'}
                     </Typography>
                     <Chip
                       label={source.active ? 'Active' : 'Inactive'}

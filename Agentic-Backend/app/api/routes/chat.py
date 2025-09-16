@@ -112,14 +112,19 @@ async def create_chat_session(
         except Exception as e:
             logger.warning(f"Could not validate model availability: {e}")
 
-        chat_service = ChatService(db)
-        session = await chat_service.create_session(
+        # Temporarily simplify to test basic database operations
+        from app.db.models.chat_session import ChatSession
+        session = ChatSession(
             session_type=session_data.session_type,
-            model_name=session_data.model_name,
             user_id=session_data.user_id,
+            model_name=session_data.model_name,
             title=session_data.title,
-            config=session_data.config
+            config=session_data.config or {}
         )
+
+        db.add(session)
+        await db.commit()
+        await db.refresh(session)
 
         return ChatSessionResponse(**session.to_dict())
 
@@ -200,14 +205,34 @@ async def get_chat_messages(
 ):
     """Get messages for a chat session."""
     try:
-        chat_service = ChatService(db)
-        messages = await chat_service.get_messages(
-            session_id=session_id,
-            limit=limit,
-            offset=offset
-        )
+        from app.db.models.chat_session import ChatMessage
+        from sqlalchemy import select
 
-        return [ChatMessageResponse(**message.to_dict()) for message in messages]
+        # Get messages for the session
+        result = await db.execute(
+            select(ChatMessage)
+            .where(ChatMessage.session_id == session_id)
+            .order_by(ChatMessage.created_at)
+            .limit(limit)
+            .offset(offset)
+        )
+        messages = result.scalars().all()
+
+        # Convert to response format
+        response = []
+        for message in messages:
+            response.append(ChatMessageResponse(
+                id=str(message.id),
+                session_id=str(message.session_id),
+                role=message.role,
+                content=message.content,
+                message_type=message.message_type,
+                metadata=message.message_metadata or {},
+                token_count=message.token_count,
+                created_at=message.created_at.isoformat() if message.created_at else None
+            ))
+
+        return response
 
     except Exception as e:
         logger.error(f"Failed to get messages for session {session_id}: {e}")
@@ -220,31 +245,54 @@ async def get_chat_messages(
 @router.post("/sessions/{session_id}/messages", response_model=SendMessageResponse, dependencies=[Depends(verify_api_key)])
 async def send_chat_message(
     session_id: UUID,
-    message_data: SendMessageRequest,
-    db: AsyncSession = Depends(get_db_session)
+    message_data: SendMessageRequest
 ):
     """Send a message to a chat session and get AI response."""
+    sync_chat_service = None
     try:
-        chat_service = ChatService(db)
-        result = await chat_service.send_message(
+        # Use synchronous chat service to avoid async context issues
+        from app.services.chat_service import SyncChatService
+        sync_chat_service = SyncChatService()
+
+        # Send message and get response
+        result = sync_chat_service.send_message_sync(
             session_id=session_id,
-            user_message=message_data.message,
-            model_name=message_data.model_name
+            user_message=message_data.message
         )
 
-        return SendMessageResponse(**result)
-
-    except ValueError as e:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=str(e)
+        # Convert performance metrics to response format
+        metrics = result["performance_metrics"]
+        performance_metrics = PerformanceMetrics(
+            response_time_seconds=metrics.get("response_time_seconds", 0.0),
+            load_time_seconds=metrics.get("load_time_seconds", 0.0),
+            prompt_eval_time_seconds=metrics.get("prompt_eval_time_seconds", 0.0),
+            generation_time_seconds=metrics.get("generation_time_seconds", 0.0),
+            prompt_tokens=metrics.get("prompt_tokens", 0),
+            response_tokens=metrics.get("response_tokens", 0),
+            total_tokens=metrics.get("total_tokens", 0),
+            tokens_per_second=metrics.get("tokens_per_second", 0.0),
+            context_length_chars=metrics.get("context_length_chars", 0),
+            model_name=metrics.get("model_name", result["model"]),
+            timestamp=metrics.get("timestamp", datetime.utcnow().isoformat())
         )
+
+        return SendMessageResponse(
+            session_id=str(session_id),
+            response=result["response"],
+            model=result["model"],
+            performance_metrics=performance_metrics
+        )
+
     except Exception as e:
         logger.error(f"Failed to send message to session {session_id}: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to process chat message"
+            detail=f"Failed to process chat message: {str(e)}"
         )
+    finally:
+        # Clean up sync service
+        if sync_chat_service:
+            sync_chat_service.close()
 
 
 @router.put("/sessions/{session_id}/status", dependencies=[Depends(verify_api_key)])

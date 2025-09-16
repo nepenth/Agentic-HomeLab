@@ -2,7 +2,7 @@ from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Optional
-from app.db.database import get_async_session
+from app.db.database import get_async_session, session_factory
 from app.config import settings
 from app.utils.auth import verify_token, get_user_by_username
 from app.db.models.user import User
@@ -11,9 +11,23 @@ security = HTTPBearer(auto_error=False)
 
 
 async def get_db_session() -> AsyncSession:
-    """Dependency to get database session."""
-    async for session in get_async_session():
+    """
+    Modern async database session dependency.
+    
+    This implementation uses the optimized session factory and ensures
+    proper async context handling to prevent greenlet spawn errors.
+    """
+    session = session_factory()
+    try:
+        # Establish connection in async context
+        await session.connection()
         yield session
+        # Commit is handled by the session lifecycle
+    except Exception as e:
+        await session.rollback()
+        raise
+    finally:
+        await session.close()
 
 
 async def verify_api_key(credentials: Optional[HTTPAuthorizationCredentials] = Depends(security)) -> bool:
@@ -59,6 +73,10 @@ async def get_current_user(
     user = await get_user_by_username(db, username=username)
     if user is None:
         raise credentials_exception
+
+    # Eagerly load all user attributes to prevent lazy loading issues
+    # This ensures all attributes are available without additional async queries
+    await db.refresh(user)
     
     if not user.is_active:
         raise HTTPException(

@@ -629,7 +629,7 @@ const SystemHealth: React.FC = () => {
           </Card>
         </Grid>
 
-        <Grid item xs={12} md={3}>
+        <Grid item xs={12} sm={6} md={3}>
           <Card elevation={0}>
             <CardContent>
               {httpLoading ? (

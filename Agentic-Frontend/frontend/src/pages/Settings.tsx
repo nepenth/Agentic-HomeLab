@@ -23,6 +23,7 @@ import {
   Notifications,
   Palette,
   Save,
+  Timer,
 } from '@mui/icons-material';
 import { useAuth } from '../hooks/useAuth';
 import { useSelector, useDispatch } from 'react-redux';
@@ -36,25 +37,26 @@ const Settings: React.FC = () => {
   const { theme } = useSelector((state: RootState) => state.ui);
   
   const [settings, setSettings] = useState({
-    // Profile settings
-    username: user?.username || '',
-    email: user?.email || '',
-    
-    // Notification settings
-    emailNotifications: true,
-    pushNotifications: true,
-    weeklyReports: true,
-    taskCompletionAlerts: true,
-    
-    // UI settings
-    darkMode: theme === 'dark',
-    compactMode: false,
-    showTooltips: true,
-    
-    // Security settings
-    twoFactorEnabled: false,
-    sessionTimeout: 30,
-  });
+   // Profile settings
+   username: user?.username || '',
+   email: user?.email || '',
+
+   // Notification settings
+   emailNotifications: true,
+   pushNotifications: true,
+   weeklyReports: true,
+   taskCompletionAlerts: true,
+
+   // UI settings
+   darkMode: theme === 'dark',
+   compactMode: false,
+   showTooltips: true,
+
+   // Security settings
+   twoFactorEnabled: false,
+   sessionTimeout: 30,
+
+ });
 
   const [saveMessage, setSaveMessage] = useState('');
   const [changePasswordOpen, setChangePasswordOpen] = useState(false);
@@ -68,10 +70,27 @@ const Settings: React.FC = () => {
     }
   };
 
-  const handleSave = () => {
-    // In a real app, this would make an API call to save settings
-    setSaveMessage('Settings saved successfully!');
-    setTimeout(() => setSaveMessage(''), 3000);
+  const handleSave = async () => {
+    try {
+      // Make API call to save profile settings
+      await fetch('/api/v1/auth/profile', {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          username: settings.username,
+          email: settings.email,
+        }),
+      });
+
+      setSaveMessage('Settings saved successfully!');
+      setTimeout(() => setSaveMessage(''), 3000);
+    } catch (error) {
+      console.error('Failed to save settings:', error);
+      setSaveMessage('Failed to save settings. Please try again.');
+      setTimeout(() => setSaveMessage(''), 3000);
+    }
   };
 
   const handlePasswordChangeSuccess = () => {
@@ -343,6 +362,7 @@ const Settings: React.FC = () => {
           </Card>
         </Grid>
 
+
         {/* System Information */}
         <Grid item xs={12}>
           <Paper elevation={0} sx={{ p: 3, backgroundColor: 'grey.50' }}>
@@ -371,7 +391,7 @@ const Settings: React.FC = () => {
                   Environment
                 </Typography>
                 <Typography variant="body1" sx={{ fontWeight: 500 }}>
-                  Development
+                  Production
                 </Typography>
               </Grid>
               <Grid item xs={12} sm={6} md={3}>

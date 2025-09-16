@@ -692,7 +692,7 @@ const Dashboard: React.FC = () => {
                 variant="contained"
                 startIcon={<Email />}
                 onClick={() => navigate('/workflows/email-assistant')}
-                disabled
+                // disabled
               >
                 Email Assistant
               </Button>

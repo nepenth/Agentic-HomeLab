@@ -25,5 +25,8 @@ class User(Base):
     email_use_ssl = Column(Boolean, default=True, nullable=True)
     email_mailbox = Column(String(50), default="INBOX", nullable=True)
 
+    # Relationships
+    processed_emails = relationship("ProcessedEmail", back_populates="user")
+
     def __repr__(self):
         return f"<User(id={self.id}, username='{self.username}', email='{self.email}')>"

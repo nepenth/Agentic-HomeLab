@@ -39,7 +39,7 @@ import Collaboration from './pages/Collaboration';
 import UserManagement from './pages/UserManagement';
 
 // Workflow modules
-import EmailAssistant from './modules/email-assistant/EmailAssistant';
+import EmailAssistant from './pages/EmailAssistant';
 import DocumentAnalyzer from './modules/document-analyzer/DocumentAnalyzer';
 
 // Knowledge Base
