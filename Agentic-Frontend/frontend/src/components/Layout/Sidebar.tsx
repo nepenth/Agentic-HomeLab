@@ -449,7 +449,7 @@ const Sidebar: React.FC<SidebarProps> = ({ drawerWidth = 280 }) => {
               {user?.username || 'User'}
             </Typography>
             <Typography variant="caption" color="text.secondary">
-              {user?.email || 'Authenticated'}
+              {user?.email || 'user@example.com'}
             </Typography>
           </Box>
         </Box>

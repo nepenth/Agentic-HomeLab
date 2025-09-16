@@ -88,9 +88,11 @@ class EmailAnalysisService:
     def __init__(self):
         self.logger = get_logger("email_analysis_service")
 
-        # Analysis configuration
-        self.importance_threshold = 0.7
+        # Analysis configuration - More lenient thresholds for better task generation
+        self.importance_threshold = 0.4  # Lowered from 0.7 to capture more actionable emails
         self.spam_threshold = 0.8
+        self.high_importance_threshold = 0.7  # For high-priority tasks
+        self.medium_importance_threshold = 0.5  # For medium-priority tasks
         self.urgency_keywords = {
             "urgent": 1.0, "asap": 0.9, "immediate": 0.9, "emergency": 1.0,
             "deadline": 0.8, "critical": 0.9, "important": 0.7, "priority": 0.8
@@ -153,8 +155,10 @@ class EmailAnalysisService:
             # Calculate urgency level
             urgency_level = self._calculate_urgency_level(importance_score, email_content, metadata)
 
-            # Determine if action is required
-            action_required = importance_score >= self.importance_threshold and spam_probability < self.spam_threshold
+            # Determine if action is required with more nuanced logic
+            action_required = self._determine_action_required(
+                importance_score, spam_probability, categories, urgency_level, attachment_analysis
+            )
 
             # Generate suggested actions
             suggested_actions = self._generate_suggested_actions(
@@ -643,6 +647,47 @@ class EmailAnalysisService:
 
         return actions[:3]  # Limit to top 3 actions
 
+    def _determine_action_required(self, importance_score: float, spam_probability: float, 
+                                 categories: List[str], urgency_level: str, 
+                                 attachment_analysis: Optional[Dict[str, Any]]) -> bool:
+        """
+        Determine if action is required using intelligent multi-factor analysis.
+        
+        This method creates a more nuanced approach to task creation:
+        - Always create tasks for high-importance emails (>= 0.7)
+        - Create tasks for medium-importance emails (>= 0.5) with additional criteria
+        - Create tasks for lower-importance emails if they meet specific conditions
+        """
+        # Skip obvious spam
+        if spam_probability >= self.spam_threshold:
+            return False
+            
+        # Always create tasks for high-importance emails
+        if importance_score >= self.high_importance_threshold:
+            return True
+            
+        # For medium importance emails, check additional criteria
+        if importance_score >= self.medium_importance_threshold:
+            # Create tasks if urgent or from specific categories
+            if urgency_level in ["high", "urgent"]:
+                return True
+            if any(cat in ["work/business", "finance", "personal/important"] for cat in categories):
+                return True
+            if attachment_analysis and attachment_analysis.get("important_attachments"):
+                return True
+                
+        # For basic importance threshold emails, create simpler tasks
+        if importance_score >= self.importance_threshold:
+            # Create review tasks for potentially actionable emails
+            if urgency_level in ["medium", "high", "urgent"]:
+                return True
+            if any(cat in ["work/business", "finance"] for cat in categories):
+                return True
+            # Create tasks for emails with certain keywords that might need attention
+            return True  # Default to creating tasks for emails that pass basic threshold
+            
+        return False
+
     def get_stats(self) -> Dict[str, Any]:
         """Get service statistics."""
         return {
@@ -656,3 +701,253 @@ class EmailAnalysisService:
 
 # Global instance
 email_analysis_service = EmailAnalysisService()
+
+
+class SyncEmailAnalysisService:
+    """Synchronous version of EmailAnalysisService for use in Celery tasks."""
+
+    def __init__(self, user_id: str = None):
+        from app.config import settings
+        self.async_service = EmailAnalysisService()
+        self.user_id = user_id
+        # Load settings from database if user_id provided, otherwise use defaults
+        self.analysis_timeout = self._get_analysis_timeout()
+        self.ollama_timeout = self._get_ollama_timeout()
+        self._current_loop = None
+
+    def _get_analysis_timeout(self) -> int:
+        """Get analysis timeout from database settings or use default."""
+        if not self.user_id:
+            from app.config import settings
+            return getattr(settings, 'email_workflow_analysis_timeout', 120)
+
+        try:
+            # Import here to avoid circular imports
+            from app.db.models.email_workflow import EmailWorkflowSettings
+            from sqlalchemy.ext.asyncio import AsyncSession
+            from app.db.database import get_db_session
+
+            # This is a synchronous context, so we need to be careful
+            # For now, return default and load dynamically when needed
+            return 120
+        except Exception:
+            from app.config import settings
+            return getattr(settings, 'email_workflow_analysis_timeout', 120)
+
+    def _get_ollama_timeout(self) -> int:
+        """Get Ollama timeout from database settings or use default."""
+        if not self.user_id:
+            from app.config import settings
+            return getattr(settings, 'email_workflow_ollama_timeout', 60)
+
+        try:
+            # Import here to avoid circular imports
+            from app.db.models.email_workflow import EmailWorkflowSettings
+            from sqlalchemy.ext.asyncio import AsyncSession
+            from app.db.database import get_db_session
+
+            # This is a synchronous context, so we need to be careful
+            # For now, return default and load dynamically when needed
+            return 60
+        except Exception:
+            from app.config import settings
+            return getattr(settings, 'email_workflow_ollama_timeout', 60)
+
+    def analyze_email(
+        self,
+        email_content: str,
+        email_metadata: Dict[str, Any],
+        attachments: Optional[List[Dict[str, Any]]] = None
+    ) -> EmailAnalysis:
+        """Synchronous wrapper for email analysis with improved error handling."""
+        import asyncio
+        import concurrent.futures
+
+        # Use ThreadPoolExecutor to run async code in a separate thread
+        # This prevents event loop conflicts in Celery multiprocessing environment
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(self._run_analysis_in_thread, email_content, email_metadata, attachments)
+            try:
+                # Use configurable timeout for the analysis
+                return future.result(timeout=self.analysis_timeout)
+            except concurrent.futures.TimeoutError:
+                logger.warning(f"Email analysis timed out after {self.analysis_timeout}s, falling back to rule-based analysis")
+                return self._fallback_analysis(email_content, email_metadata)
+            except Exception as e:
+                logger.error(f"Email analysis failed: {e}, falling back to rule-based analysis")
+                return self._fallback_analysis(email_content, email_metadata)
+
+    def _run_analysis_in_thread(
+        self,
+        email_content: str,
+        email_metadata: Dict[str, Any],
+        attachments: Optional[List[Dict[str, Any]]] = None
+    ) -> EmailAnalysis:
+        """Run analysis in a separate thread with its own event loop."""
+        import asyncio
+
+        # Create new event loop for this thread
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
+        try:
+            # Run the async analysis
+            return loop.run_until_complete(
+                self.async_service.analyze_email(email_content, email_metadata, attachments)
+            )
+        finally:
+            try:
+                loop.close()
+            except Exception:
+                pass  # Ignore cleanup errors
+
+    def _fallback_analysis(
+        self,
+        email_content: str,
+        email_metadata: Dict[str, Any]
+    ) -> EmailAnalysis:
+        """Fallback analysis using only rule-based methods when AI fails."""
+        import time
+        from datetime import datetime
+
+        start_time = time.time()
+
+        try:
+            # Extract basic metadata
+            metadata = self._extract_metadata_sync(email_metadata)
+
+            # Use rule-based scoring only
+            rule_score = self._calculate_rule_based_importance_sync(email_content, metadata)
+
+            # Basic categorization
+            categories = self._fallback_categorization_sync(email_content, metadata)
+
+            # Basic sender reputation
+            sender_reputation = 0.5
+
+            # Simple summary
+            content_summary = self._generate_simple_summary_sync(email_content)
+
+            # Basic topic extraction
+            key_topics = self._extract_nouns_as_topics_sync(email_content)
+
+            # Determine urgency and action requirement
+            urgency_level = "medium"
+            if rule_score >= 0.7:
+                urgency_level = "high"
+            elif rule_score >= 0.4:
+                urgency_level = "medium"
+            else:
+                urgency_level = "low"
+
+            action_required = rule_score >= 0.5
+
+            # Basic suggested actions
+            suggested_actions = []
+            if action_required:
+                suggested_actions.append("Review email content")
+                if urgency_level in ["high", "urgent"]:
+                    suggested_actions.append("Respond promptly")
+
+            processing_time = (time.time() - start_time) * 1000
+
+            return EmailAnalysis(
+                email_id=metadata.get("message_id", "unknown"),
+                importance_score=rule_score,
+                categories=categories,
+                urgency_level=urgency_level,
+                sender_reputation=sender_reputation,
+                content_summary=content_summary,
+                key_topics=key_topics,
+                action_required=action_required,
+                suggested_actions=suggested_actions,
+                processing_time_ms=processing_time
+            )
+
+        except Exception as e:
+            logger.error(f"Fallback analysis failed: {e}")
+            # Return minimal analysis
+            return EmailAnalysis(
+                email_id=email_metadata.get("message_id", "unknown"),
+                importance_score=0.5,
+                categories=["general"],
+                urgency_level="medium",
+                sender_reputation=0.5,
+                content_summary="Analysis failed - please review manually",
+                key_topics=[],
+                action_required=False,
+                suggested_actions=["Review manually"],
+                processing_time_ms=(time.time() - start_time) * 1000
+            )
+
+    def _extract_metadata_sync(self, email_metadata: Dict[str, Any]) -> Dict[str, Any]:
+        """Extract metadata synchronously."""
+        subject = email_metadata.get("subject", "")
+        sender = email_metadata.get("sender", "")
+        sender_domain = sender.split("@")[-1] if "@" in sender else ""
+
+        return {
+            "subject": subject,
+            "sender": sender,
+            "sender_domain": sender_domain,
+            "message_id": email_metadata.get("message_id", ""),
+            "has_attachments": email_metadata.get("has_attachments", False)
+        }
+
+    def _calculate_rule_based_importance_sync(self, content: str, metadata: Dict[str, Any]) -> float:
+        """Calculate importance using rule-based heuristics synchronously."""
+        score = 0.5
+
+        # Subject analysis
+        subject_lower = metadata.get("subject", "").lower()
+        if any(word in subject_lower for word in ["urgent", "important", "asap", "deadline"]):
+            score += 0.2
+
+        # Content analysis
+        content_lower = content.lower()
+        urgency_words = sum(1 for word in ["urgent", "asap", "deadline", "critical", "important"] if word in content_lower)
+        score += min(0.2, urgency_words * 0.05)
+
+        # Sender analysis
+        sender_domain = metadata.get("sender_domain", "")
+        if sender_domain in ["gmail.com", "outlook.com", "yahoo.com"]:
+            score -= 0.1
+
+        # Attachment bonus
+        if metadata.get("has_attachments", False):
+            score += 0.1
+
+        return max(0.0, min(1.0, score))
+
+    def _fallback_categorization_sync(self, content: str, metadata: Dict[str, Any]) -> List[str]:
+        """Basic categorization synchronously."""
+        categories = []
+        content_lower = content.lower()
+        subject_lower = metadata.get("subject", "").lower()
+
+        if any(word in content_lower for word in ["invoice", "payment", "billing", "receipt"]):
+            categories.append("finance")
+        if any(word in content_lower for word in ["meeting", "project", "deadline", "report"]):
+            categories.append("work")
+        if any(word in content_lower for word in ["friend", "family", "personal"]):
+            categories.append("personal")
+
+        return categories or ["general"]
+
+    def _generate_simple_summary_sync(self, content: str) -> str:
+        """Generate simple summary synchronously."""
+        # Take first 100 characters as simple summary
+        summary = content[:100].strip()
+        if len(content) > 100:
+            summary += "..."
+        return summary or "Email content summary"
+
+    def _extract_nouns_as_topics_sync(self, content: str) -> List[str]:
+        """Simple noun extraction synchronously."""
+        import re
+        words = re.findall(r'\b[A-Z][a-z]+\b', content)
+        return list(set(words))[:5] if words else ["general"]
+
+
+# Global sync instance for Celery tasks
+sync_email_analysis_service = SyncEmailAnalysisService()

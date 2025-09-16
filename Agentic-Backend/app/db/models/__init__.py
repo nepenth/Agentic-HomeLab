@@ -7,7 +7,7 @@ from .subscription import LogSubscription
 from .user import User
 from .agent_type import AgentType, DynamicTable, AgentBuilderSession, RegisteredTool, AgentDeletionLog
 from .secret import AgentSecret
-from .chat_session import ChatSession, ChatMessage
+from .chat_session import ChatSession, ChatMessage, UserChatPreferences, MessageType
 from .model_performance import ModelPerformanceMetrics, ModelUsageLog, ModelRegistry
 from .http_request_log import HttpRequestLog, HttpClientMetrics, HttpClientConfig
 from .content import (
@@ -45,6 +45,19 @@ from .integration_layer import (
     LoadBalancerStats,
     APIGatewayMetrics
 )
+from .processed_email import ProcessedEmail
+from .email_workflow import (
+    EmailWorkflow,
+    EmailAnalysisResult,
+    EmailTaskLink,
+    EmailFollowupSchedule,
+    EmailTemplate,
+    EmailWorkflowStats,
+    EmailWorkflowSettings,
+    EmailWorkflowLog,
+    EmailWorkflowStatus,
+    EmailWorkflowLogLevel
+)
 
 __all__ = [
     "Agent",
@@ -63,6 +76,8 @@ __all__ = [
     "AgentSecret",
     "ChatSession",
     "ChatMessage",
+    "UserChatPreferences",
+    "MessageType",
     "ModelPerformanceMetrics",
     "ModelUsageLog",
     "ModelRegistry",
@@ -98,4 +113,15 @@ __all__ = [
     "BackendServiceMetrics",
     "LoadBalancerStats",
     "APIGatewayMetrics",
+    "ProcessedEmail",
+    "EmailWorkflow",
+    "EmailAnalysisResult",
+    "EmailTaskLink",
+    "EmailFollowupSchedule",
+    "EmailTemplate",
+    "EmailWorkflowStats",
+    "EmailWorkflowSettings",
+    "EmailWorkflowLog",
+    "EmailWorkflowStatus",
+    "EmailWorkflowLogLevel",
 ]

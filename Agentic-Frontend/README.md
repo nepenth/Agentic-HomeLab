@@ -339,3 +339,39 @@ For questions or issues:
 ---
 
 **Built with ❤️ for the AI community**
+
+
+## Testing ##
+curl -X POST "https://whyland-ai.nakedsun.xyz:8443/api/v1/auth/login-json" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "username": "your-username",
+    "password": "your-password"
+  }'
+
+  Test Email Settings Update (replace TOKEN with the access_token from above):
+curl -X PUT "https://whyland-ai.nakedsun.xyz:8443/api/v1/email/settings" \
+  -H "Authorization: Bearer TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "server": "imap.gmail.com",
+    "port": 993,
+    "username": "test@example.com",
+    "password": "test-password",
+    "use_ssl": true,
+    "mailbox": "INBOX"
+  }'
+
+
+Test Workflow Settings Update:
+curl -X PUT "https://whyland-ai.nakedsun.xyz:8443/api/v1/email/workflow-settings/default" \
+  -H "Authorization: Bearer TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "settings_name": "Default Email Workflow Settings",
+    "analysis_timeout_seconds": 120,
+    "task_conversion_timeout_seconds": 60,
+    "ollama_request_timeout_seconds": 60,
+    "max_retries": 3,
+    "retry_delay_seconds": 1
+  }'

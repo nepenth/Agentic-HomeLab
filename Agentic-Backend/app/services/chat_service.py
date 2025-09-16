@@ -6,7 +6,7 @@ from datetime import datetime, timedelta
 import json
 
 from app.db.models.chat_session import ChatSession, ChatMessage
-from app.services.ollama_client import ollama_client
+from app.services.ollama_client import sync_ollama_client as ollama_client
 from app.services.prompt_templates import prompt_manager
 from app.utils.logging import get_logger
 
@@ -225,8 +225,8 @@ class ChatService:
             # Use specified model or session's model
             model = model_name or session.model_name
 
-            # Get AI response
-            response = await ollama_client.chat(
+            # Get AI response using synchronous client
+            response = ollama_client.chat(
                 messages=conversation,
                 model=model,
                 options=session.config.get("ollama_options", {})
@@ -446,6 +446,199 @@ class ChatService:
         except Exception as e:
             logger.error(f"Failed to get stats for session {session_id}: {e}")
             return {}
+
+
+class SyncChatService:
+    """Synchronous version of ChatService for contexts where async is problematic."""
+
+    def __init__(self):
+        from app.db.database import get_sync_session
+        self.db_session = get_sync_session()
+
+    def create_session_sync(self, session_type: str, model_name: str, user_id: Optional[str] = None, title: Optional[str] = None, config: Optional[Dict[str, Any]] = None):
+        """Create a new chat session synchronously."""
+        try:
+            from app.db.models.chat_session import ChatSession
+            session = ChatSession(
+                session_type=session_type,
+                user_id=user_id,
+                model_name=model_name,
+                title=title,
+                config=config or {}
+            )
+
+            self.db_session.add(session)
+            self.db_session.commit()
+            self.db_session.refresh(session)
+
+            # Add initial system message if template exists
+            system_prompt = prompt_manager.get_system_prompt(session_type)
+            if system_prompt:
+                self.add_message_sync(
+                    session_id=session.id,
+                    role="system",
+                    content=system_prompt,
+                    message_type="system"
+                )
+
+            return session
+
+        except Exception as e:
+            self.db_session.rollback()
+            raise
+
+    def add_message_sync(self, session_id, role: str, content: str, message_type: Optional[str] = None, metadata: Optional[Dict[str, Any]] = None):
+        """Add a message synchronously."""
+        try:
+            from app.db.models.chat_session import ChatMessage
+            message = ChatMessage(
+                session_id=session_id,
+                role=role,
+                content=content,
+                message_type=message_type,
+                metadata=metadata or {}
+            )
+
+            self.db_session.add(message)
+            self.db_session.commit()
+            self.db_session.refresh(message)
+
+            return message
+
+        except Exception as e:
+            self.db_session.rollback()
+            raise
+
+    def send_message_sync(self, session_id, user_message: str):
+        """Send a message synchronously."""
+        try:
+            from app.db.models.chat_session import ChatSession, ChatMessage
+            from app.services.ollama_client import sync_ollama_client
+
+            # Get session
+            session = self.db_session.query(ChatSession).filter(ChatSession.id == session_id).first()
+            if not session:
+                raise ValueError(f"Session {session_id} not found")
+
+            if not session.is_active:
+                raise ValueError(f"Session {session_id} is not active")
+
+            # Add user message
+            self.add_message_sync(
+                session_id=session_id,
+                role="user",
+                content=user_message,
+                message_type="user_input"
+            )
+
+            # Get conversation history
+            messages = self.db_session.query(ChatMessage).filter(ChatMessage.session_id == session_id).order_by(ChatMessage.created_at).all()
+            conversation = self._format_conversation_for_ollama(messages)
+
+            # Use specified model or session's model
+            model = session.model_name
+
+            # Get AI response using sync client
+            response = sync_ollama_client.chat(
+                messages=conversation,
+                model=model,
+                options=session.config.get("ollama_options", {}),
+                context_id=f"chat_session_{session_id}"
+            )
+
+            ai_response = response.get("message", {}).get("content", "")
+
+            # Extract comprehensive performance metrics
+            performance_metrics = self._extract_performance_metrics(response, conversation)
+
+            # Add AI response to session
+            self.add_message_sync(
+                session_id=session_id,
+                role="assistant",
+                content=ai_response,
+                message_type="ai_response",
+                metadata={
+                    "model": model,
+                    **performance_metrics
+                }
+            )
+
+            return {
+                "session_id": str(session_id),
+                "response": ai_response,
+                "model": model,
+                "performance_metrics": performance_metrics
+            }
+
+        except Exception as e:
+            # Add error message to session
+            try:
+                self.add_message_sync(
+                    session_id=session_id,
+                    role="assistant",
+                    content=f"I apologize, but I encountered an error: {str(e)}",
+                    message_type="error"
+                )
+            except:
+                pass  # Don't let error logging fail the main operation
+            raise
+
+    def _format_conversation_for_ollama(self, messages):
+        """Format chat messages for Ollama API."""
+        formatted = []
+
+        for msg in messages:
+            if msg.role in ["user", "assistant", "system"]:
+                formatted.append({
+                    "role": msg.role,
+                    "content": msg.content
+                })
+
+        return formatted
+
+    def _extract_performance_metrics(self, ollama_response: Dict[str, Any], conversation: List[Dict[str, str]]) -> Dict[str, Any]:
+        """Extract comprehensive performance metrics from Ollama response."""
+        metrics = {}
+
+        # Basic timing metrics (convert from nanoseconds to seconds)
+        total_duration = ollama_response.get("total_duration", 0) / 1e9
+        load_duration = ollama_response.get("load_duration", 0) / 1e9
+        prompt_eval_duration = ollama_response.get("prompt_eval_duration", 0) / 1e9
+        eval_duration = ollama_response.get("eval_duration", 0) / 1e9
+
+        # Token metrics
+        prompt_tokens = ollama_response.get("prompt_eval_count", 0)
+        response_tokens = ollama_response.get("eval_count", 0)
+        total_tokens = prompt_tokens + response_tokens
+
+        # Calculate tokens per second
+        tokens_per_second = 0.0
+        if eval_duration > 0:
+            tokens_per_second = response_tokens / eval_duration
+
+        # Context length (approximate from conversation)
+        context_length = sum(len(msg.get("content", "")) for msg in conversation)
+
+        metrics.update({
+            "response_time_seconds": round(total_duration, 3),
+            "load_time_seconds": round(load_duration, 3),
+            "prompt_eval_time_seconds": round(prompt_eval_duration, 3),
+            "generation_time_seconds": round(eval_duration, 3),
+            "prompt_tokens": prompt_tokens,
+            "response_tokens": response_tokens,
+            "total_tokens": total_tokens,
+            "tokens_per_second": round(tokens_per_second, 2),
+            "context_length_chars": context_length,
+            "model_name": ollama_response.get("model", ""),
+            "timestamp": datetime.utcnow().isoformat()
+        })
+
+        return metrics
+
+    def close(self):
+        """Close the database session."""
+        if self.db_session:
+            self.db_session.close()
 
 
 # Global instance (will be initialized with database session when needed)

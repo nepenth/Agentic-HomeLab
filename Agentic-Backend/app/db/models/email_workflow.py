@@ -5,7 +5,7 @@ This module defines additional database models specific to email workflow
 functionality, extending the existing content and task models.
 """
 
-from sqlalchemy import Column, Integer, String, Text, DateTime, Boolean, JSON, ForeignKey, Index
+from sqlalchemy import Column, Integer, String, Text, DateTime, Boolean, JSON, ForeignKey, Index, Float
 from sqlalchemy.dialects.postgresql import UUID, JSONB
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
@@ -22,6 +22,15 @@ class EmailWorkflowStatus(str, enum.Enum):
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
+
+
+class EmailWorkflowLogLevel(str, enum.Enum):
+    """Log levels for email workflow logging."""
+    DEBUG = "debug"
+    INFO = "info"
+    WARNING = "warning"
+    ERROR = "error"
+    CRITICAL = "critical"
 
 
 class EmailWorkflow(Base):
@@ -262,3 +271,151 @@ class EmailWorkflowStats(Base):
 
     def __repr__(self):
         return f"<EmailWorkflowStats(id={self.id}, user={self.user_id}, period={self.period_start} to {self.period_end})>"
+
+
+class EmailWorkflowSettings(Base):
+    """Model for storing user-configurable email workflow settings."""
+    __tablename__ = "email_workflow_settings"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    user_id = Column(String(200), nullable=False, index=True)
+
+    # Settings name and description
+    settings_name = Column(String(200), nullable=False)
+    description = Column(Text, nullable=True)
+
+    # Processing settings
+    max_emails_per_workflow = Column(Integer, default=50, nullable=False)
+    importance_threshold = Column(Float, default=0.7, nullable=False)  # Use Float instead of JSON
+    spam_threshold = Column(Float, default=0.8, nullable=False)
+    default_task_priority = Column(String(20), default="medium", nullable=False)
+
+    # Timeout settings (in seconds)
+    analysis_timeout_seconds = Column(Integer, default=120, nullable=False)
+    task_conversion_timeout_seconds = Column(Integer, default=60, nullable=False)
+    ollama_request_timeout_seconds = Column(Integer, default=60, nullable=False)
+
+    # Retry settings
+    max_retries = Column(Integer, default=3, nullable=False)
+    retry_delay_seconds = Column(Integer, default=1, nullable=False)
+
+    # Automation settings
+    create_tasks_automatically = Column(Boolean, default=True, nullable=False)
+    schedule_followups = Column(Boolean, default=True, nullable=False)
+    process_attachments = Column(Boolean, default=True, nullable=False)
+
+    # Metadata
+    is_default = Column(Boolean, default=False, nullable=False)
+    is_active = Column(Boolean, default=True, nullable=False)
+    usage_count = Column(Integer, default=0, nullable=False)
+
+    # Audit fields
+    created_at = Column(DateTime, default=func.now(), nullable=False)
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now(), nullable=False)
+
+    # Indexes for performance
+    __table_args__ = (
+        Index('idx_email_workflow_settings_user_name', 'user_id', 'settings_name'),
+        Index('idx_email_workflow_settings_default', 'user_id', 'is_default'),
+        Index('idx_email_workflow_settings_active', 'user_id', 'is_active'),
+    )
+
+    def __repr__(self):
+        return f"<EmailWorkflowSettings(id={self.id}, user={self.user_id}, name={self.settings_name})>"
+
+    def to_dict(self, load_attrs=True):
+        """
+        Convert model to dictionary with async-safe attribute access.
+        
+        Args:
+            load_attrs: If True, loads all attributes immediately to prevent lazy loading issues
+        """
+        if load_attrs:
+            # Force loading of all attributes to prevent lazy loading issues in async context
+            _ = (
+                self.id, self.user_id, self.settings_name, self.description,
+                self.max_emails_per_workflow, self.importance_threshold, self.spam_threshold,
+                self.default_task_priority, self.analysis_timeout_seconds,
+                self.task_conversion_timeout_seconds, self.ollama_request_timeout_seconds,
+                self.max_retries, self.retry_delay_seconds, self.create_tasks_automatically,
+                self.schedule_followups, self.process_attachments, self.is_default,
+                self.is_active, self.usage_count, self.created_at, self.updated_at
+            )
+        
+        return {
+            "id": str(self.id),
+            "user_id": str(self.user_id),
+            "settings_name": str(self.settings_name),
+            "description": self.description,
+            "max_emails_per_workflow": int(self.max_emails_per_workflow),
+            "importance_threshold": float(self.importance_threshold),
+            "spam_threshold": float(self.spam_threshold),
+            "default_task_priority": str(self.default_task_priority),
+            "analysis_timeout_seconds": int(self.analysis_timeout_seconds),
+            "task_conversion_timeout_seconds": int(self.task_conversion_timeout_seconds),
+            "ollama_request_timeout_seconds": int(self.ollama_request_timeout_seconds),
+            "max_retries": int(self.max_retries),
+            "retry_delay_seconds": int(self.retry_delay_seconds),
+            "create_tasks_automatically": bool(self.create_tasks_automatically),
+            "schedule_followups": bool(self.schedule_followups),
+            "process_attachments": bool(self.process_attachments),
+            "is_default": bool(self.is_default),
+            "is_active": bool(self.is_active),
+            "usage_count": int(self.usage_count),
+            "created_at": str(self.created_at) if self.created_at else None,
+            "updated_at": str(self.updated_at) if self.updated_at else None,
+        }
+    
+    @classmethod
+    def get_column_names(cls):
+        """Get all column names for this model."""
+        return [column.name for column in cls.__table__.columns]
+
+
+class EmailWorkflowLog(Base):
+    """Model for storing email workflow execution logs."""
+    __tablename__ = "email_workflow_logs"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    workflow_id = Column(UUID(as_uuid=True), ForeignKey('email_workflows.id'), nullable=False, index=True)
+    user_id = Column(String(200), nullable=False, index=True)
+
+    # Log details
+    level = Column(String(20), nullable=False, default="info", index=True)
+    message = Column(Text, nullable=False)
+    context = Column(JSONB, nullable=True, default=dict)
+
+    # Workflow phase information
+    workflow_phase = Column(String(100), nullable=True)
+    email_count = Column(Integer, nullable=True)
+    task_count = Column(Integer, nullable=True)
+
+    # Timing
+    timestamp = Column(DateTime, default=func.now(), nullable=False, index=True)
+
+    # Relationships
+    workflow = relationship("EmailWorkflow")
+
+    # Indexes for performance
+    __table_args__ = (
+        Index('idx_email_workflow_logs_workflow_timestamp', 'workflow_id', 'timestamp'),
+        Index('idx_email_workflow_logs_user_timestamp', 'user_id', 'timestamp'),
+        Index('idx_email_workflow_logs_level_timestamp', 'level', 'timestamp'),
+    )
+
+    def __repr__(self):
+        return f"<EmailWorkflowLog(id={self.id}, workflow={self.workflow_id}, level={self.level}, phase={self.workflow_phase})>"
+
+    def to_dict(self):
+        return {
+            "id": str(self.id),
+            "workflow_id": str(self.workflow_id),
+            "user_id": self.user_id,
+            "level": self.level,
+            "message": self.message,
+            "context": self.context,
+            "workflow_phase": self.workflow_phase,
+            "email_count": self.email_count,
+            "task_count": self.task_count,
+            "timestamp": self.timestamp.isoformat() if self.timestamp else None,
+        }

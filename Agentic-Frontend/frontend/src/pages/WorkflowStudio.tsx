@@ -212,6 +212,7 @@ const WorkflowStudio: React.FC = () => {
     queryFn: () => apiClient.getWorkflowDefinitions(),
     retry: 3,
     retryDelay: (attemptIndex) => Math.min(1000 * 2 ** attemptIndex, 30000),
+    select: (data) => Array.isArray(data) ? data : [], // Ensure data is always an array
   });
 
   // Workflow Executions Query
@@ -287,25 +288,40 @@ const WorkflowStudio: React.FC = () => {
 
   // WebSocket subscription for real-time workflow updates
   React.useEffect(() => {
-    const unsubscribe = webSocketService.subscribeToWorkflowUpdates(
-      (update) => {
-        console.log('Workflow update received:', update);
+    let unsubscribe: (() => void) | undefined;
 
-        // Refresh workflow executions when we get updates
-        if (selectedWorkflow && update.workflow_id === selectedWorkflow.id) {
-          refetchExecutions();
+    try {
+      unsubscribe = webSocketService.subscribeToWorkflowUpdates(
+        (update) => {
+          console.log('Workflow update received:', update);
+
+          // Refresh workflow executions when we get updates
+          if (selectedWorkflow && update?.workflow_id === selectedWorkflow.id) {
+            refetchExecutions();
+          }
+
+          // Refresh workflows list for any workflow updates
+          refetchWorkflows();
+        },
+        {
+          workflow_id: selectedWorkflow?.id,
+          status: undefined // Listen to all status updates
         }
+      );
+    } catch (error) {
+      console.warn('WebSocket subscription failed:', error);
+      // Continue without WebSocket functionality
+    }
 
-        // Refresh workflows list for any workflow updates
-        refetchWorkflows();
-      },
-      {
-        workflow_id: selectedWorkflow?.id,
-        status: undefined // Listen to all status updates
+    return () => {
+      if (unsubscribe) {
+        try {
+          unsubscribe();
+        } catch (error) {
+          console.warn('WebSocket unsubscribe failed:', error);
+        }
       }
-    );
-
-    return unsubscribe;
+    };
   }, [selectedWorkflow, refetchExecutions, refetchWorkflows]);
 
   const handleAddStep = (stepType: string) => {

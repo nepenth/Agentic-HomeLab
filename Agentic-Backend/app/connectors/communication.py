@@ -30,6 +30,30 @@ from app.utils.logging import get_logger
 logger = get_logger("communication_connector")
 
 
+class SyncEmailConnector:
+    """Synchronous wrapper for EmailConnector for use in Celery tasks."""
+
+    def __init__(self, config: ConnectorConfig):
+        self.async_connector = EmailConnector(config)
+
+    def discover(self, source_config: Dict[str, Any]) -> List[ContentItem]:
+        """Synchronous wrapper for email discovery."""
+        import asyncio
+
+        # Create a new event loop for this thread
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+
+        try:
+            # Run the async discovery in the new event loop
+            result = loop.run_until_complete(
+                self.async_connector.discover(source_config)
+            )
+            return result
+        finally:
+            loop.close()
+
+
 class EmailConnector(ContentConnector):
     """Connector for email using IMAP."""
 
@@ -134,6 +158,7 @@ class EmailConnector(ContentConnector):
             sender = self._decode_header(email_message.get("From", ""))
             to = self._decode_header(email_message.get("To", ""))
             date_str = email_message.get("Date", "")
+            message_id = email_message.get("Message-ID", "").strip("<>")  # Extract Message-ID header
 
             # Parse date
             try:
@@ -143,9 +168,12 @@ class EmailConnector(ContentConnector):
             except:
                 received_date = datetime.now()
 
-            # Create unique ID
+            # Create unique ID - prefer Message-ID if available, fallback to IMAP ID
             msg_id_str = msg_id.decode()
-            email_id = f"{mailbox}_{msg_id_str}"
+            if message_id:
+                email_id = f"email_{hashlib.sha256(message_id.encode()).hexdigest()[:16]}"
+            else:
+                email_id = f"{mailbox}_{msg_id_str}"
 
             # Extract preview text
             preview = ""
@@ -172,6 +200,8 @@ class EmailConnector(ContentConnector):
                     "recipient": to,
                     "mailbox": mailbox,
                     "imap_id": msg_id_str,
+                    "message_id": message_id,  # Include Message-ID for deduplication
+                    "subject": subject,  # Include for fingerprinting
                     "has_attachments": self._has_attachments(email_message),
                     "content_type": email_message.get_content_type(),
                     "size_bytes": len(email_message.as_bytes())

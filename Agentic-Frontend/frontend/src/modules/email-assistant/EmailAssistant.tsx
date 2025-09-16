@@ -36,6 +36,18 @@ import {
   InputAdornment,
   Switch,
   FormControlLabel,
+  Skeleton,
+  Stepper,
+  Step,
+  StepLabel,
+  StepContent,
+  Accordion,
+  AccordionSummary,
+  AccordionDetails,
+  AlertTitle,
+  Fade,
+  Slide,
+  Backdrop,
 } from '@mui/material';
 import {
   Email,
@@ -76,6 +88,7 @@ import {
   AccessTime,
   ExpandMore,
   ExpandLess,
+  BugReport,
 } from '@mui/icons-material';
 import dayjs from 'dayjs';
 import { apiClient } from '../../services/api';
@@ -107,6 +120,7 @@ const EmailAssistant: React.FC = () => {
   const [dashboardStats, setDashboardStats] = useState<any>(null);
   const [workflows, setWorkflows] = useState<any[]>([]);
   const [tasks, setTasks] = useState<any[]>([]);
+  const [logs, setLogs] = useState<any[]>([]);
   const [searchResults, setSearchResults] = useState<any[]>([]);
   const [chatMessages, setChatMessages] = useState<any[]>([]);
   const [analytics, setAnalytics] = useState<any>(null);
@@ -124,6 +138,7 @@ const EmailAssistant: React.FC = () => {
   const [notificationSettingsDialog, setNotificationSettingsDialog] = useState(false);
   const [savedSearchesDialog, setSavedSearchesDialog] = useState(false);
   const [settingsDialog, setSettingsDialog] = useState(false);
+  const [emailSettingsDialog, setEmailSettingsDialog] = useState(false);
   const [taskTemplatesDialog, setTaskTemplatesDialog] = useState(false);
   const [processingRulesDialog, setProcessingRulesDialog] = useState(false);
 
@@ -141,6 +156,12 @@ const EmailAssistant: React.FC = () => {
     spam_threshold: 0.8,
     create_tasks: true,
     schedule_followups: true,
+    // Timeout settings
+    analysis_timeout: 120,
+    task_timeout: 60,
+    ollama_timeout: 60,
+    max_retries: 3,
+    retry_delay: 1,
   });
 
   const [searchForm, setSearchForm] = useState({
@@ -205,51 +226,240 @@ const EmailAssistant: React.FC = () => {
   const [selectedTask, setSelectedTask] = useState<any>(null);
   const [selectedWorkflow, setSelectedWorkflow] = useState<any>(null);
 
+  // Email settings
+  const [savedEmailSettings, setSavedEmailSettings] = useState<any>(null);
+  const [useSavedSettings, setUseSavedSettings] = useState(false);
+
+  // Email settings form
+  const [emailSettingsForm, setEmailSettingsForm] = useState({
+    server: '',
+    port: 993,
+    username: '',
+    password: '',
+    use_ssl: true,
+    mailbox: 'INBOX',
+  });
+
   // WebSocket for real-time updates
   const [wsConnected, setWsConnected] = useState(false);
+  const [connectionStatus, setConnectionStatus] = useState<'connecting' | 'connected' | 'disconnected' | 'error'>('disconnected');
+  const [useSSE, setUseSSE] = useState(false); // Fallback to SSE if WebSocket fails
 
-  // Load initial data
+  // Enhanced loading states
+  const [loadingStates, setLoadingStates] = useState({
+    dashboard: false,
+    workflows: false,
+    tasks: false,
+    logs: false,
+    notifications: false,
+    emailSettings: false,
+  });
+
+  // Enhanced error states with recovery options
+  const [errorStates, setErrorStates] = useState({
+    dashboard: null as string | null,
+    workflows: null as string | null,
+    tasks: null as string | null,
+    logs: null as string | null,
+    notifications: null as string | null,
+    emailSettings: null as string | null,
+  });
+
+  // Progress tracking
+  const [workflowProgress, setWorkflowProgress] = useState<Map<string, any>>(new Map());
+  const [taskProgress, setTaskProgress] = useState<Map<string, any>>(new Map());
+
+  // Retry mechanisms
+  const [retryCounts, setRetryCounts] = useState({
+    dashboard: 0,
+    workflows: 0,
+    tasks: 0,
+    logs: 0,
+    notifications: 0,
+    emailSettings: 0,
+  });
+
+  // Auto-refresh intervals
+  const [autoRefreshEnabled, setAutoRefreshEnabled] = useState(true);
+  const [refreshIntervals, setRefreshIntervals] = useState({
+    workflows: 5000, // 5 seconds for active workflows
+    dashboard: 30000, // 30 seconds for dashboard
+    tasks: 10000, // 10 seconds for tasks
+  });
+
+  // Enhanced connection management with SSE fallback
   useEffect(() => {
-    loadDashboardData();
-    loadWorkflows();
-    loadTasks();
-    loadNotifications();
-
-    // Connect to WebSocket for real-time updates
-    const token = apiClient.getAuthToken();
-    webSocketService.connect('email/progress', token || undefined);
-
-    // Set up message handlers
-    webSocketService.on('workflow_progress', updateWorkflowProgress);
-    webSocketService.on('task_update', updateTaskStatus);
-    webSocketService.on('notification', addNotification);
-
-    // Connection status monitoring
-    webSocketService.onConnectionStatus((status) => {
-      setWsConnected(status === 'connected');
-    });
+    initializeConnection();
 
     return () => {
       webSocketService.off('workflow_progress', updateWorkflowProgress);
       webSocketService.off('task_update', updateTaskStatus);
       webSocketService.off('notification', addNotification);
       webSocketService.disconnect();
+      // Clean up SSE if active
+      if (eventSourceRef.current) {
+        eventSourceRef.current.close();
+      }
     };
   }, []);
 
-  const loadDashboardData = async () => {
+  // Auto-refresh workflows when there are active workflows
+  useEffect(() => {
+    if (!autoRefreshEnabled) return;
+
+    const hasActiveWorkflows = workflows.some(wf => wf.status === 'running' || wf.status === 'processing');
+    const hasActiveTasks = tasks.some(task => task.status === 'running' || task.status === 'pending');
+
+    let workflowInterval: NodeJS.Timeout | null = null;
+    let taskInterval: NodeJS.Timeout | null = null;
+
+    if (hasActiveWorkflows) {
+      workflowInterval = setInterval(() => {
+        loadWorkflows();
+      }, refreshIntervals.workflows);
+    }
+
+    if (hasActiveTasks) {
+      taskInterval = setInterval(() => {
+        loadTasks();
+      }, refreshIntervals.tasks);
+    }
+
+    return () => {
+      if (workflowInterval) clearInterval(workflowInterval);
+      if (taskInterval) clearInterval(taskInterval);
+    };
+  }, [workflows, tasks, autoRefreshEnabled, refreshIntervals]);
+
+  // Auto-refresh dashboard stats
+  useEffect(() => {
+    if (!autoRefreshEnabled) return;
+
+    const dashboardInterval = setInterval(() => {
+      loadDashboardData();
+    }, refreshIntervals.dashboard);
+
+    return () => clearInterval(dashboardInterval);
+  }, [autoRefreshEnabled, refreshIntervals.dashboard]);
+
+  // SSE fallback reference
+  const eventSourceRef = React.useRef<EventSource | null>(null);
+
+  const initializeConnection = async () => {
+    const token = apiClient.getAuthToken();
+
     try {
-      setLoading(true);
+      // Try WebSocket first
+      webSocketService.connect('email/progress', token || undefined);
+
+      // Set up message handlers
+      webSocketService.on('workflow_progress', updateWorkflowProgress);
+      webSocketService.on('task_update', updateTaskStatus);
+      webSocketService.on('notification', addNotification);
+
+      // Enhanced connection status monitoring
+      webSocketService.onConnectionStatus((status, error) => {
+        setConnectionStatus(status);
+        setWsConnected(status === 'connected');
+
+        if (status === 'error' && !useSSE) {
+          console.warn('WebSocket failed, attempting SSE fallback:', error);
+          setUseSSE(true);
+          initializeSSE(token);
+        }
+      });
+
+      // Load initial data
+      await loadDashboardData();
+      await loadWorkflows();
+      await loadTasks();
+      await loadLogs();
+      await loadNotifications();
+      await loadEmailSettings();
+
+    } catch (error) {
+      console.error('Failed to initialize connection:', error);
+      setUseSSE(true);
+      initializeSSE(token);
+      // Still load data even if connection fails
+      loadDashboardData();
+      loadWorkflows();
+      loadTasks();
+      loadLogs();
+      loadNotifications();
+      loadEmailSettings();
+    }
+  };
+
+  const initializeSSE = (token?: string) => {
+    if (eventSourceRef.current) {
+      eventSourceRef.current.close();
+    }
+
+    const baseUrl = import.meta.env.VITE_API_BASE_URL?.replace('/api/v1', '');
+    const sseUrl = token ? `${baseUrl}/api/v1/logs/stream?token=${token}` : `${baseUrl}/api/v1/logs/stream`;
+
+    eventSourceRef.current = new EventSource(sseUrl);
+
+    eventSourceRef.current.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        handleSSEMessage(data);
+      } catch (error) {
+        console.error('Failed to parse SSE message:', error);
+      }
+    };
+
+    eventSourceRef.current.onerror = (error) => {
+      console.error('SSE connection error:', error);
+      setConnectionStatus('error');
+    };
+
+    eventSourceRef.current.onopen = () => {
+      setConnectionStatus('connected');
+    };
+  };
+
+  const handleSSEMessage = (data: any) => {
+    if (data.type === 'workflow_progress') {
+      updateWorkflowProgress(data);
+    } else if (data.type === 'task_update') {
+      updateTaskStatus(data);
+    } else if (data.type === 'notification') {
+      addNotification(data);
+    }
+  };
+
+  const loadDashboardData = async (retryCount = 0) => {
+    try {
+      setLoadingStates(prev => ({ ...prev, dashboard: true }));
+      setErrorStates(prev => ({ ...prev, dashboard: null }));
+
       const [stats, analyticsData] = await Promise.all([
         apiClient.getEmailDashboardStats(),
         apiClient.getEmailAnalyticsOverview(),
       ]);
+
       setDashboardStats(stats);
       setAnalytics(analyticsData);
+      setRetryCounts(prev => ({ ...prev, dashboard: 0 })); // Reset retry count on success
     } catch (err: any) {
-      setError('Failed to load dashboard data');
+      console.error('Dashboard data load error:', err);
+
+      const errorMessage = err.detail || err.message || 'Failed to load dashboard data';
+      setErrorStates(prev => ({ ...prev, dashboard: errorMessage }));
+
+      // Auto-retry logic for network errors
+      if (retryCount < 3 && (err.code === 'NETWORK_ERROR' || err.status >= 500)) {
+        const newRetryCount = retryCount + 1;
+        setRetryCounts(prev => ({ ...prev, dashboard: newRetryCount }));
+
+        setTimeout(() => {
+          loadDashboardData(newRetryCount);
+        }, Math.pow(2, newRetryCount) * 1000); // Exponential backoff
+      }
     } finally {
-      setLoading(false);
+      setLoadingStates(prev => ({ ...prev, dashboard: false }));
     }
   };
 
@@ -271,6 +481,16 @@ const EmailAssistant: React.FC = () => {
     }
   };
 
+  const loadLogs = async () => {
+    try {
+      const data = await apiClient.getEmailWorkflowLogs({ limit: 50 });
+      setLogs(data || []);
+    } catch (err: any) {
+      console.error('Failed to load logs:', err);
+      setLogs([]);
+    }
+  };
+
   const loadNotifications = async () => {
     try {
       const data = await apiClient.getEmailNotifications({ limit: 10 });
@@ -280,51 +500,140 @@ const EmailAssistant: React.FC = () => {
     }
   };
 
+  const loadEmailSettings = async () => {
+    try {
+      const settings = await apiClient.getEmailSettings();
+      setSavedEmailSettings(settings);
+      // Populate form with current settings
+      if (settings) {
+        setEmailSettingsForm({
+          server: settings.server || '',
+          port: settings.port || 993,
+          username: settings.username || '',
+          password: '', // Don't populate password for security
+          use_ssl: settings.use_ssl !== false, // Default to true
+          mailbox: settings.mailbox || 'INBOX',
+        });
+      }
+      // If settings exist and have a password, enable the option to use saved settings
+      if (settings && settings.has_password && settings.server) {
+        setUseSavedSettings(true);
+      }
+    } catch (err: any) {
+      console.error('Failed to load email settings:', err);
+    }
+  };
+
   const updateWorkflowProgress = (progressData: any) => {
     setWorkflows(prev =>
       prev.map(wf =>
         wf.id === progressData.workflow_id
-          ? { ...wf, ...progressData }
+          ? {
+              ...wf,
+              ...progressData,
+              last_updated: new Date(),
+              // Enhanced progress tracking
+              progress_percentage: progressData.progress_percentage || wf.progress_percentage,
+              current_phase: progressData.current_phase || wf.current_phase,
+              phases: progressData.phases || wf.phases,
+              estimated_completion: progressData.estimated_completion,
+            }
           : wf
       )
     );
+
+    // Update progress map for detailed tracking
+    setWorkflowProgress(prev => {
+      const newMap = new Map(prev);
+      newMap.set(progressData.workflow_id, {
+        ...progressData,
+        timestamp: new Date(),
+      });
+      return newMap;
+    });
   };
 
   const updateTaskStatus = (taskData: any) => {
     setTasks(prev =>
       prev.map(task =>
         task.id === taskData.task_id
-          ? { ...task, ...taskData }
+          ? {
+              ...task,
+              ...taskData,
+              last_updated: new Date(),
+              // Enhanced task tracking
+              progress_percentage: taskData.progress_percentage || task.progress_percentage,
+              status: taskData.status || task.status,
+              priority: taskData.priority || task.priority,
+            }
           : task
       )
     );
+
+    // Update task progress map
+    setTaskProgress(prev => {
+      const newMap = new Map(prev);
+      newMap.set(taskData.task_id, {
+        ...taskData,
+        timestamp: new Date(),
+      });
+      return newMap;
+    });
   };
 
   const addNotification = (notification: any) => {
     setNotifications(prev => [notification, ...prev.slice(0, 9)]);
+
+    // Auto-dismiss non-critical notifications after 5 seconds
+    if (notification.type !== 'error' && notification.type !== 'workflow_failed') {
+      setTimeout(() => {
+        setNotifications(prev => prev.filter(n => n.id !== notification.id));
+      }, 5000);
+    }
   };
 
   const handleStartWorkflow = async () => {
     try {
       setLoading(true);
-      const result = await apiClient.startEmailWorkflow({
-        mailbox_config: {
-          server: workflowForm.server,
-          port: workflowForm.port,
-          username: workflowForm.username,
-          password: workflowForm.password,
-          mailbox: workflowForm.mailbox,
-          use_ssl: workflowForm.use_ssl,
-        },
-        processing_options: {
+
+      let result;
+      if (useSavedSettings && savedEmailSettings) {
+        // Use saved settings
+        result = await apiClient.startEmailWorkflowWithSavedSettings({
           max_emails: workflowForm.max_emails,
           unread_only: workflowForm.unread_only,
           importance_threshold: workflowForm.importance_threshold,
           spam_threshold: workflowForm.spam_threshold,
           create_tasks: workflowForm.create_tasks,
           schedule_followups: workflowForm.schedule_followups,
-        },
-      });
+        });
+      } else {
+        // Use form settings
+        result = await apiClient.startEmailWorkflow({
+          mailbox_config: {
+            server: workflowForm.server,
+            port: workflowForm.port,
+            username: workflowForm.username,
+            password: workflowForm.password,
+            mailbox: workflowForm.mailbox,
+            use_ssl: workflowForm.use_ssl,
+          },
+          processing_options: {
+            max_emails: workflowForm.max_emails,
+            unread_only: workflowForm.unread_only,
+            importance_threshold: workflowForm.importance_threshold,
+            spam_threshold: workflowForm.spam_threshold,
+            create_tasks: workflowForm.create_tasks,
+            schedule_followups: workflowForm.schedule_followups,
+            // Timeout settings
+            analysis_timeout: workflowForm.analysis_timeout,
+            task_timeout: workflowForm.task_timeout,
+            ollama_timeout: workflowForm.ollama_timeout,
+            max_retries: workflowForm.max_retries,
+            retry_delay: workflowForm.retry_delay,
+          },
+        });
+      }
 
       setSuccess('Email workflow started successfully!');
       setStartWorkflowDialog(false);
@@ -439,13 +748,15 @@ const EmailAssistant: React.FC = () => {
     }
   };
 
-  const handleUpdateEmailSettings = async (settings: any) => {
+  const handleUpdateEmailSettings = async () => {
     try {
-      await apiClient.updateEmailSettings(settings);
+      await apiClient.updateEmailSettings(emailSettingsForm);
       setSuccess('Email settings updated successfully!');
-      setSettingsDialog(false);
+      setEmailSettingsDialog(false);
+      // Reload email settings
+      loadEmailSettings();
     } catch (err: any) {
-      setError('Failed to update settings');
+      setError('Failed to update email settings');
     }
   };
 
@@ -526,8 +837,142 @@ const EmailAssistant: React.FC = () => {
     return new Date(dateString).toLocaleString();
   };
 
+  // Enhanced Workflow Progress Component
+  const WorkflowProgressIndicator = ({ workflow }: { workflow: any }) => {
+    const getPhaseIcon = (phase: any) => {
+      if (phase.status === 'completed') return <CheckCircle color="success" fontSize="small" />;
+      if (phase.status === 'running') return <CircularProgress size={16} />;
+      if (phase.status === 'failed') return <Error color="error" fontSize="small" />;
+      return <div style={{ width: 16, height: 16, borderRadius: '50%', backgroundColor: '#ccc' }} />;
+    };
+
+    const getPhaseColor = (phase: any) => {
+      if (phase.status === 'completed') return 'success.main';
+      if (phase.status === 'running') return 'info.main';
+      if (phase.status === 'failed') return 'error.main';
+      return 'grey.400';
+    };
+
+    return (
+      <Box sx={{ mt: 2, p: 2, bgcolor: 'background.paper', borderRadius: 2, border: '1px solid', borderColor: 'divider' }}>
+        <Typography variant="h6" sx={{ mb: 2, fontWeight: 600 }}>
+          Workflow Progress
+        </Typography>
+
+        {/* Overall Progress */}
+        <Box sx={{ mb: 3 }}>
+          <Box sx={{ display: 'flex', justifyContent: 'space-between', mb: 1 }}>
+            <Typography variant="body2" sx={{ fontWeight: 500 }}>
+              Overall Progress
+            </Typography>
+            <Typography variant="body2" color="text.secondary">
+              {workflow.progress_percentage || 0}% Complete
+            </Typography>
+          </Box>
+          <LinearProgress
+            variant="determinate"
+            value={workflow.progress_percentage || 0}
+            sx={{
+              height: 8,
+              borderRadius: 4,
+              '& .MuiLinearProgress-bar': {
+                borderRadius: 4,
+              },
+            }}
+          />
+          {workflow.current_phase && (
+            <Typography variant="caption" color="text.secondary" sx={{ mt: 1, display: 'block' }}>
+              Current Phase: {workflow.current_phase.replace(/_/g, ' ')}
+            </Typography>
+          )}
+        </Box>
+
+        {/* Phase-by-phase Progress */}
+        {workflow.phases && workflow.phases.length > 0 && (
+          <Box>
+            <Typography variant="body2" sx={{ fontWeight: 600, mb: 2 }}>
+              Processing Phases
+            </Typography>
+            <Stepper orientation="vertical" sx={{ mt: 1 }}>
+              {workflow.phases.map((phase: any, index: number) => (
+                <Step key={index} active={phase.status === 'running'} completed={phase.status === 'completed'}>
+                  <StepLabel
+                    StepIconComponent={() => getPhaseIcon(phase)}
+                  >
+                    <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', width: '100%' }}>
+                      <Typography variant="caption" sx={{ fontWeight: 500 }}>
+                        {phase.phase_name.replace(/_/g, ' ')}
+                      </Typography>
+                      <Typography variant="caption" color="text.secondary">
+                        {phase.processing_duration_ms ? `${(phase.processing_duration_ms / 1000).toFixed(1)}s` : ''}
+                      </Typography>
+                    </Box>
+                  </StepLabel>
+                  <StepContent>
+                    <Box sx={{ mb: 1 }}>
+                      <Box sx={{ display: 'flex', justifyContent: 'space-between', mb: 0.5 }}>
+                        <Typography variant="caption" color="text.secondary">
+                          Status: {phase.status}
+                        </Typography>
+                        <Typography variant="caption" color="text.secondary">
+                          {phase.progress_percentage || 0}%
+                        </Typography>
+                      </Box>
+                      {phase.status === 'running' && (
+                        <LinearProgress
+                          variant="determinate"
+                          value={phase.progress_percentage || 0}
+                          size="small"
+                          sx={{
+                            height: 4,
+                            borderRadius: 2,
+                            '& .MuiLinearProgress-bar': {
+                              borderRadius: 2,
+                            }
+                          }}
+                        />
+                      )}
+                      {phase.model_used && phase.model_used !== 'n/a' && (
+                        <Typography variant="caption" color="text.secondary" sx={{ mt: 0.5, display: 'block' }}>
+                          Model: {phase.model_used}
+                        </Typography>
+                      )}
+                      {phase.items_processed !== undefined && phase.total_items !== undefined && (
+                        <Typography variant="caption" color="text.secondary" sx={{ mt: 0.5, display: 'block' }}>
+                          Items: {phase.items_processed} / {phase.total_items}
+                        </Typography>
+                      )}
+                    </Box>
+                  </StepContent>
+                </Step>
+              ))}
+            </Stepper>
+          </Box>
+        )}
+
+        {/* Estimated completion time */}
+        {workflow.status === 'running' && workflow.estimated_completion && (
+          <Box sx={{ mt: 2, p: 1, bgcolor: 'background.paper', borderRadius: 1 }}>
+            <Typography variant="caption" sx={{ fontWeight: 500 }}>
+              Estimated completion: {new Date(workflow.estimated_completion).toLocaleTimeString()}
+            </Typography>
+          </Box>
+        )}
+      </Box>
+    );
+  };
+
   return (
-    <Box sx={{ width: '100%', minHeight: '100vh', bgcolor: 'background.default' }}>
+    <Box sx={{
+      width: '100%',
+      minHeight: '100vh',
+      bgcolor: 'background.default',
+      '@keyframes pulse': {
+        '0%': { opacity: 1 },
+        '50%': { opacity: 0.5 },
+        '100%': { opacity: 1 },
+      },
+    }}>
         {/* Header */}
         <Paper elevation={1} sx={{ p: 2, mb: 2 }}>
           <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
@@ -542,25 +987,136 @@ const EmailAssistant: React.FC = () => {
                 <Typography variant="body2" color="text.secondary">
                   AI-powered email management and automation
                 </Typography>
+                {/* Connection Status Indicator */}
+                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mt: 0.5 }}>
+                  <Box
+                    sx={{
+                      width: 8,
+                      height: 8,
+                      borderRadius: '50%',
+                      bgcolor: connectionStatus === 'connected' ? 'success.main' :
+                              connectionStatus === 'connecting' ? 'warning.main' :
+                              connectionStatus === 'error' ? 'error.main' : 'grey.400',
+                      animation: connectionStatus === 'connecting' ? 'pulse 2s infinite' : 'none',
+                    }}
+                  />
+                  <Typography variant="caption" color="text.secondary">
+                    {connectionStatus === 'connected' ? (useSSE ? 'SSE Connected' : 'WebSocket Connected') :
+                     connectionStatus === 'connecting' ? 'Connecting...' :
+                     connectionStatus === 'error' ? 'Connection Error' : 'Disconnected'}
+                  </Typography>
+                  {connectionStatus === 'error' && (
+                    <Button
+                      size="small"
+                      variant="outlined"
+                      onClick={initializeConnection}
+                      sx={{ ml: 1, fontSize: '0.7rem', py: 0.2 }}
+                    >
+                      Reconnect
+                    </Button>
+                  )}
+                </Box>
+                {/* Auto-refresh and active monitoring status */}
+                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mt: 0.5 }}>
+                  <Box
+                    sx={{
+                      width: 6,
+                      height: 6,
+                      borderRadius: '50%',
+                      bgcolor: autoRefreshEnabled ? 'info.main' : 'grey.400',
+                      animation: autoRefreshEnabled ? 'pulse 3s infinite' : 'none',
+                    }}
+                  />
+                  <Typography variant="caption" color="text.secondary">
+                    Auto-refresh: {autoRefreshEnabled ? 'ON' : 'OFF'}
+                  </Typography>
+                  {workflows.some(wf => wf.status === 'running' || wf.status === 'processing') && (
+                    <>
+                      <Box
+                        sx={{
+                          width: 6,
+                          height: 6,
+                          borderRadius: '50%',
+                          bgcolor: 'warning.main',
+                          animation: 'pulse 2s infinite',
+                        }}
+                      />
+                      <Typography variant="caption" color="text.secondary">
+                        Monitoring {workflows.filter(wf => wf.status === 'running' || wf.status === 'processing').length} active workflow(s)
+                      </Typography>
+                    </>
+                  )}
+                </Box>
               </Box>
             </Box>
 
             <Box sx={{ display: 'flex', gap: 1 }}>
               <Badge badgeContent={notifications.length} color="error">
-                <IconButton onClick={() => setActiveTab(4)}>
+                <IconButton onClick={() => setActiveTab(9)}>
                   <Notifications />
                 </IconButton>
               </Badge>
+              <Tooltip title={autoRefreshEnabled ? "Disable auto-refresh" : "Enable auto-refresh"}>
+                <IconButton
+                  onClick={() => setAutoRefreshEnabled(!autoRefreshEnabled)}
+                  color={autoRefreshEnabled ? "primary" : "default"}
+                >
+                  <Refresh />
+                </IconButton>
+              </Tooltip>
+              <Button
+                variant="outlined"
+                startIcon={<Refresh />}
+                onClick={() => {
+                  loadDashboardData();
+                  loadWorkflows();
+                  loadTasks();
+                }}
+                disabled={loadingStates.dashboard || loadingStates.workflows || loadingStates.tasks}
+              >
+                Refresh All
+              </Button>
               <Button
                 variant="contained"
                 startIcon={<PlayArrow />}
                 onClick={() => setStartWorkflowDialog(true)}
+                disabled={loadingStates.dashboard || connectionStatus === 'error'}
               >
                 Start Workflow
               </Button>
             </Box>
           </Box>
         </Paper>
+
+        {/* Enhanced Error Display */}
+        {Object.entries(errorStates).some(([key, error]) => error && retryCounts[key as keyof typeof retryCounts] > 0) && (
+          <Fade in={true}>
+            <Alert
+              severity="warning"
+              sx={{ mb: 2 }}
+              action={
+                <Button
+                  color="inherit"
+                  size="small"
+                  onClick={() => {
+                    // Retry all failed operations
+                    if (errorStates.dashboard) loadDashboardData();
+                    if (errorStates.workflows) loadWorkflows();
+                    if (errorStates.tasks) loadTasks();
+                    if (errorStates.logs) loadLogs();
+                    if (errorStates.notifications) loadNotifications();
+                    if (errorStates.emailSettings) loadEmailSettings();
+                  }}
+                >
+                  Retry All
+                </Button>
+              }
+            >
+              <AlertTitle>Connection Issues Detected</AlertTitle>
+              Some data may be outdated. Click "Retry All" to refresh or individual sections will auto-retry.
+            </Alert>
+          </Fade>
+        )}
 
         {/* Main Content */}
         <Box sx={{ width: '100%' }}>
@@ -569,115 +1125,216 @@ const EmailAssistant: React.FC = () => {
               <Tab label="Dashboard" icon={<Analytics />} iconPosition="start" />
               <Tab label="Workflows" icon={<Settings />} iconPosition="start" />
               <Tab label="Tasks" icon={<CheckCircle />} iconPosition="start" />
+              <Tab label="Logs" icon={<BugReport />} iconPosition="start" />
               <Tab label="Search" icon={<Search />} iconPosition="start" />
               <Tab label="Chat" icon={<Chat />} iconPosition="start" />
               <Tab label="Analytics" icon={<Assessment />} iconPosition="start" />
               <Tab label="Settings" icon={<Build />} iconPosition="start" />
               <Tab label="Templates" icon={<Rule />} iconPosition="start" />
+              <Tab label="Notifications" icon={<Notifications />} iconPosition="start" />
             </Tabs>
           </Box>
 
           {/* Dashboard Tab */}
           <TabPanel value={activeTab} index={0}>
-            <Grid container spacing={3}>
-              {/* Statistics Cards */}
-              <Grid item xs={12} md={3}>
-                <Card>
-                  <CardContent>
-                    <Typography variant="h6" sx={{ fontWeight: 600, mb: 2 }}>
-                      Total Workflows
-                    </Typography>
-                    <Typography variant="h3" sx={{ fontWeight: 700, color: 'primary.main' }}>
-                      {dashboardStats?.total_workflows || 0}
-                    </Typography>
-                    <Typography variant="body2" color="text.secondary">
-                      {dashboardStats?.active_workflows || 0} active
-                    </Typography>
-                  </CardContent>
-                </Card>
-              </Grid>
-
-              <Grid item xs={12} md={3}>
-                <Card>
-                  <CardContent>
-                    <Typography variant="h6" sx={{ fontWeight: 600, mb: 2 }}>
-                      Emails Processed
-                    </Typography>
-                    <Typography variant="h3" sx={{ fontWeight: 700, color: 'success.main' }}>
-                      {dashboardStats?.total_emails_processed || 0}
-                    </Typography>
-                    <Typography variant="body2" color="text.secondary">
-                      Today
-                    </Typography>
-                  </CardContent>
-                </Card>
-              </Grid>
-
-              <Grid item xs={12} md={3}>
-                <Card>
-                  <CardContent>
-                    <Typography variant="h6" sx={{ fontWeight: 600, mb: 2 }}>
-                      Active Tasks
-                    </Typography>
-                    <Typography variant="h3" sx={{ fontWeight: 700, color: 'warning.main' }}>
-                      {dashboardStats?.pending_tasks || 0}
-                    </Typography>
-                    <Typography variant="body2" color="text.secondary">
-                      {dashboardStats?.completed_tasks || 0} completed
-                    </Typography>
-                  </CardContent>
-                </Card>
-              </Grid>
-
-              <Grid item xs={12} md={3}>
-                <Card>
-                  <CardContent>
-                    <Typography variant="h6" sx={{ fontWeight: 600, mb: 2 }}>
-                      Success Rate
-                    </Typography>
-                    <Typography variant="h3" sx={{ fontWeight: 700, color: 'info.main' }}>
-                      {dashboardStats?.success_rate ? `${dashboardStats.success_rate.toFixed(1)}%` : '0%'}
-                    </Typography>
-                    <Typography variant="body2" color="text.secondary">
-                      Avg: {dashboardStats?.avg_processing_time ? `${dashboardStats.avg_processing_time.toFixed(1)}s` : '0s'}
-                    </Typography>
-                  </CardContent>
-                </Card>
-              </Grid>
-
-              {/* Recent Activity */}
-              <Grid item xs={12}>
-                <Card>
-                  <CardContent>
-                    <Typography variant="h6" sx={{ fontWeight: 600, mb: 2 }}>
-                      Recent Activity
-                    </Typography>
-                    <List>
-                      {workflows.slice(0, 5).map((workflow, index) => (
-                        <ListItem key={workflow.id}>
-                          <ListItemIcon>
-                            {workflow.status === 'completed' ? (
-                              <CheckCircle color="success" />
-                            ) : workflow.status === 'running' ? (
-                              <PlayArrow color="info" />
-                            ) : (
-                              <Error color="error" />
-                            )}
-                          </ListItemIcon>
-                          <ListItemText
-                            primary={`Workflow ${workflow.id}`}
-                            secondary={`${workflow.status} - ${workflow.emails_processed || 0} emails processed`}
-                          />
-                          <Typography variant="caption" color="text.secondary">
-                            {formatDate(workflow.created_at)}
-                          </Typography>
-                        </ListItem>
+            {loadingStates.dashboard ? (
+              <Grid container spacing={3}>
+                {[1, 2, 3, 4].map((i) => (
+                  <Grid item xs={12} md={3} key={i}>
+                    <Card>
+                      <CardContent>
+                        <Skeleton variant="text" width="60%" height={24} sx={{ mb: 2 }} />
+                        <Skeleton variant="text" width="40%" height={36} />
+                        <Skeleton variant="text" width="50%" height={16} />
+                      </CardContent>
+                    </Card>
+                  </Grid>
+                ))}
+                <Grid item xs={12}>
+                  <Card>
+                    <CardContent>
+                      <Skeleton variant="text" width="30%" height={24} sx={{ mb: 2 }} />
+                      {[1, 2, 3, 4, 5].map((i) => (
+                        <Box key={i} sx={{ display: 'flex', alignItems: 'center', mb: 1 }}>
+                          <Skeleton variant="circular" width={24} height={24} sx={{ mr: 2 }} />
+                          <Box sx={{ flex: 1 }}>
+                            <Skeleton variant="text" width="40%" height={20} />
+                            <Skeleton variant="text" width="60%" height={16} />
+                          </Box>
+                          <Skeleton variant="text" width="20%" height={16} />
+                        </Box>
                       ))}
-                    </List>
-                  </CardContent>
-                </Card>
+                    </CardContent>
+                  </Card>
+                </Grid>
               </Grid>
-            </Grid>
+            ) : errorStates.dashboard ? (
+              <Alert
+                severity="error"
+                sx={{ mb: 2 }}
+                action={
+                  <Button
+                    color="inherit"
+                    size="small"
+                    onClick={() => loadDashboardData()}
+                    disabled={loadingStates.dashboard}
+                  >
+                    {loadingStates.dashboard ? <CircularProgress size={16} /> : 'Retry'}
+                  </Button>
+                }
+              >
+                <AlertTitle>Failed to Load Dashboard</AlertTitle>
+                {errorStates.dashboard}
+                {retryCounts.dashboard > 0 && (
+                  <Typography variant="caption" display="block">
+                    Auto-retry attempt {retryCounts.dashboard}/3
+                  </Typography>
+                )}
+              </Alert>
+            ) : (
+              <Grid container spacing={3}>
+                {/* Statistics Cards */}
+                <Grid item xs={12} md={3}>
+                  <Card>
+                    <CardContent>
+                      <Typography variant="h6" sx={{ fontWeight: 600, mb: 2 }}>
+                        Total Workflows
+                      </Typography>
+                      <Typography variant="h3" sx={{ fontWeight: 700, color: 'primary.main' }}>
+                        {dashboardStats?.total_workflows || 0}
+                      </Typography>
+                      <Typography variant="body2" color="text.secondary">
+                        {dashboardStats?.active_workflows || 0} active
+                      </Typography>
+                    </CardContent>
+                  </Card>
+                </Grid>
+
+                <Grid item xs={12} md={3}>
+                  <Card>
+                    <CardContent>
+                      <Typography variant="h6" sx={{ fontWeight: 600, mb: 2 }}>
+                        Emails Processed
+                      </Typography>
+                      <Typography variant="h3" sx={{ fontWeight: 700, color: 'success.main' }}>
+                        {dashboardStats?.total_emails_processed || 0}
+                      </Typography>
+                      <Typography variant="body2" color="text.secondary">
+                        Today
+                      </Typography>
+                    </CardContent>
+                  </Card>
+                </Grid>
+
+                <Grid item xs={12} md={3}>
+                  <Card>
+                    <CardContent>
+                      <Typography variant="h6" sx={{ fontWeight: 600, mb: 2 }}>
+                        Active Tasks
+                      </Typography>
+                      <Typography variant="h3" sx={{ fontWeight: 700, color: 'warning.main' }}>
+                        {dashboardStats?.pending_tasks || 0}
+                      </Typography>
+                      <Typography variant="body2" color="text.secondary">
+                        {dashboardStats?.completed_tasks || 0} completed
+                      </Typography>
+                    </CardContent>
+                  </Card>
+                </Grid>
+
+                <Grid item xs={12} md={3}>
+                  <Card>
+                    <CardContent>
+                      <Typography variant="h6" sx={{ fontWeight: 600, mb: 2 }}>
+                        Success Rate
+                      </Typography>
+                      <Typography variant="h3" sx={{ fontWeight: 700, color: 'info.main' }}>
+                        {dashboardStats?.success_rate ? `${dashboardStats.success_rate.toFixed(1)}%` : '0%'}
+                      </Typography>
+                      <Typography variant="body2" color="text.secondary">
+                        Avg: {dashboardStats?.avg_processing_time ? `${dashboardStats.avg_processing_time.toFixed(1)}s` : '0s'}
+                      </Typography>
+                    </CardContent>
+                  </Card>
+                </Grid>
+
+                {/* Active Workflow Progress */}
+                {workflows.some(wf => wf.status === 'running' || wf.status === 'processing') && (
+                  <Grid item xs={12}>
+                    <Card sx={{ mb: 3 }}>
+                      <CardContent>
+                        <Typography variant="h6" sx={{ fontWeight: 600, mb: 2 }}>
+                          Active Workflow Progress
+                        </Typography>
+                        {workflows
+                          .filter(wf => wf.status === 'running' || wf.status === 'processing')
+                          .map(workflow => (
+                            <WorkflowProgressIndicator key={workflow.id} workflow={workflow} />
+                          ))}
+                      </CardContent>
+                    </Card>
+                  </Grid>
+                )}
+
+                {/* Recent Activity */}
+                <Grid item xs={12}>
+                  <Card>
+                    <CardContent>
+                      <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
+                        <Typography variant="h6" sx={{ fontWeight: 600 }}>
+                          Recent Activity
+                        </Typography>
+                        <Button
+                          size="small"
+                          startIcon={<Refresh />}
+                          onClick={() => loadWorkflows()}
+                          disabled={loadingStates.workflows}
+                        >
+                          {loadingStates.workflows ? <CircularProgress size={16} /> : 'Refresh'}
+                        </Button>
+                      </Box>
+                      {loadingStates.workflows ? (
+                        <Box>
+                          {[1, 2, 3, 4, 5].map((i) => (
+                            <Box key={i} sx={{ display: 'flex', alignItems: 'center', mb: 1 }}>
+                              <Skeleton variant="circular" width={24} height={24} sx={{ mr: 2 }} />
+                              <Box sx={{ flex: 1 }}>
+                                <Skeleton variant="text" width="40%" height={20} />
+                                <Skeleton variant="text" width="60%" height={16} />
+                              </Box>
+                              <Skeleton variant="text" width="20%" height={16} />
+                            </Box>
+                          ))}
+                        </Box>
+                      ) : (
+                        <List>
+                          {workflows.slice(0, 5).map((workflow, index) => (
+                            <ListItem key={workflow.id}>
+                              <ListItemIcon>
+                                {workflow.status === 'completed' ? (
+                                  <CheckCircle color="success" />
+                                ) : workflow.status === 'running' ? (
+                                  <PlayArrow color="info" />
+                                ) : (
+                                  <Error color="error" />
+                                )}
+                              </ListItemIcon>
+                              <ListItemText
+                                primary={`Workflow ${workflow.id}`}
+                                secondary={`${workflow.status} - ${workflow.emails_processed || 0} emails processed`}
+                              />
+                              <Typography variant="caption" color="text.secondary">
+                                {formatDate(workflow.created_at)}
+                              </Typography>
+                            </ListItem>
+                          ))}
+                        </List>
+                      )}
+                    </CardContent>
+                  </Card>
+                </Grid>
+              </Grid>
+            )}
           </TabPanel>
 
           {/* Workflows Tab */}
@@ -747,35 +1404,74 @@ const EmailAssistant: React.FC = () => {
                         </Box>
                       )}
 
-                      {/* Phase-by-phase progress */}
+                      {/* Enhanced Phase-by-phase progress */}
                       {workflow.phases && workflow.phases.length > 0 && (
                         <Box sx={{ mb: 2 }}>
                           <Typography variant="body2" sx={{ fontWeight: 600, mb: 1 }}>
                             Processing Phases
                           </Typography>
-                          {workflow.phases.slice(0, 4).map((phase: any, index: number) => (
-                            <Box key={index} sx={{ mb: 0.5 }}>
-                              <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                                <Typography variant="caption">
-                                  {phase.phase_name.replace('_', ' ')}
-                                </Typography>
-                                <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
-                                  <Typography variant="caption" color="text.secondary">
-                                    {phase.status}
-                                  </Typography>
-                                  {phase.status === 'completed' && <CheckCircle fontSize="small" color="success" />}
-                                </Box>
-                              </Box>
-                              {phase.status === 'running' && (
-                                <LinearProgress
-                                  variant="determinate"
-                                  value={phase.progress_percentage || 0}
-                                  size="small"
-                                  sx={{ mt: 0.5 }}
-                                />
-                              )}
-                            </Box>
-                          ))}
+                          <Stepper orientation="vertical" sx={{ mt: 1 }}>
+                            {workflow.phases.map((phase: any, index: number) => (
+                              <Step key={index} active={phase.status === 'running'} completed={phase.status === 'completed'}>
+                                <StepLabel
+                                  StepIconComponent={() => {
+                                    if (phase.status === 'completed') return <CheckCircle color="success" fontSize="small" />;
+                                    if (phase.status === 'running') return <CircularProgress size={16} />;
+                                    if (phase.status === 'failed') return <Error color="error" fontSize="small" />;
+                                    return <div style={{ width: 16, height: 16, borderRadius: '50%', backgroundColor: '#ccc' }} />;
+                                  }}
+                                >
+                                  <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', width: '100%' }}>
+                                    <Typography variant="caption" sx={{ fontWeight: 500 }}>
+                                      {phase.phase_name.replace('_', ' ')}
+                                    </Typography>
+                                    <Typography variant="caption" color="text.secondary">
+                                      {phase.processing_duration_ms ? `${(phase.processing_duration_ms / 1000).toFixed(1)}s` : ''}
+                                    </Typography>
+                                  </Box>
+                                </StepLabel>
+                                <StepContent>
+                                  <Box sx={{ mb: 1 }}>
+                                    <Box sx={{ display: 'flex', justifyContent: 'space-between', mb: 0.5 }}>
+                                      <Typography variant="caption" color="text.secondary">
+                                        {phase.status}
+                                      </Typography>
+                                      <Typography variant="caption" color="text.secondary">
+                                        {phase.progress_percentage || 0}%
+                                      </Typography>
+                                    </Box>
+                                    {phase.status === 'running' && (
+                                      <LinearProgress
+                                        variant="determinate"
+                                        value={phase.progress_percentage || 0}
+                                        sx={{
+                                          height: 4,
+                                          borderRadius: 2,
+                                          '& .MuiLinearProgress-bar': {
+                                            borderRadius: 2,
+                                          }
+                                        }}
+                                      />
+                                    )}
+                                    {phase.model_used && phase.model_used !== 'n/a' && (
+                                      <Typography variant="caption" color="text.secondary" sx={{ mt: 0.5, display: 'block' }}>
+                                        Model: {phase.model_used}
+                                      </Typography>
+                                    )}
+                                  </Box>
+                                </StepContent>
+                              </Step>
+                            ))}
+                          </Stepper>
+                        </Box>
+                      )}
+
+                      {/* Estimated completion time */}
+                      {workflow.status === 'running' && workflow.estimated_completion && (
+                        <Box sx={{ mb: 2, p: 1, bgcolor: 'background.paper', borderRadius: 1 }}>
+                          <Typography variant="caption" sx={{ fontWeight: 500 }}>
+                            Estimated completion: {new Date(workflow.estimated_completion).toLocaleTimeString()}
+                          </Typography>
                         </Box>
                       )}
 
@@ -940,8 +1636,86 @@ const EmailAssistant: React.FC = () => {
             </Grid>
           </TabPanel>
 
-          {/* Search Tab */}
+          {/* Logs Tab */}
           <TabPanel value={activeTab} index={3}>
+            <Box sx={{ mb: 2 }}>
+              <Button
+                variant="outlined"
+                startIcon={<Refresh />}
+                onClick={loadLogs}
+                sx={{ mr: 1 }}
+              >
+                Refresh Logs
+              </Button>
+              <Button
+                variant="outlined"
+                startIcon={<GetApp />}
+                onClick={() => setExportDialog(true)}
+              >
+                Export Logs
+              </Button>
+            </Box>
+
+            <Card>
+              <CardContent>
+                <Typography variant="h6" sx={{ fontWeight: 600, mb: 2 }}>
+                  Email Workflow Logs
+                </Typography>
+                <Box sx={{ maxHeight: 600, overflow: 'auto' }}>
+                  {logs.length === 0 ? (
+                    <Box sx={{ textAlign: 'center', py: 4 }}>
+                      <BugReport sx={{ fontSize: 48, color: 'text.secondary', mb: 2 }} />
+                      <Typography variant="h6" color="text.secondary">
+                        No logs available
+                      </Typography>
+                      <Typography variant="body2" color="text.secondary">
+                        Logs will appear here when workflows are running
+                      </Typography>
+                    </Box>
+                  ) : (
+                    logs.map((log) => (
+                      <Box key={log.id} sx={{ display: 'flex', alignItems: 'flex-start', py: 1, borderBottom: '1px solid', borderColor: 'divider' }}>
+                        <ListItemIcon sx={{ minWidth: 32 }}>
+                          {log.level === 'error' ? <Error color="error" /> :
+                           log.level === 'warning' ? <Warning color="warning" /> :
+                           log.level === 'info' ? <Info color="info" /> :
+                           <BugReport color="disabled" />}
+                        </ListItemIcon>
+                        <Box sx={{ flex: 1 }}>
+                          <Typography variant="body2" sx={{ fontFamily: 'monospace' }}>
+                            {log.message}
+                          </Typography>
+                          <Box sx={{ display: 'flex', gap: 2, mt: 0.5 }}>
+                            <Typography variant="caption" color="text.secondary">
+                              {formatDate(log.timestamp)}
+                            </Typography>
+                            {log.workflow_phase && (
+                              <Chip label={log.workflow_phase} size="small" variant="outlined" />
+                            )}
+                            {log.email_count !== undefined && (
+                              <Typography variant="caption" color="text.secondary">
+                                Emails: {log.email_count}
+                              </Typography>
+                            )}
+                          </Box>
+                          {log.context && Object.keys(log.context).length > 0 && (
+                            <Box sx={{ mt: 1, p: 1, bgcolor: 'grey.50', borderRadius: 1 }}>
+                              <Typography variant="caption" sx={{ fontFamily: 'monospace' }}>
+                                {JSON.stringify(log.context, null, 2)}
+                              </Typography>
+                            </Box>
+                          )}
+                        </Box>
+                      </Box>
+                    ))
+                  )}
+                </Box>
+              </CardContent>
+            </Card>
+          </TabPanel>
+
+          {/* Search Tab */}
+          <TabPanel value={activeTab} index={4}>
             <Card>
               <CardContent>
                 <Typography variant="h6" sx={{ fontWeight: 600, mb: 3 }}>
@@ -964,7 +1738,7 @@ const EmailAssistant: React.FC = () => {
                       <InputLabel>Search Type</InputLabel>
                       <Select
                         value={searchForm.search_type}
-                        onChange={(e) => setSearchForm(prev => ({ ...prev, search_type: e.target.value }))}
+                        onChange={(e) => setSearchForm(prev => ({ ...prev, search_type: e.target.value as 'semantic' | 'keyword' | 'hybrid' }))}
                       >
                         <MenuItem value="semantic">Semantic</MenuItem>
                         <MenuItem value="keyword">Keyword</MenuItem>
@@ -1030,7 +1804,7 @@ const EmailAssistant: React.FC = () => {
           </TabPanel>
 
           {/* Chat Tab */}
-          <TabPanel value={activeTab} index={4}>
+          <TabPanel value={activeTab} index={5}>
             <Card sx={{ height: 600, display: 'flex', flexDirection: 'column' }}>
               <CardContent sx={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
                 <Typography variant="h6" sx={{ fontWeight: 600, mb: 2 }}>
@@ -1080,7 +1854,7 @@ const EmailAssistant: React.FC = () => {
           </TabPanel>
 
           {/* Analytics Tab */}
-          <TabPanel value={activeTab} index={5}>
+          <TabPanel value={activeTab} index={6}>
             <Grid container spacing={3}>
               <Grid item xs={12} md={6}>
                 <Card>
@@ -1166,15 +1940,22 @@ const EmailAssistant: React.FC = () => {
           </TabPanel>
 
           {/* Settings Tab */}
-          <TabPanel value={activeTab} index={6}>
+          <TabPanel value={activeTab} index={7}>
             <Grid container spacing={3}>
               <Grid item xs={12} md={6}>
                 <Card>
                   <CardContent>
                     <Typography variant="h6" sx={{ fontWeight: 600, mb: 2 }}>
-                      Email Processing Settings
+                      Email Settings
                     </Typography>
                     <Box sx={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+                      <Button
+                        variant="outlined"
+                        startIcon={<Email />}
+                        onClick={() => setEmailSettingsDialog(true)}
+                      >
+                        Email Server Settings
+                      </Button>
                       <Button
                         variant="outlined"
                         startIcon={<Settings />}
@@ -1237,7 +2018,7 @@ const EmailAssistant: React.FC = () => {
           </TabPanel>
 
           {/* Templates Tab */}
-          <TabPanel value={activeTab} index={7}>
+          <TabPanel value={activeTab} index={8}>
             <Grid container spacing={3}>
               <Grid item xs={12}>
                 <Card>
@@ -1283,6 +2064,72 @@ const EmailAssistant: React.FC = () => {
               </Grid>
             </Grid>
           </TabPanel>
+
+          {/* Notifications Tab */}
+          <TabPanel value={activeTab} index={9}>
+            <Grid container spacing={3}>
+              <Grid item xs={12}>
+                <Card>
+                  <CardContent>
+                    <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
+                      <Typography variant="h6" sx={{ fontWeight: 600 }}>
+                        Email Notifications
+                      </Typography>
+                      <Button
+                        variant="outlined"
+                        startIcon={<Settings />}
+                        onClick={() => setNotificationSettingsDialog(true)}
+                      >
+                        Notification Settings
+                      </Button>
+                    </Box>
+                    <Box sx={{ maxHeight: 600, overflow: 'auto' }}>
+                      {notifications.length === 0 ? (
+                        <Box sx={{ textAlign: 'center', py: 4 }}>
+                          <Notifications sx={{ fontSize: 48, color: 'text.secondary', mb: 2 }} />
+                          <Typography variant="h6" color="text.secondary">
+                            No notifications
+                          </Typography>
+                          <Typography variant="body2" color="text.secondary">
+                            Notifications will appear here when workflows run or tasks are created
+                          </Typography>
+                        </Box>
+                      ) : (
+                        notifications.map((notification, index) => (
+                          <Box key={index} sx={{ display: 'flex', alignItems: 'flex-start', py: 2, borderBottom: '1px solid', borderColor: 'divider' }}>
+                            <ListItemIcon sx={{ minWidth: 40 }}>
+                              {notification.type === 'task_created' ? <CheckCircle color="success" /> :
+                               notification.type === 'workflow_completed' ? <PlayArrow color="info" /> :
+                               notification.type === 'error' ? <Error color="error" /> :
+                               <Info color="info" />}
+                            </ListItemIcon>
+                            <Box sx={{ flex: 1 }}>
+                              <Typography variant="body1" sx={{ fontWeight: 600, mb: 0.5 }}>
+                                {notification.title}
+                              </Typography>
+                              <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+                                {notification.message}
+                              </Typography>
+                              <Box sx={{ display: 'flex', gap: 2, alignItems: 'center' }}>
+                                <Typography variant="caption" color="text.secondary">
+                                  {formatDate(notification.timestamp)}
+                                </Typography>
+                                <Chip
+                                  label={notification.type.replace('_', ' ')}
+                                  size="small"
+                                  variant="outlined"
+                                />
+                              </Box>
+                            </Box>
+                          </Box>
+                        ))
+                      )}
+                    </Box>
+                  </CardContent>
+                </Card>
+              </Grid>
+            </Grid>
+          </TabPanel>
         </Box>
 
         {/* Start Workflow Dialog */}
@@ -1290,6 +2137,45 @@ const EmailAssistant: React.FC = () => {
           <DialogTitle>Start Email Workflow</DialogTitle>
           <DialogContent>
             <Grid container spacing={3} sx={{ mt: 1 }}>
+              {/* Saved Settings Toggle */}
+              {savedEmailSettings && savedEmailSettings.has_password && (
+                <Grid item xs={12}>
+                  <Alert severity="info" sx={{ mb: 2 }}>
+                    <Typography variant="body2">
+                      You have saved email settings configured. You can use them or enter new ones.
+                    </Typography>
+                  </Alert>
+                  <FormControlLabel
+                    control={
+                      <Switch
+                        checked={useSavedSettings}
+                        onChange={(e) => setUseSavedSettings(e.target.checked)}
+                      />
+                    }
+                    label="Use saved email settings"
+                  />
+                  {useSavedSettings && savedEmailSettings && (
+                    <Box sx={{ mt: 2, p: 2, bgcolor: 'grey.50', borderRadius: 1 }}>
+                      <Typography variant="body2" sx={{ fontWeight: 600, mb: 1 }}>
+                        Using saved settings:
+                      </Typography>
+                      <Typography variant="body2">
+                        Server: {savedEmailSettings.server}:{savedEmailSettings.port}
+                      </Typography>
+                      <Typography variant="body2">
+                        Username: {savedEmailSettings.username}
+                      </Typography>
+                      <Typography variant="body2">
+                        Mailbox: {savedEmailSettings.mailbox || 'INBOX'}
+                      </Typography>
+                    </Box>
+                  )}
+                </Grid>
+              )}
+
+              {/* Email Configuration Fields - Only show if not using saved settings */}
+              {!useSavedSettings && (
+                <>
               <Grid item xs={12} md={6}>
                 <TextField
                   fullWidth
@@ -1385,6 +2271,77 @@ const EmailAssistant: React.FC = () => {
                   label="Schedule Follow-ups"
                 />
               </Grid>
+
+              {/* Timeout Settings Section */}
+              <Grid item xs={12}>
+                <Typography variant="h6" sx={{ mt: 2, mb: 1 }}>
+                  Timeout Settings
+                </Typography>
+                <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+                  Configure timeout values for email processing operations
+                </Typography>
+              </Grid>
+
+              <Grid item xs={12} md={6}>
+                <TextField
+                  fullWidth
+                  label="Analysis Timeout"
+                  type="number"
+                  value={workflowForm.analysis_timeout}
+                  onChange={(e) => setWorkflowForm(prev => ({ ...prev, analysis_timeout: parseInt(e.target.value) || 120 }))}
+                  InputProps={{ endAdornment: 'seconds' }}
+                  helperText="Maximum time to analyze each email"
+                />
+              </Grid>
+
+              <Grid item xs={12} md={6}>
+                <TextField
+                  fullWidth
+                  label="Task Conversion Timeout"
+                  type="number"
+                  value={workflowForm.task_timeout}
+                  onChange={(e) => setWorkflowForm(prev => ({ ...prev, task_timeout: parseInt(e.target.value) || 60 }))}
+                  InputProps={{ endAdornment: 'seconds' }}
+                  helperText="Maximum time to convert analysis to tasks"
+                />
+              </Grid>
+
+              <Grid item xs={12} md={6}>
+                <TextField
+                  fullWidth
+                  label="Ollama Request Timeout"
+                  type="number"
+                  value={workflowForm.ollama_timeout}
+                  onChange={(e) => setWorkflowForm(prev => ({ ...prev, ollama_timeout: parseInt(e.target.value) || 60 }))}
+                  InputProps={{ endAdornment: 'seconds' }}
+                  helperText="Maximum time for individual Ollama API calls"
+                />
+              </Grid>
+
+              <Grid item xs={12} md={6}>
+                <TextField
+                  fullWidth
+                  label="Maximum Retries"
+                  type="number"
+                  value={workflowForm.max_retries}
+                  onChange={(e) => setWorkflowForm(prev => ({ ...prev, max_retries: parseInt(e.target.value) || 3 }))}
+                  helperText="Number of retry attempts for failed operations"
+                />
+              </Grid>
+
+              <Grid item xs={12} md={6}>
+                <TextField
+                  fullWidth
+                  label="Retry Delay"
+                  type="number"
+                  value={workflowForm.retry_delay}
+                  onChange={(e) => setWorkflowForm(prev => ({ ...prev, retry_delay: parseInt(e.target.value) || 1 }))}
+                  InputProps={{ endAdornment: 'seconds' }}
+                  helperText="Delay between retry attempts"
+                />
+              </Grid>
+                </>
+              )}
             </Grid>
           </DialogContent>
           <DialogActions>
@@ -1743,6 +2700,100 @@ const EmailAssistant: React.FC = () => {
           </DialogContent>
           <DialogActions>
             <Button onClick={() => setSavedSearchesDialog(false)}>Close</Button>
+          </DialogActions>
+        </Dialog>
+
+        {/* Email Settings Dialog */}
+        <Dialog open={emailSettingsDialog} onClose={() => setEmailSettingsDialog(false)} maxWidth="md" fullWidth>
+          <DialogTitle>Email Server Settings</DialogTitle>
+          <DialogContent>
+            <Grid container spacing={3} sx={{ mt: 1 }}>
+              <Grid item xs={12}>
+                <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+                  Configure your email server settings to connect to your mailbox. These settings will be saved securely and used for future workflows.
+                </Typography>
+              </Grid>
+              <Grid item xs={12} md={8}>
+                <TextField
+                  fullWidth
+                  label="IMAP Server"
+                  value={emailSettingsForm.server}
+                  onChange={(e) => setEmailSettingsForm(prev => ({ ...prev, server: e.target.value }))}
+                  placeholder="e.g., imap.gmail.com"
+                  helperText="Your email provider's IMAP server address"
+                />
+              </Grid>
+              <Grid item xs={12} md={4}>
+                <TextField
+                  fullWidth
+                  label="Port"
+                  type="number"
+                  value={emailSettingsForm.port}
+                  onChange={(e) => setEmailSettingsForm(prev => ({ ...prev, port: parseInt(e.target.value) || 993 }))}
+                  helperText="Usually 993 for SSL"
+                />
+              </Grid>
+              <Grid item xs={12} md={6}>
+                <TextField
+                  fullWidth
+                  label="Username"
+                  value={emailSettingsForm.username}
+                  onChange={(e) => setEmailSettingsForm(prev => ({ ...prev, username: e.target.value }))}
+                  placeholder="your-email@example.com"
+                  helperText="Your email address"
+                />
+              </Grid>
+              <Grid item xs={12} md={6}>
+                <TextField
+                  fullWidth
+                  label="Password"
+                  type="password"
+                  value={emailSettingsForm.password}
+                  onChange={(e) => setEmailSettingsForm(prev => ({ ...prev, password: e.target.value }))}
+                  helperText="Your email password or app password"
+                />
+              </Grid>
+              <Grid item xs={12} md={6}>
+                <TextField
+                  fullWidth
+                  label="Mailbox"
+                  value={emailSettingsForm.mailbox}
+                  onChange={(e) => setEmailSettingsForm(prev => ({ ...prev, mailbox: e.target.value }))}
+                  placeholder="INBOX"
+                  helperText="Mailbox folder to process (usually INBOX)"
+                />
+              </Grid>
+              <Grid item xs={12} md={6}>
+                <FormControlLabel
+                  control={
+                    <Switch
+                      checked={emailSettingsForm.use_ssl}
+                      onChange={(e) => setEmailSettingsForm(prev => ({ ...prev, use_ssl: e.target.checked }))}
+                    />
+                  }
+                  label="Use SSL/TLS"
+                />
+              </Grid>
+              {savedEmailSettings && (
+                <Grid item xs={12}>
+                  <Alert severity="info">
+                    <Typography variant="body2">
+                      <strong>Current saved settings:</strong> {savedEmailSettings.username} @ {savedEmailSettings.server}:{savedEmailSettings.port}
+                    </Typography>
+                  </Alert>
+                </Grid>
+              )}
+            </Grid>
+          </DialogContent>
+          <DialogActions>
+            <Button onClick={() => setEmailSettingsDialog(false)}>Cancel</Button>
+            <Button
+              variant="contained"
+              onClick={handleUpdateEmailSettings}
+              disabled={!emailSettingsForm.server || !emailSettingsForm.username || !emailSettingsForm.password}
+            >
+              Save Email Settings
+            </Button>
           </DialogActions>
         </Dialog>
 

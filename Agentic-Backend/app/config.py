@@ -96,6 +96,13 @@ class Settings(BaseSettings):
     email_connector_batch_size: int = Field(default=50, env="EMAIL_CONNECTOR_BATCH_SIZE")
     email_connector_attachment_max_size_mb: int = Field(default=10, env="EMAIL_CONNECTOR_ATTACHMENT_MAX_SIZE_MB")
 
+    # Email Workflow Configuration
+    email_workflow_analysis_timeout: int = Field(default=120, env="EMAIL_WORKFLOW_ANALYSIS_TIMEOUT")  # seconds
+    email_workflow_task_timeout: int = Field(default=60, env="EMAIL_WORKFLOW_TASK_TIMEOUT")  # seconds
+    email_workflow_ollama_timeout: int = Field(default=60, env="EMAIL_WORKFLOW_OLLAMA_TIMEOUT")  # seconds for individual Ollama calls
+    email_workflow_max_retries: int = Field(default=3, env="EMAIL_WORKFLOW_MAX_RETRIES")
+    email_workflow_retry_delay: float = Field(default=1.0, env="EMAIL_WORKFLOW_RETRY_DELAY")  # seconds
+
     # File System Connector Configuration
     filesystem_connector_recursive_scan: bool = Field(default=True, env="FILESYSTEM_CONNECTOR_RECURSIVE_SCAN")
     filesystem_connector_follow_symlinks: bool = Field(default=False, env="FILESYSTEM_CONNECTOR_FOLLOW_SYMLINKS")

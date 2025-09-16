@@ -444,6 +444,27 @@ const Security: React.FC = () => {
                       />
                     </Box>
                   </Box>
+
+                  {/* Add padding to match Security Configuration height */}
+                  <Box sx={{ mt: 4 }}>
+                    <Typography variant="body2" color="text.secondary" sx={{ mb: 1 }}>
+                      Additional Settings
+                    </Typography>
+                    <Box sx={{ display: 'flex', gap: 2, flexWrap: 'wrap' }}>
+                      <Chip
+                        label="Auto-scaling: Enabled"
+                        size="small"
+                        variant="outlined"
+                        color="success"
+                      />
+                      <Chip
+                        label="Monitoring: Active"
+                        size="small"
+                        variant="outlined"
+                        color="info"
+                      />
+                    </Box>
+                  </Box>
                 </Box>
               )}
             </CardContent>
@@ -490,6 +511,19 @@ const Security: React.FC = () => {
                   </Typography>
                   <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
                     Configurable rate limits prevent system abuse and ensure fair resource usage.
+                  </Typography>
+                  <FormControlLabel
+                    control={<Switch checked={true} disabled />}
+                    label="Enabled"
+                  />
+                </Box>
+
+                <Box sx={{ p: 2, border: 1, borderColor: 'divider', borderRadius: 2 }}>
+                  <Typography variant="subtitle1" sx={{ fontWeight: 600, mb: 1 }}>
+                    Audit Logging
+                  </Typography>
+                  <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+                    Comprehensive logging of all security events and agent activities.
                   </Typography>
                   <FormControlLabel
                     control={<Switch checked={true} disabled />}
