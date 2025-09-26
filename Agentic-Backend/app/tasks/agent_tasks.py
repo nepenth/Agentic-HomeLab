@@ -278,14 +278,15 @@ async def _process_email_workflow_async(
     mailbox_config: Dict[str, Any],
     processing_options: Dict[str, Any]
 ) -> Dict[str, Any]:
-    """Async implementation of email workflow processing."""
-    from app.services.email_analysis_service import email_analysis_service
-    from app.services.email_task_converter import email_task_converter, TaskCreationRequest
+    """
+    Modern unified email workflow processing.
+
+    Uses locally synced emails with embeddings instead of live email fetching.
+    This provides better performance, consistency, and intelligence.
+    """
+    from app.services.unified_email_workflow_service import unified_email_workflow_service
     from app.db.models.email_workflow import EmailWorkflow, EmailWorkflowStatus, EmailWorkflowLog
-    from app.db.models.content import ContentItem as ContentItemModel
     from app.db.models.notification import Notification, NotificationStatus
-    from app.connectors.communication import EmailConnector
-    from app.connectors.base import ConnectorConfig, ConnectorType
     from app.services.pubsub_service import pubsub_service
     from datetime import datetime
 
@@ -304,129 +305,63 @@ async def _process_email_workflow_async(
                 workflow_id=workflow_uuid,
                 user_id=workflow.user_id,
                 level="info",
-                message="Email workflow processing started",
-                context={"phase": "initialization"},
+                message="Unified email workflow processing started (using local emails)",
+                context={"phase": "initialization", "approach": "unified_local_emails"},
                 workflow_phase="initialization"
             )
             session.add(initial_log)
             await session.commit()
 
-            # Use EmailConnector to fetch emails
-            processing_opts = processing_options or {}
-            max_emails = processing_opts.get('max_emails', 50)
-            unread_only = processing_opts.get('unread_only', False)
-            since_date = processing_opts.get('since_date')
+            # Update workflow status to running
+            workflow.status = EmailWorkflowStatus.RUNNING
+            workflow.started_at = datetime.utcnow()
+            await session.commit()
 
-            # Create proper ConnectorConfig object
-            connector_config = ConnectorConfig(
-                name="email_workflow_connector",
-                connector_type=ConnectorType.COMMUNICATION,
-                source_config={
-                    "mailbox": mailbox_config.get("mailbox", "INBOX"),
-                    "limit": max_emails,
-                    "unread_only": unread_only,
-                    "since_date": since_date
-                },
-                credentials={
-                    "imap_server": mailbox_config.get("server"),
-                    "imap_port": mailbox_config.get("port", 993),
-                    "username": mailbox_config.get("username"),
-                    "password": mailbox_config.get("password")
+            # Use unified service to process locally synced emails
+            result = await unified_email_workflow_service.process_workflow_from_synced_emails(
+                db=session,
+                user_id=workflow.user_id,
+                workflow_id=workflow_id,
+                processing_options=processing_options
+            )
+
+            # Handle result from unified service
+            if not result.get("success"):
+                # Workflow failed in unified service
+                error_message = result.get("error", "Unknown error in unified service")
+
+                workflow.status = EmailWorkflowStatus.FAILED
+                workflow.completed_at = datetime.utcnow()
+                workflow.error_message = error_message
+                await session.commit()
+
+                # Log failure
+                failure_log = EmailWorkflowLog(
+                    workflow_id=workflow_uuid,
+                    user_id=workflow.user_id,
+                    level="error",
+                    message=f"Unified email workflow failed: {error_message}",
+                    context={"error": error_message, "approach": "unified_local_emails"},
+                    workflow_phase="failed"
+                )
+                session.add(failure_log)
+                await session.commit()
+
+                return {
+                    "status": "failed",
+                    "error": error_message,
+                    "emails_processed": 0,
+                    "tasks_created": 0
                 }
-            )
 
-            connector = EmailConnector(connector_config)
+            # Workflow succeeded - extract results
+            emails_processed = result.get("emails_processed", 0)
+            tasks_created = result.get("tasks_created", 0)
+            success_message = result.get("message", "Unified workflow completed")
 
-            # Log email discovery start
-            discovery_log = EmailWorkflowLog(
-                workflow_id=workflow_uuid,
-                user_id=workflow.user_id,
-                level="info",
-                message="Starting email discovery from mailbox",
-                context={
-                    "mailbox": mailbox_config.get("mailbox", "INBOX"),
-                    "max_emails": max_emails,
-                    "unread_only": unread_only
-                },
-                workflow_phase="email_discovery"
-            )
-            session.add(discovery_log)
-            await session.commit()
-
-            # Use discover method instead of fetch_emails
-            source_config = {
-                "mailbox": mailbox_config.get("mailbox", "INBOX"),
-                "limit": max_emails,
-                "unread_only": unread_only,
-                "since_date": since_date
-            }
-            content_items = await connector.discover(source_config)
-
-            # Log email discovery completion
-            discovery_complete_log = EmailWorkflowLog(
-                workflow_id=workflow_uuid,
-                user_id=workflow.user_id,
-                level="info",
-                message=f"Email discovery completed: {len(content_items)} emails found",
-                context={"emails_found": len(content_items)},
-                workflow_phase="email_discovery",
-                email_count=len(content_items)
-            )
-            session.add(discovery_complete_log)
-            await session.commit()
-
-            # Convert ContentItems to email format expected by the rest of the code
-            emails = []
-            for item in content_items:
-                email_data = {
-                    'id': item.id,
-                    'subject': item.title or '',
-                    'body': item.description or '',
-                    'sender': item.metadata.get('sender', ''),
-                    'date': item.last_modified.isoformat() if item.last_modified else datetime.now().isoformat(),
-                    'metadata': item.metadata
-                }
-                emails.append(email_data)
-
-            emails_processed = 0
-            tasks_created = 0
-
-            # Log processing start
-            processing_log = EmailWorkflowLog(
-                workflow_id=workflow_uuid,
-                user_id=workflow.user_id,
-                level="info",
-                message=f"Starting to process {len(emails)} emails",
-                context={"total_emails": len(emails)},
-                workflow_phase="email_processing",
-                email_count=len(emails)
-            )
-            session.add(processing_log)
-            await session.commit()
-
-            for email in emails:
-                # Analyze email using sync service
-                analysis = sync_email_analysis_service.analyze_email(email['body'], email['metadata'])
-
-                # Create tasks if action required
-                result = None
-                if analysis.action_required:
-                    task_request = TaskCreationRequest(
-                        email_analysis=analysis,
-                        user_id=workflow.user_id,
-                        email_content=email['body'],
-                        email_metadata=email['metadata']
-                    )
-                    result = sync_email_task_converter.convert_to_tasks(task_request, session)
-                    tasks_created += len(result.tasks_created) if result else 0
-
-                emails_processed += 1
-                workflow.emails_processed += 1
-                workflow.tasks_created += len(result.tasks_created) if result else 0
-
-                # Update workflow
-                session.commit()
-
+            # Update workflow with results
+            workflow.emails_processed = emails_processed
+            workflow.tasks_created = tasks_created
             workflow.status = EmailWorkflowStatus.COMPLETED
             workflow.completed_at = datetime.utcnow()
             await session.commit()
@@ -436,11 +371,13 @@ async def _process_email_workflow_async(
                 workflow_id=workflow_uuid,
                 user_id=workflow.user_id,
                 level="info",
-                message=f"Email workflow completed successfully: {emails_processed} emails processed, {tasks_created} tasks created",
+                message=f"Unified email workflow completed: {emails_processed} emails processed, {tasks_created} tasks created",
                 context={
                     "emails_processed": emails_processed,
                     "tasks_created": tasks_created,
-                    "processing_time_seconds": (datetime.utcnow() - workflow.started_at).total_seconds() if workflow.started_at else None
+                    "processing_time_seconds": (datetime.utcnow() - workflow.started_at).total_seconds() if workflow.started_at else None,
+                    "approach": "unified_local_emails",
+                    "message": success_message
                 },
                 workflow_phase="completed",
                 email_count=emails_processed,
@@ -462,12 +399,13 @@ async def _process_email_workflow_async(
             # Publish via pubsub
             await pubsub_service.publish("notifications", notification.to_dict())
 
-            logger.info(f"Completed email workflow {workflow_id}: {emails_processed} emails, {tasks_created} tasks")
+            logger.info(f"Completed unified email workflow {workflow_id}: {emails_processed} emails, {tasks_created} tasks")
 
             return {
                 "status": "completed",
                 "emails_processed": emails_processed,
-                "tasks_created": tasks_created
+                "tasks_created": tasks_created,
+                "approach": "unified_local_emails"
             }
 
     except Exception as e:

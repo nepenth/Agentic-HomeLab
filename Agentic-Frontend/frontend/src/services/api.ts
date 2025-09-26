@@ -81,7 +81,10 @@ class ApiClient {
   }
 
   private loadAuthToken() {
-    this.authToken = localStorage.getItem('auth_token');
+    // Check for auth_token first, then fallback to access_token for compatibility
+    this.authToken = localStorage.getItem('auth_token') ||
+                     localStorage.getItem('access_token') ||
+                     sessionStorage.getItem('access_token');
   }
 
   setAuthToken(token: string) {
@@ -92,10 +95,23 @@ class ApiClient {
   clearAuthToken() {
     this.authToken = null;
     localStorage.removeItem('auth_token');
+    localStorage.removeItem('access_token');
+    sessionStorage.removeItem('access_token');
   }
 
   getAuthToken() {
     return this.authToken;
+  }
+
+  // Method to refresh auth token from storage (useful for manual testing)
+  refreshAuthToken() {
+    this.loadAuthToken();
+  }
+
+  // Method to manually set token for testing
+  setTestToken(token: string) {
+    localStorage.setItem('access_token', token);
+    this.loadAuthToken();
   }
 
   // Health endpoints
@@ -238,6 +254,26 @@ class ApiClient {
     limit?: number;
   }): Promise<LogEntry[]> {
     const response = await this.client.get('/api/v1/logs/history', { params });
+    return response.data;
+  }
+
+  async getSystemLogs(params?: {
+    workflow_type?: string;
+    level?: string;
+    limit?: number;
+    offset?: number;
+  }): Promise<LogEntry[]> {
+    const response = await this.client.get('/api/v1/logs/system', { params });
+    return response.data;
+  }
+
+  async getUserLogs(userId: number, params?: {
+    workflow_type?: string;
+    level?: string;
+    limit?: number;
+    offset?: number;
+  }): Promise<LogEntry[]> {
+    const response = await this.client.get(`/api/v1/logs/user/${userId}`, { params });
     return response.data;
   }
 
@@ -1918,9 +1954,74 @@ class ApiClient {
       include_threads?: boolean;
       max_results?: number;
     };
+    model_name?: string;
+    max_days_back?: number;
+    conversation_history?: Array<{role: string; content: string}>;
+    stream?: boolean;
   }) {
+    // No need for user_id - it's extracted from JWT token by backend
     const response = await this.client.post('/api/v1/email/chat', messageData);
     return response.data;
+  }
+
+  // Streaming email chat for real-time responses
+  async *sendEmailChatMessageStream(messageData: {
+    message: string;
+    session_id?: string;
+    context?: {
+      timezone?: string;
+      preferred_format?: string;
+      include_threads?: boolean;
+      max_results?: number;
+    };
+    model_name?: string;
+    max_days_back?: number;
+    conversation_history?: Array<{role: string; content: string}>;
+  }): AsyncGenerator<any, void, unknown> {
+    const requestData = { ...messageData, stream: true };
+
+    const response = await fetch(`${this.client.defaults.baseURL}/api/v1/email/chat`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': this.authToken ? `Bearer ${this.authToken}` : '',
+      },
+      body: JSON.stringify(requestData),
+    });
+
+    if (!response.ok) {
+      throw new Error(`HTTP error! status: ${response.status}`);
+    }
+
+    const reader = response.body?.getReader();
+    const decoder = new TextDecoder();
+
+    if (!reader) {
+      throw new Error('No response body available');
+    }
+
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        const chunk = decoder.decode(value);
+        const lines = chunk.split('\n');
+
+        for (const line of lines) {
+          if (line.startsWith('data: ')) {
+            try {
+              const data = JSON.parse(line.slice(6));
+              yield data;
+            } catch (e) {
+              console.warn('Failed to parse SSE data:', line);
+            }
+          }
+        }
+      }
+    } finally {
+      reader.releaseLock();
+    }
   }
 
   async searchEmailsViaChat(searchData: {
@@ -2241,6 +2342,91 @@ class ApiClient {
   }
 
   // ==========================================
+  // EMAIL SYNC SYSTEM
+  // ==========================================
+
+  // Email Account Management
+  async createEmailAccount(accountData: {
+    account_type: string;
+    email_address: string;
+    display_name?: string;
+    auth_credentials: Record<string, any>;
+    sync_settings?: Record<string, any>;
+    sync_interval_minutes?: number;
+    auto_sync_enabled?: boolean;
+  }) {
+    const response = await this.client.post('/api/v1/email-sync/accounts', accountData);
+    return response.data;
+  }
+
+  async getEmailAccounts() {
+    const response = await this.client.get('/api/v1/email-sync/accounts');
+    return response.data;
+  }
+
+  async updateEmailAccount(accountId: string, updateData: {
+    display_name?: string;
+    sync_interval_minutes?: number;
+    auto_sync_enabled?: boolean;
+    sync_days_back?: number;
+    max_emails_limit?: number;
+    sync_settings?: any;
+    auth_credentials?: Record<string, any>;
+  }) {
+    const response = await this.client.put(`/api/v1/email-sync/accounts/${accountId}`, updateData);
+    return response.data;
+  }
+
+  async deleteEmailAccount(accountId: string) {
+    const response = await this.client.delete(`/api/v1/email-sync/accounts/${accountId}`);
+    return response.data;
+  }
+
+  // Email Synchronization
+  async getSyncDefaults() {
+    const response = await this.client.get('/api/v1/email-sync/defaults');
+    return response.data;
+  }
+
+  async triggerEmailSync(syncData: {
+    account_ids?: string[];
+    sync_type?: string;
+    force_sync?: boolean;
+    sync_days_back?: number;
+    max_emails_limit?: number;
+  }) {
+    const response = await this.client.post('/api/v1/email-sync/sync', syncData);
+    return response.data;
+  }
+
+  async getEmailSyncStatus() {
+    const response = await this.client.get('/api/v1/email-sync/sync/status');
+    return response.data;
+  }
+
+  // Email Embeddings
+  async generateEmailEmbeddings(embeddingData: {
+    user_id?: number;
+    force_regenerate?: boolean;
+  }) {
+    const response = await this.client.post('/api/v1/email-sync/embeddings/generate', embeddingData);
+    return response.data;
+  }
+
+  // Synced Email Retrieval
+  async getSyncedEmails(params?: {
+    limit?: number;
+    offset?: number;
+    search?: string;
+    category?: string;
+    sender?: string;
+    days_back?: number;
+  }) {
+    const response = await this.client.get('/api/v1/email-sync/emails', { params });
+    return response.data;
+  }
+
+  // ==========================================
   // MONITORING & OBSERVABILITY
   // ==========================================
 
@@ -2323,4 +2509,35 @@ class ApiClient {
 }
 
 export const apiClient = new ApiClient();
+
+// For development/testing - expose utilities globally (no hardcoded tokens)
+if (import.meta.env.DEV) {
+  (window as any).setAuthToken = (token: string) => {
+    apiClient.setTestToken(token);
+    console.log('Auth token set successfully');
+  };
+
+  (window as any).getAuthToken = () => {
+    const token = apiClient.getAuthToken();
+    console.log('Current auth token:', token ? 'Set' : 'Not set');
+    return token;
+  };
+
+  (window as any).clearAuthToken = () => {
+    apiClient.clearAuthToken();
+    console.log('Auth token cleared');
+  };
+
+  (window as any).testChatMessage = async (message: string) => {
+    try {
+      const response = await apiClient.sendEmailChatMessage({ message });
+      console.log('Chat response:', response);
+    } catch (error) {
+      console.error('Chat error:', error);
+    }
+  };
+
+  console.log('Dev utilities available: setAuthToken(token), getAuthToken(), clearAuthToken(), testChatMessage(message)');
+}
+
 export default apiClient;

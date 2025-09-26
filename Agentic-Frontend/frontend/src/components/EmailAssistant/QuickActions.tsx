@@ -9,7 +9,8 @@ import {
   IconButton,
   Tooltip,
   Fade,
-  Badge
+  Badge,
+  Stack
 } from '@mui/material';
 import {
   Assignment,
@@ -52,6 +53,18 @@ interface QuickActionsProps {
   compact?: boolean;
 }
 
+const getColorValue = (color?: string) => {
+  const colorMap: Record<string, string> = {
+    primary: '#007AFF',
+    secondary: '#5856D6',
+    success: '#34C759',
+    warning: '#FF9500',
+    error: '#FF3B30',
+    default: '#8E8E93'
+  };
+  return colorMap[color || 'default'] || colorMap.default;
+};
+
 const QuickActions: React.FC<QuickActionsProps> = ({
   onActionClick,
   taskStats,
@@ -63,7 +76,7 @@ const QuickActions: React.FC<QuickActionsProps> = ({
     // Task Management
     {
       id: 'show_pending_tasks',
-      label: 'Pending Tasks',
+      label: 'Pending',
       icon: <Assignment />,
       description: 'Show all pending tasks from emails',
       badge: taskStats?.pending,
@@ -92,14 +105,14 @@ const QuickActions: React.FC<QuickActionsProps> = ({
     // Email Search & Management
     {
       id: 'search_emails',
-      label: 'Search Emails',
+      label: 'Search',
       icon: <Search />,
       description: 'Search your inbox intelligently',
       category: 'emails'
     },
     {
       id: 'show_urgent_emails',
-      label: 'Urgent Emails',
+      label: 'Urgent',
       icon: <PriorityHigh />,
       description: 'Find urgent emails needing attention',
       color: 'error',
@@ -107,7 +120,7 @@ const QuickActions: React.FC<QuickActionsProps> = ({
     },
     {
       id: 'recent_emails',
-      label: 'Recent Emails',
+      label: 'Recent',
       icon: <Email />,
       description: 'Show emails from today',
       category: 'emails'
@@ -116,7 +129,7 @@ const QuickActions: React.FC<QuickActionsProps> = ({
     // Workflow Status
     {
       id: 'workflow_status',
-      label: 'Workflow Status',
+      label: 'Status',
       icon: <Timeline />,
       description: 'Check email workflow status',
       badge: workflowStats?.active,
@@ -167,10 +180,10 @@ const QuickActions: React.FC<QuickActionsProps> = ({
 
   const getCategoryTitle = (category: string): string => {
     const titles: Record<string, string> = {
-      tasks: "Task Management",
-      emails: "Email Operations",
-      workflows: "Workflow Control",
-      insights: "Analytics & Insights"
+      tasks: "Tasks",
+      emails: "Emails",
+      workflows: "Workflows",
+      insights: "Analytics"
     };
     return titles[category] || category;
   };
@@ -208,112 +221,184 @@ const QuickActions: React.FC<QuickActionsProps> = ({
     return (
       <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap' }}>
         {priorityActions.map((action) => (
-          <Button
-            key={action.id}
-            variant="outlined"
-            size="small"
-            startIcon={action.badge ? (
-              <Badge badgeContent={action.badge} color={action.color}>
-                {action.icon}
-              </Badge>
-            ) : action.icon}
-            onClick={() => handleActionClick(action)}
-            disabled={disabled}
-            sx={{ minWidth: 'auto' }}
-          >
-            {action.label}
-          </Button>
+          <Tooltip key={action.id} title={action.description} placement="top">
+            <Button
+              variant="outlined"
+              size="small"
+              startIcon={action.badge ? (
+                <Badge
+                  badgeContent={action.badge}
+                  sx={{
+                    '& .MuiBadge-badge': {
+                      backgroundColor: getColorValue(action.color),
+                      color: 'white'
+                    }
+                  }}
+                >
+                  {action.icon}
+                </Badge>
+              ) : action.icon}
+              onClick={() => handleActionClick(action)}
+              disabled={disabled}
+              sx={{ minWidth: 'auto' }}
+            >
+              {action.label}
+            </Button>
+          </Tooltip>
         ))}
       </Box>
     );
   }
 
   return (
-    <Paper elevation={1} sx={{ p: 2, bgcolor: 'background.paper' }}>
-      <Typography variant="h6" sx={{ mb: 2, display: 'flex', alignItems: 'center', gap: 1 }}>
-        <FilterList />
+    <Paper
+      elevation={2}
+      sx={{
+        p: 2,
+        bgcolor: 'background.paper',
+        borderRadius: 2,
+        border: '1px solid',
+        borderColor: 'divider'
+      }}
+    >
+      <Typography
+        variant="h6"
+        sx={{
+          mb: 2,
+          display: 'flex',
+          alignItems: 'center',
+          gap: 1,
+          fontWeight: 600,
+          color: 'text.primary',
+          fontSize: '1rem'
+        }}
+      >
+        <FilterList sx={{ color: '#007AFF', fontSize: '1.2rem' }} />
         Quick Actions
       </Typography>
 
-      <Grid container spacing={2}>
+      <Stack spacing={2}>
         {Object.entries(groupedActions).map(([category, actions]) => (
-          <Grid item xs={12} sm={6} md={3} key={category}>
-            <Box>
-              <Typography
-                variant="subtitle2"
-                sx={{
-                  mb: 1,
-                  color: getCategoryColor(category),
-                  fontWeight: 600,
-                  fontSize: '0.9rem'
-                }}
-              >
-                {getCategoryTitle(category)}
-              </Typography>
+          <Box key={category}>
+            {/* Category Header */}
+            <Typography
+              variant="caption"
+              sx={{
+                display: 'block',
+                mb: 1,
+                color: getCategoryColor(category),
+                fontWeight: 600,
+                textTransform: 'uppercase',
+                letterSpacing: '0.5px',
+                fontSize: '0.7rem'
+              }}
+            >
+              {getCategoryTitle(category)}
+            </Typography>
 
-              <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
-                {actions.map((action) => (
-                  <Fade key={action.id} in={true} timeout={300}>
+            {/* Action Buttons Grid */}
+            <Grid container spacing={1}>
+              {actions.map((action) => (
+                <Grid item xs={6} key={action.id}>
+                  <Tooltip title={action.description} placement="top">
                     <Button
                       variant="outlined"
                       size="small"
-                      startIcon={
-                        action.badge ? (
-                          <Badge
-                            badgeContent={action.badge}
-                            color={action.color}
-                            max={99}
-                          >
-                            {action.icon}
-                          </Badge>
-                        ) : action.icon
-                      }
                       onClick={() => handleActionClick(action)}
                       disabled={disabled}
-                      color={action.color}
                       sx={{
-                        justifyContent: 'flex-start',
-                        textAlign: 'left',
-                        py: 1,
+                        width: '100%',
+                        minHeight: '48px',
+                        p: 1,
+                        display: 'flex',
+                        flexDirection: 'column',
+                        gap: 0.5,
+                        borderColor: `${getColorValue(action.color)}30`,
+                        backgroundColor: `${getColorValue(action.color)}05`,
+                        color: getColorValue(action.color),
                         '&:hover': {
                           transform: 'translateY(-1px)',
-                          boxShadow: 2
+                          boxShadow: `0 2px 8px ${getColorValue(action.color)}20`,
+                          backgroundColor: `${getColorValue(action.color)}10`,
+                          borderColor: `${getColorValue(action.color)}50`
                         },
-                        transition: 'all 0.2s ease-in-out'
+                        '&:disabled': {
+                          backgroundColor: '#f5f5f5',
+                          color: '#bbb'
+                        },
+                        transition: 'all 0.2s ease-in-out',
+                        borderRadius: 1.5
                       }}
-                      fullWidth
                     >
-                      <Box sx={{ flexGrow: 1, textAlign: 'left' }}>
-                        <Typography variant="body2" sx={{ fontWeight: 500 }}>
-                          {action.label}
-                        </Typography>
-                        {action.description && (
-                          <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>
-                            {action.description}
-                          </Typography>
+                      {/* Icon with Badge */}
+                      <Box sx={{ position: 'relative' }}>
+                        {action.badge ? (
+                          <Badge
+                            badgeContent={action.badge}
+                            max={99}
+                            sx={{
+                              '& .MuiBadge-badge': {
+                                backgroundColor: getColorValue(action.color),
+                                color: 'white',
+                                fontSize: '0.6rem',
+                                minWidth: '14px',
+                                height: '14px'
+                              }
+                            }}
+                          >
+                            {React.cloneElement(action.icon as React.ReactElement, {
+                              sx: { fontSize: '1.1rem' }
+                            })}
+                          </Badge>
+                        ) : (
+                          React.cloneElement(action.icon as React.ReactElement, {
+                            sx: { fontSize: '1.1rem' }
+                          })
                         )}
                       </Box>
+
+                      {/* Label */}
+                      <Typography
+                        variant="caption"
+                        sx={{
+                          fontWeight: 500,
+                          lineHeight: 1,
+                          fontSize: '0.7rem',
+                          textAlign: 'center'
+                        }}
+                      >
+                        {action.label}
+                      </Typography>
                     </Button>
-                  </Fade>
-                ))}
-              </Box>
-            </Box>
-          </Grid>
+                  </Tooltip>
+                </Grid>
+              ))}
+            </Grid>
+          </Box>
         ))}
-      </Grid>
+      </Stack>
 
       {/* Custom Action */}
-      <Box sx={{ mt: 2, pt: 2, borderTop: 1, borderColor: 'divider' }}>
-        <Button
-          variant="text"
-          size="small"
-          startIcon={<Add />}
-          onClick={() => onActionClick('custom', 'How can I help you today?')}
-          disabled={disabled}
-          sx={{ fontSize: '0.8rem' }}
-        >
-          Ask something else...
-        </Button>
+      <Box sx={{ mt: 2, pt: 1.5, borderTop: 1, borderColor: 'divider' }}>
+        <Tooltip title="Ask anything else about your emails" placement="top">
+          <Button
+            variant="text"
+            size="small"
+            startIcon={<Add />}
+            onClick={() => onActionClick('custom', 'How can I help you today?')}
+            disabled={disabled}
+            sx={{
+              fontSize: '0.75rem',
+              color: 'text.secondary',
+              '&:hover': {
+                backgroundColor: '#f5f5f5'
+              }
+            }}
+            fullWidth
+          >
+            Ask something else...
+          </Button>
+        </Tooltip>
       </Box>
     </Paper>
   );

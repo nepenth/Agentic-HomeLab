@@ -40,7 +40,7 @@ def main():
     ]
     
     # Add queues if specified
-    worker_args.extend(["--queues=agent_tasks,celery"])
+    worker_args.extend(["--queues=agent_tasks,email_sync,celery"])
     
     # Start the worker
     try:

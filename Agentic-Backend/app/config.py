@@ -28,6 +28,11 @@ class Settings(BaseSettings):
     
     # Application
     app_name: str = Field(default="Agentic Backend", env="APP_NAME")
+
+    # Email Sync System Defaults (can be overridden per account)
+    email_sync_default_days_back: int = Field(default=365, env="EMAIL_SYNC_DEFAULT_DAYS_BACK")
+    email_sync_default_max_emails: int = Field(default=5000, env="EMAIL_SYNC_DEFAULT_MAX_EMAILS")
+    email_sync_batch_size: int = Field(default=50, env="EMAIL_SYNC_BATCH_SIZE")
     app_version: str = Field(default="0.1.0", env="APP_VERSION")
     debug: bool = Field(default=False, env="DEBUG")
     

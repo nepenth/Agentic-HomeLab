@@ -267,11 +267,11 @@ class WebSocketService {
     const token = apiClient.getAuthToken();
     this.connect(endpoint, token || undefined);
 
-    // Add handler for log_entry messages
-    this.addMessageHandler('log_entry', callback);
+    // Add handler for log messages (backend sends "log" type)
+    this.addMessageHandler('log', callback);
 
     return () => {
-      this.removeMessageHandler('log_entry', callback);
+      this.removeMessageHandler('log', callback);
     };
   }
 

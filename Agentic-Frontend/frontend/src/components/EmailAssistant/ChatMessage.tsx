@@ -33,6 +33,7 @@ import {
   PriorityHigh,
   Info
 } from '@mui/icons-material';
+import EmailReferences from './EmailReferences';
 
 interface TaskData {
   id: string;
@@ -54,6 +55,11 @@ interface EmailData {
   has_attachments?: boolean;
 }
 
+interface ThinkingContent {
+  id: string;
+  content: string;
+}
+
 interface ChatMessageProps {
   id: string;
   content: string;
@@ -66,6 +72,9 @@ interface ChatMessageProps {
     search_results?: EmailData[];
     task_stats?: any;
     workflow_stats?: any;
+    email_references?: any[];
+    tasks_created?: any[];
+    metadata?: any;
     [key: string]: any;
   };
   suggestedActions?: string[];
@@ -73,6 +82,8 @@ interface ChatMessageProps {
   onActionClick?: (action: string) => void;
   onFeedback?: (messageId: string, type: 'positive' | 'negative') => void;
   onTaskComplete?: (taskId: string) => void;
+  thinkingContent?: ThinkingContent[];
+  isStreaming?: boolean;
 }
 
 const ChatMessage: React.FC<ChatMessageProps> = ({
@@ -87,10 +98,13 @@ const ChatMessage: React.FC<ChatMessageProps> = ({
   actionsPerformed = [],
   onActionClick,
   onFeedback,
-  onTaskComplete
+  onTaskComplete,
+  thinkingContent = [],
+  isStreaming = false
 }) => {
   const [expanded, setExpanded] = useState(false);
   const [feedbackGiven, setFeedbackGiven] = useState<'positive' | 'negative' | null>(null);
+  const [thinkingExpanded, setThinkingExpanded] = useState(false);
 
   const isUser = messageType === 'user';
   const isSystem = messageType === 'system';
@@ -195,9 +209,187 @@ const ChatMessage: React.FC<ChatMessageProps> = ({
           </Box>
 
           {/* Main Content */}
-          <Typography variant="body1" sx={{ mb: richContent || suggestedActions.length > 0 ? 1 : 0 }}>
+          <Typography variant="body1" sx={{ mb: richContent || suggestedActions.length > 0 || thinkingContent.length > 0 ? 1 : 0 }}>
             {content}
+            {isStreaming && (
+              <Box
+                component="span"
+                sx={{
+                  animation: 'blink 1s linear infinite',
+                  '@keyframes blink': {
+                    '0%': { opacity: 1 },
+                    '50%': { opacity: 0 },
+                    '100%': { opacity: 1 },
+                  }
+                }}
+              >
+                ▋
+              </Box>
+            )}
           </Typography>
+
+          {/* Thinking Content */}
+          {thinkingContent.length > 0 && (
+            <Card
+              variant="outlined"
+              sx={{
+                mt: 1,
+                mb: 1,
+                bgcolor: 'rgba(156, 39, 176, 0.04)',
+                borderColor: 'rgba(156, 39, 176, 0.23)'
+              }}
+            >
+              <Box
+                sx={{
+                  p: 1,
+                  display: 'flex',
+                  alignItems: 'center',
+                  cursor: 'pointer',
+                  '&:hover': { bgcolor: 'rgba(156, 39, 176, 0.08)' }
+                }}
+                onClick={() => setThinkingExpanded(!thinkingExpanded)}
+              >
+                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, flexGrow: 1 }}>
+                  <Box
+                    sx={{
+                      width: 20,
+                      height: 20,
+                      borderRadius: '50%',
+                      bgcolor: 'rgba(156, 39, 176, 0.1)',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'center'
+                    }}
+                  >
+                    🧠
+                  </Box>
+                  <Typography variant="caption" sx={{ color: '#9C27B0', fontWeight: 'medium' }}>
+                    Thinking Process ({thinkingContent.length} section{thinkingContent.length > 1 ? 's' : ''})
+                  </Typography>
+                </Box>
+                <IconButton size="small" sx={{ color: '#9C27B0' }}>
+                  {thinkingExpanded ? <ExpandLess /> : <ExpandMore />}
+                </IconButton>
+              </Box>
+
+              <Collapse in={thinkingExpanded}>
+                <CardContent sx={{ pt: 0, pb: 1 }}>
+                  {thinkingContent.map((thinking) => (
+                    <Box
+                      key={thinking.id}
+                      sx={{
+                        p: 1.5,
+                        mb: 1,
+                        bgcolor: 'rgba(156, 39, 176, 0.05)',
+                        borderRadius: 1,
+                        border: '1px solid rgba(156, 39, 176, 0.12)',
+                        '&:last-child': { mb: 0 }
+                      }}
+                    >
+                      <Typography
+                        variant="body2"
+                        sx={{
+                          fontFamily: 'monospace',
+                          whiteSpace: 'pre-wrap',
+                          color: 'text.secondary',
+                          fontSize: '0.85rem',
+                          lineHeight: 1.4
+                        }}
+                      >
+                        {thinking.content}
+                      </Typography>
+                    </Box>
+                  ))}
+                </CardContent>
+              </Collapse>
+            </Card>
+          )}
+
+          {/* Task Suggestions */}
+          {richContent?.task_suggestions && richContent.task_suggestions.length > 0 && (
+            <Card
+              variant="outlined"
+              sx={{
+                mt: 1,
+                mb: 1,
+                bgcolor: 'rgba(25, 118, 210, 0.04)',
+                borderColor: 'rgba(25, 118, 210, 0.23)'
+              }}
+            >
+              <CardContent sx={{ p: 1.5, '&:last-child': { pb: 1.5 } }}>
+                <Typography variant="subtitle2" sx={{ display: 'flex', alignItems: 'center', gap: 1, mb: 1.5, color: '#1976d2' }}>
+                  <Assignment /> Suggested Tasks ({richContent.task_suggestions.length})
+                </Typography>
+                {richContent.task_suggestions.map((task: any, index: number) => (
+                  <Card
+                    key={index}
+                    variant="outlined"
+                    sx={{
+                      mb: 1.5,
+                      bgcolor: 'background.paper',
+                      borderColor: 'rgba(25, 118, 210, 0.12)',
+                      '&:last-child': { mb: 0 }
+                    }}
+                  >
+                    <CardContent sx={{ p: 2, '&:last-child': { pb: 2 } }}>
+                      <Box sx={{ display: 'flex', alignItems: 'flex-start', gap: 1, mb: 1 }}>
+                        <Typography variant="subtitle2" sx={{ fontWeight: 600, flexGrow: 1 }}>
+                          {task.title}
+                        </Typography>
+                        <Chip
+                          label={`Priority: ${task.priority}`}
+                          size="small"
+                          color={task.priority >= 4 ? 'error' : task.priority >= 3 ? 'warning' : 'default'}
+                          sx={{ height: 20, fontSize: '0.7rem' }}
+                        />
+                      </Box>
+
+                      <Typography variant="body2" color="text.secondary" sx={{ mb: 1.5 }}>
+                        {task.description}
+                      </Typography>
+
+                      <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, mb: 1.5 }}>
+                        <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+                          <Schedule fontSize="small" color="disabled" />
+                          <Typography variant="caption" color="text.secondary">
+                            Est. {task.estimated_duration} min
+                          </Typography>
+                        </Box>
+
+                        {task.due_date && (
+                          <Box sx={{ display: 'flex', alignItems: 'center', gap: 0.5 }}>
+                            <Schedule fontSize="small" color="disabled" />
+                            <Typography variant="caption" color="text.secondary">
+                              Due: {new Date(task.due_date).toLocaleDateString()}
+                            </Typography>
+                          </Box>
+                        )}
+                      </Box>
+
+                      <Button
+                        size="small"
+                        variant="contained"
+                        startIcon={<Assignment />}
+                        sx={{
+                          textTransform: 'none',
+                          fontSize: '0.75rem',
+                          py: 0.5,
+                          bgcolor: '#1976d2',
+                          '&:hover': { bgcolor: '#1565c0' }
+                        }}
+                        onClick={() => {
+                          // TODO: Implement task creation
+                          console.log('Create task:', task);
+                        }}
+                      >
+                        Create Task
+                      </Button>
+                    </CardContent>
+                  </Card>
+                ))}
+              </CardContent>
+            </Card>
+          )}
 
           {/* Actions Performed */}
           {actionsPerformed.length > 0 && (
@@ -349,6 +541,15 @@ const ChatMessage: React.FC<ChatMessageProps> = ({
                 )}
               </CardContent>
             </Card>
+          )}
+
+          {/* Email References and Tasks */}
+          {richContent && (richContent.email_references?.length > 0 || richContent.tasks_created?.length > 0) && (
+            <EmailReferences
+              emailReferences={richContent.email_references || []}
+              tasksCreated={richContent.tasks_created || []}
+              metadata={richContent.metadata}
+            />
           )}
 
           {/* Suggested Actions */}

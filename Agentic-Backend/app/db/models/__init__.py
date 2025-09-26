@@ -58,6 +58,14 @@ from .email_workflow import (
     EmailWorkflowStatus,
     EmailWorkflowLogLevel
 )
+from .email import (
+    EmailAccount,
+    Email,
+    EmailEmbedding,
+    EmailAttachment,
+    EmailTask,
+    EmailSyncHistory
+)
 
 __all__ = [
     "Agent",
@@ -124,4 +132,11 @@ __all__ = [
     "EmailWorkflowLog",
     "EmailWorkflowStatus",
     "EmailWorkflowLogLevel",
+    # Email sync system models
+    "EmailAccount",
+    "Email",
+    "EmailEmbedding",
+    "EmailAttachment",
+    "EmailTask",
+    "EmailSyncHistory",
 ]
