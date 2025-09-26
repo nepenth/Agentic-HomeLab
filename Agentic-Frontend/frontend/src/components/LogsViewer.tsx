@@ -66,23 +66,34 @@ const LOG_COLORS = {
 const LogsViewer: React.FC = () => {
   const [channels, setChannels] = useState<LogChannel[]>([
     {
-      id: 'all',
-      name: 'All Logs',
+      id: 'system',
+      name: 'System Logs',
       filters: {},
-      active: true, // This should be true for the default channel
+      active: true,
       logs: [],
-      color: '#1976d2',
+      color: '#f44336',
+      connectionType: 'websocket',
+    },
+    {
+      id: 'user',
+      name: 'User Logs',
+      filters: {},
+      active: false,
+      logs: [],
+      color: '#2196f3',
       connectionType: 'websocket',
     },
   ]);
 
-  const [selectedChannel, setSelectedChannel] = useState<string>('all');
+  const [selectedChannel, setSelectedChannel] = useState<string>('system');
   const [autoScroll, setAutoScroll] = useState(true);
   const [maxLogs, setMaxLogs] = useState(1000);
   const [connectionStatus, setConnectionStatus] = useState<'disconnected' | 'connecting' | 'connected' | 'error'>('disconnected');
   const [connectionError, setConnectionError] = useState<string | null>(null);
   const logsEndRef = useRef<HTMLDivElement>(null);
   const unsubscribeRef = useRef<(() => void) | null>(null);
+  const [isLoggedIn, setIsLoggedIn] = useState(false);
+  const [currentUserId, setCurrentUserId] = useState<number | null>(null);
 
   // Fetch available agents for filtering
   const { data: agents } = useQuery({
@@ -97,6 +108,65 @@ const LogsViewer: React.FC = () => {
     queryFn: () => apiClient.getTasks(),
     refetchInterval: 30000,
   });
+
+  // Check login status and get current user
+  useEffect(() => {
+    const checkAuth = async () => {
+      const token = apiClient.getAuthToken();
+      if (token) {
+        try {
+          // Try to get current user info - we'll need this endpoint or extract from token
+          // For now, assume logged in if token exists
+          setIsLoggedIn(true);
+          // TODO: Extract or fetch user ID
+          setCurrentUserId(1); // Placeholder
+        } catch (error) {
+          console.error('Failed to verify authentication:', error);
+          setIsLoggedIn(false);
+          setCurrentUserId(null);
+        }
+      } else {
+        setIsLoggedIn(false);
+        setCurrentUserId(null);
+      }
+    };
+
+    checkAuth();
+  }, []);
+
+  // Load historical logs for the selected channel
+  const loadHistoricalLogs = useCallback(async (channelId: string) => {
+    if (!isLoggedIn) return;
+
+    try {
+      let logs: LogEntry[] = [];
+
+      if (channelId === 'system') {
+        // Load system logs (admin only)
+        logs = await apiClient.getSystemLogs({ limit: 50 });
+      } else if (channelId === 'user' && currentUserId) {
+        // Load user logs
+        logs = await apiClient.getUserLogs(currentUserId, { limit: 50 });
+      } else {
+        // Load general historical logs
+        logs = await apiClient.getHistoricalLogs({ limit: 50 });
+      }
+
+      // Update the channel with loaded logs
+      setChannels(prev =>
+        prev.map(channel =>
+          channel.id === channelId
+            ? { ...channel, logs: logs.reverse() } // Reverse to show newest at bottom
+            : channel
+        )
+      );
+
+      console.log(`Loaded ${logs.length} historical logs for channel ${channelId}`);
+    } catch (error) {
+      console.error(`Failed to load historical logs for channel ${channelId}:`, error);
+      setConnectionError(`Failed to load historical logs: ${error instanceof Error ? error.message : 'Unknown error'}`);
+    }
+  }, [isLoggedIn, currentUserId]);
 
   // Auto-scroll to bottom when new logs arrive
   useEffect(() => {
@@ -121,8 +191,11 @@ const LogsViewer: React.FC = () => {
   }, []);
 
   // Handle incoming log messages
-  const handleLogMessage = useCallback((logEntry: LogEntry) => {
-    console.log('Received log message:', logEntry);
+  const handleLogMessage = useCallback((message: any) => {
+    console.log('Received log message:', message);
+
+    // Extract log entry from message data
+    const logEntry: LogEntry = message.data || message;
 
     setChannels(prevChannels =>
       prevChannels.map(channel => {
@@ -182,6 +255,10 @@ const LogsViewer: React.FC = () => {
           return;
         }
 
+        // Load historical logs first
+        await loadHistoricalLogs(selectedChannel);
+
+        // Subscribe to live logs
         unsubscribeRef.current = webSocketService.subscribeToLogs(
           handleLogMessage,
           activeChannel.filters
@@ -207,7 +284,7 @@ const LogsViewer: React.FC = () => {
         setConnectionStatus('error');
       }
     }
-  }, [channels, selectedChannel, handleLogMessage]);
+  }, [channels, selectedChannel, handleLogMessage, loadHistoricalLogs]);
 
   // Add new channel
   const addChannel = useCallback(() => {
@@ -247,12 +324,12 @@ const LogsViewer: React.FC = () => {
 
   // Delete channel
   const deleteChannel = useCallback((channelId: string) => {
-    if (channelId === 'all') return; // Can't delete the 'all' channel
+    if (['system', 'user'].includes(channelId)) return; // Can't delete default channels
 
     setChannels(prev => {
       const newChannels = prev.filter(c => c.id !== channelId);
       if (selectedChannel === channelId) {
-        setSelectedChannel('all');
+        setSelectedChannel('system');
       }
       return newChannels;
     });
@@ -320,7 +397,7 @@ const LogsViewer: React.FC = () => {
                 unsubscribeRef.current ? <Stop /> : <PlayArrow />
               }
               onClick={toggleLogStreaming}
-              disabled={(!selectedChannelData?.active && selectedChannel !== 'all') || connectionStatus === 'connecting'}
+              disabled={!isLoggedIn || connectionStatus === 'connecting'}
             >
               {connectionStatus === 'connecting' ? 'Connecting...' :
                connectionStatus === 'connected' ? 'Streaming' :
@@ -441,10 +518,16 @@ const LogsViewer: React.FC = () => {
                         {channel.name}
                       </Box>
                     }
-                    onClick={() => setSelectedChannel(channel.id)}
+                    onClick={() => {
+                      setSelectedChannel(channel.id);
+                      // Load historical logs when switching channels
+                      if (isLoggedIn) {
+                        loadHistoricalLogs(channel.id);
+                      }
+                    }}
                     color={selectedChannel === channel.id ? 'primary' : 'default'}
                     variant={selectedChannel === channel.id ? 'filled' : 'outlined'}
-                    onDelete={channel.id !== 'all' ? () => deleteChannel(channel.id) : undefined}
+                    onDelete={!['system', 'user'].includes(channel.id) ? () => deleteChannel(channel.id) : undefined}
                     sx={{ cursor: 'pointer' }}
                   />
                 ))}

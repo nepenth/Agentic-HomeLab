@@ -161,15 +161,35 @@ class SemanticProcessingService:
             # Ensure model capability service is initialized
             await model_capability_service.initialize()
 
-            # Find best embedding model
-            self.embedding_model = await model_capability_service.get_best_model_for_task(
-                ModelCapability.EMBEDDING_GENERATION
-            )
+            # Prioritize known working embedding models
+            preferred_models = ["snowflake-arctic-embed2:latest", "embeddinggemma:latest"]
 
+            # Check if preferred models are available
+            available_embedding_models = await model_capability_service.get_embedding_models()
+            available_model_names = [model.name for model in available_embedding_models]
+
+            # Use first available preferred model
+            self.embedding_model = None
+            for preferred in preferred_models:
+                if preferred in available_model_names:
+                    self.embedding_model = preferred
+                    break
+
+            # If no preferred model found, use whatever the capability service suggests
             if not self.embedding_model:
-                self.logger.warning("No embedding models found, semantic features will be limited")
+                detected_model = await model_capability_service.get_best_model_for_task(
+                    ModelCapability.EMBEDDING_GENERATION
+                )
+                if detected_model:
+                    self.embedding_model = detected_model
+                    self.logger.info(f"Using detected embedding model: {detected_model}")
+                else:
+                    self.logger.error("No embedding models available")
 
-            self.logger.info("Semantic Processing Service initialized successfully")
+            if self.embedding_model:
+                self.logger.info(f"Semantic Processing Service initialized successfully with model: {self.embedding_model}")
+            else:
+                raise ValueError("No embedding model could be selected")
 
         except Exception as e:
             self.logger.error(f"Failed to initialize Semantic Processing Service: {e}")
@@ -186,24 +206,50 @@ class SemanticProcessingService:
         Returns:
             List of embedding values
         """
-        try:
-            model = model_name or self.embedding_model
-            if not model:
-                raise ValueError("No embedding model available")
+        # Get list of models to try
+        models_to_try = []
+        if model_name:
+            models_to_try.append(model_name)
+        else:
+            # Try primary model first, then fallbacks
+            if self.embedding_model:
+                models_to_try.append(self.embedding_model)
 
-            # Use Ollama embeddings API
-            response = await ollama_client.embeddings(prompt=text, model=model)
+            # Add known working fallback models
+            fallback_models = ["snowflake-arctic-embed2:latest", "embeddinggemma:latest"]
+            for fallback in fallback_models:
+                if fallback not in models_to_try:
+                    models_to_try.append(fallback)
 
-            if response and 'embedding' in response:
-                embedding = response['embedding']
-                self.logger.debug(f"Generated embedding with {len(embedding)} dimensions")
-                return embedding
-            else:
-                raise ValueError("Invalid embedding response from Ollama")
+        last_error = None
+        for model in models_to_try:
+            try:
+                self.logger.debug(f"Trying to generate embedding with model: {model}")
 
-        except Exception as e:
-            self.logger.error(f"Failed to generate embedding: {e}")
-            raise
+                # Use Ollama embeddings API
+                response = await ollama_client.embeddings(prompt=text, model=model)
+
+                if response and 'embedding' in response:
+                    embedding = response['embedding']
+                    self.logger.debug(f"Generated embedding with {len(embedding)} dimensions using {model}")
+
+                    # If we succeeded with a different model, update the primary model
+                    if not model_name and model != self.embedding_model:
+                        self.logger.info(f"Switching to working embedding model: {model}")
+                        self.embedding_model = model
+
+                    return embedding
+                else:
+                    raise ValueError("Invalid embedding response from Ollama")
+
+            except Exception as e:
+                last_error = e
+                self.logger.warning(f"Failed to generate embedding with model {model}: {e}")
+                continue
+
+        # If all models failed, raise the last error
+        self.logger.error(f"All embedding models failed. Last error: {last_error}")
+        raise last_error or ValueError("No embedding model available")
 
     async def chunk_text(
         self,

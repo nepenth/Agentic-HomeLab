@@ -60,11 +60,21 @@ class RedisPubSubService:
             # Add timestamp if not present
             if "timestamp" not in log_data:
                 log_data["timestamp"] = datetime.utcnow().isoformat()
-            
+
+            # Clean log_data - Redis doesn't accept None values
+            cleaned_data = {}
+            for key, value in log_data.items():
+                if value is not None:
+                    # Convert complex objects to strings
+                    if isinstance(value, (dict, list)):
+                        cleaned_data[key] = json.dumps(value)
+                    else:
+                        cleaned_data[key] = str(value)
+
             # Generate unique stream ID
             stream_id = await self.redis.xadd(
                 name=self.stream_name,
-                fields=log_data,
+                fields=cleaned_data,
                 maxlen=self.max_len,
                 approximate=True
             )
@@ -78,7 +88,7 @@ class RedisPubSubService:
     
     async def subscribe_to_logs(
         self,
-        callback: Callable[[Dict[str, Any]], None],
+        callback: Callable[[Dict[str, Any]], Any],
         consumer_group: str = "default",
         consumer_name: str = "worker",
         filters: Optional[Dict[str, Any]] = None
@@ -117,7 +127,7 @@ class RedisPubSubService:
     
     async def _consume_logs(
         self,
-        callback: Callable[[Dict[str, Any]], None],
+        callback: Callable[[Dict[str, Any]], Any],
         consumer_group: str,
         consumer_name: str,
         filters: Optional[Dict[str, Any]] = None
@@ -146,8 +156,11 @@ class RedisPubSubService:
                             # Add stream_id to message
                             fields["stream_id"] = msg_id
                             
-                            # Call callback
-                            await callback(fields)
+                            # Call callback (handle both sync and async callbacks)
+                            if asyncio.iscoroutinefunction(callback):
+                                await callback(fields)
+                            else:
+                                callback(fields)
                             
                             # Acknowledge message
                             await self.redis.xack(self.stream_name, consumer_group, msg_id)

@@ -33,6 +33,7 @@ import {
   Switch,
   FormControlLabel,
   Snackbar,
+  Divider,
 } from '@mui/material';
 import {
   Email,
@@ -55,10 +56,13 @@ import {
   Chat,
   Send,
   Timer,
+  Sync,
 } from '@mui/icons-material';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import apiClient from '../services/api';
 import EnhancedEmailChat from '../components/EmailAssistant/EnhancedEmailChat';
+import EmailSyncDashboard from '../components/EmailAssistant/EmailSyncDashboard';
+import WorkflowLogsViewer from '../components/WorkflowLogsViewer';
 
 interface EmailWorkflowStats {
   total_workflows: number;
@@ -960,8 +964,9 @@ const EmailAssistant: React.FC = () => {
             <Tab label="Tasks" />
             <Tab label="Logs" />
             <Tab label="Chat" icon={<Chat />} iconPosition="start" />
+            <Tab label="Email Sync" icon={<Sync />} iconPosition="start" />
             <Tab label="Management" />
-            <Tab label="Settings" />
+            <Tab label="Workflow Settings" />
           </Tabs>
 
           {/* Dashboard Tab */}
@@ -1599,46 +1604,11 @@ const EmailAssistant: React.FC = () => {
           {/* Logs Tab */}
           {activeTab === 2 && (
             <Box>
-              <Typography variant="h6" sx={{ mb: 3 }}>Workflow Logs</Typography>
-              <Box sx={{ maxHeight: 600, overflow: 'auto' }}>
-                {logsLoading ? (
-                  [...Array(10)].map((_, index) => (
-                    <Box key={index} sx={{ display: 'flex', alignItems: 'center', py: 1 }}>
-                      <Skeleton variant="circular" width={20} height={20} sx={{ mr: 2 }} />
-                      <Box sx={{ flex: 1 }}>
-                        <Skeleton variant="text" width="80%" height={20} />
-                        <Skeleton variant="text" width="40%" height={16} />
-                      </Box>
-                    </Box>
-                  ))
-                ) : (
-                  (workflowLogs || []).map((log) => (
-                    <Box key={log.id} sx={{ display: 'flex', alignItems: 'flex-start', py: 1, borderBottom: '1px solid', borderColor: 'divider' }}>
-                      <ListItemIcon sx={{ minWidth: 32 }}>
-                        {getLogIcon(log.level)}
-                      </ListItemIcon>
-                      <Box sx={{ flex: 1 }}>
-                        <Typography variant="body2" sx={{ fontFamily: 'monospace' }}>
-                          {log.message}
-                        </Typography>
-                        <Box sx={{ display: 'flex', gap: 2, mt: 0.5 }}>
-                          <Typography variant="caption" color="text.secondary">
-                            {formatTimestamp(log.timestamp)}
-                          </Typography>
-                          {log.workflow_phase && (
-                            <Chip label={log.workflow_phase} size="small" variant="outlined" />
-                          )}
-                          {log.email_count !== undefined && (
-                            <Typography variant="caption" color="text.secondary">
-                              Emails: {log.email_count}
-                            </Typography>
-                          )}
-                        </Box>
-                      </Box>
-                    </Box>
-                  ))
-                )}
-              </Box>
+              <WorkflowLogsViewer
+                workflowType="email_sync"
+                title="Email Workflow Logs"
+                height={650}
+              />
             </Box>
           )}
 
@@ -1647,8 +1617,13 @@ const EmailAssistant: React.FC = () => {
             <EnhancedEmailChat />
           )}
 
-          {/* Management Tab */}
+          {/* Email Sync Tab */}
           {activeTab === 4 && (
+            <EmailSyncDashboard />
+          )}
+
+          {/* Management Tab */}
+          {activeTab === 5 && (
             <Box>
               <Typography variant="h6" sx={{ mb: 3 }}>Workflow Management</Typography>
 
@@ -2001,57 +1976,15 @@ const EmailAssistant: React.FC = () => {
             </Box>
           )}
 
-          {/* Settings Tab */}
-          {activeTab === 5 && (
+          {/* Workflow Settings Tab */}
+          {activeTab === 6 && (
             <Box>
-              <Typography variant="h6" sx={{ mb: 3 }}>Email Assistant Settings</Typography>
-
-              {/* Email Workflow Mailbox Configuration */}
-              <Card elevation={0} sx={{ mb: 3 }}>
-                <CardContent>
-                  <Typography variant="h6" sx={{ mb: 2, fontWeight: 600 }}>
-                    Email Workflow Mailbox Configuration
-                  </Typography>
-                  <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-                    Configure your email server connection settings for mailbox access.
-                  </Typography>
-
-                  {emailSettings && (
-                    <Alert severity="success" sx={{ mb: 2 }}>
-                      <Typography variant="body2">
-                        <strong>Current Configuration:</strong> {emailSettings.username} @ {emailSettings.server}:{emailSettings.port}
-                        {emailSettings.has_password && ' (Password saved)'}
-                      </Typography>
-                    </Alert>
-                  )}
-
-                  {!emailSettings && (
-                    <Alert severity="warning" sx={{ mb: 2 }}>
-                      <Typography variant="body2">
-                        No email configuration found. Configure your email settings to enable workflows.
-                      </Typography>
-                    </Alert>
-                  )}
-
-                  <Box sx={{ display: 'flex', gap: 2, flexWrap: 'wrap' }}>
-                    <Button
-                      variant="contained"
-                      startIcon={<Settings />}
-                      onClick={() => setEmailSettingsDialogOpen(true)}
-                    >
-                      {emailSettings ? 'Update Mailbox Settings' : 'Configure Mailbox'}
-                    </Button>
-
-                    <Button
-                      variant="outlined"
-                      startIcon={<Refresh />}
-                      onClick={loadEmailSettings}
-                    >
-                      Refresh Settings
-                    </Button>
-                  </Box>
-                </CardContent>
-              </Card>
+              <Typography variant="h5" sx={{ mb: 1, fontWeight: 600 }}>
+                Workflow Settings
+              </Typography>
+              <Typography variant="body2" color="text.secondary" sx={{ mb: 4 }}>
+                Configure processing parameters, automation settings, and performance options for email workflows.
+              </Typography>
 
               {/* Email Workflow Configuration */}
               <Card elevation={0} sx={{ mb: 3 }}>
@@ -2059,27 +1992,224 @@ const EmailAssistant: React.FC = () => {
                   <Typography variant="h6" sx={{ mb: 2, fontWeight: 600 }}>
                     Email Workflow Configuration
                   </Typography>
-                  <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-                    Configure processing parameters, timeouts, and automation settings for email workflows.
+                  <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>
+                    Configure processing parameters and automation settings for email workflows.
                   </Typography>
 
-                  <Box sx={{ display: 'flex', gap: 2, flexWrap: 'wrap' }}>
-                    <Button
-                      variant="outlined"
-                      startIcon={<Settings />}
-                      onClick={() => setWorkflowConfigDialogOpen(true)}
-                    >
-                      Configure Workflow Settings
-                    </Button>
+                  <Grid container spacing={3}>
+                    {/* Workflow Processing Options */}
+                    <Grid item xs={12}>
+                      <Typography variant="subtitle1" sx={{ mb: 2, fontWeight: 600 }}>
+                        Processing Parameters
+                      </Typography>
+                    </Grid>
 
-                    <Button
-                      variant="outlined"
-                      startIcon={<Timer />}
-                      onClick={() => setTimeoutSettingsDialogOpen(true)}
-                    >
-                      Timeout & Retry Settings
-                    </Button>
-                  </Box>
+                    <Grid item xs={12} md={6}>
+                      <TextField
+                        fullWidth
+                        label="Max Emails per Workflow"
+                        type="number"
+                        value={workflowConfigForm.maxEmails}
+                        onChange={(e) => setWorkflowConfigForm(prev => ({ ...prev, maxEmails: parseInt(e.target.value) || 50 }))}
+                        helperText="Maximum number of emails to process in a single workflow"
+                        size="small"
+                      />
+                    </Grid>
+
+                    <Grid item xs={12} md={6}>
+                      <TextField
+                        fullWidth
+                        label="Importance Threshold"
+                        type="number"
+                        inputProps={{ min: 0, max: 1, step: 0.1 }}
+                        value={workflowConfigForm.importanceThreshold}
+                        onChange={(e) => setWorkflowConfigForm(prev => ({ ...prev, importanceThreshold: parseFloat(e.target.value) || 0.7 }))}
+                        helperText="Minimum importance score to create tasks (0-1)"
+                        size="small"
+                      />
+                    </Grid>
+
+                    <Grid item xs={12} md={6}>
+                      <TextField
+                        fullWidth
+                        label="Spam Threshold"
+                        type="number"
+                        inputProps={{ min: 0, max: 1, step: 0.1 }}
+                        value={workflowConfigForm.spamThreshold}
+                        onChange={(e) => setWorkflowConfigForm(prev => ({ ...prev, spamThreshold: parseFloat(e.target.value) || 0.8 }))}
+                        helperText="Spam detection threshold (0-1)"
+                        size="small"
+                      />
+                    </Grid>
+
+                    <Grid item xs={12} md={6}>
+                      <FormControl fullWidth size="small">
+                        <InputLabel>Default Priority</InputLabel>
+                        <Select
+                          value={workflowConfigForm.defaultPriority}
+                          onChange={(e) => setWorkflowConfigForm(prev => ({ ...prev, defaultPriority: e.target.value }))}
+                          label="Default Priority"
+                        >
+                          <MenuItem value="low">Low</MenuItem>
+                          <MenuItem value="medium">Medium</MenuItem>
+                          <MenuItem value="high">High</MenuItem>
+                          <MenuItem value="urgent">Urgent</MenuItem>
+                        </Select>
+                      </FormControl>
+                    </Grid>
+
+                    {/* Automation Settings */}
+                    <Grid item xs={12}>
+                      <Typography variant="subtitle1" sx={{ mb: 2, mt: 2, fontWeight: 600 }}>
+                        Automation Settings
+                      </Typography>
+                    </Grid>
+
+                    <Grid item xs={12} md={4}>
+                      <FormControlLabel
+                        control={
+                          <Switch
+                            checked={workflowConfigForm.createTasksAutomatically}
+                            onChange={(e) => setWorkflowConfigForm(prev => ({ ...prev, createTasksAutomatically: e.target.checked }))}
+                          />
+                        }
+                        label="Create Tasks Automatically"
+                      />
+                    </Grid>
+                    <Grid item xs={12} md={4}>
+                      <FormControlLabel
+                        control={
+                          <Switch
+                            checked={workflowConfigForm.scheduleFollowups}
+                            onChange={(e) => setWorkflowConfigForm(prev => ({ ...prev, scheduleFollowups: e.target.checked }))}
+                          />
+                        }
+                        label="Schedule Follow-ups"
+                      />
+                    </Grid>
+                    <Grid item xs={12} md={4}>
+                      <FormControlLabel
+                        control={
+                          <Switch
+                            checked={workflowConfigForm.processAttachments}
+                            onChange={(e) => setWorkflowConfigForm(prev => ({ ...prev, processAttachments: e.target.checked }))}
+                          />
+                        }
+                        label="Process Attachments"
+                      />
+                    </Grid>
+                  </Grid>
+                </CardContent>
+              </Card>
+
+              {/* Timeout & Retry Settings */}
+              <Card elevation={0} sx={{ mb: 3 }}>
+                <CardContent>
+                  <Typography variant="h6" sx={{ mb: 2, fontWeight: 600 }}>
+                    Timeout & Retry Settings
+                  </Typography>
+                  <Typography variant="body2" color="text.secondary" sx={{ mb: 3 }}>
+                    Configure timeout and retry parameters for email processing operations.
+                  </Typography>
+
+                  <Grid container spacing={3}>
+                    {/* Timeout Settings */}
+                    <Grid item xs={12}>
+                      <Typography variant="subtitle1" sx={{ mb: 2, fontWeight: 600 }}>
+                        Timeout Settings
+                      </Typography>
+                      <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+                        Set maximum time limits for various email processing operations
+                      </Typography>
+                    </Grid>
+
+                    <Grid item xs={12} md={4}>
+                      <TextField
+                        fullWidth
+                        label="Analysis Timeout"
+                        type="number"
+                        value={workflowConfigForm.analysisTimeout}
+                        onChange={(e) => setWorkflowConfigForm(prev => ({ ...prev, analysisTimeout: parseInt(e.target.value) || 120 }))}
+                        InputProps={{ endAdornment: 'seconds' }}
+                        helperText="Maximum time to analyze each email"
+                        size="small"
+                      />
+                    </Grid>
+
+                    <Grid item xs={12} md={4}>
+                      <TextField
+                        fullWidth
+                        label="Task Conversion Timeout"
+                        type="number"
+                        value={workflowConfigForm.taskTimeout}
+                        onChange={(e) => setWorkflowConfigForm(prev => ({ ...prev, taskTimeout: parseInt(e.target.value) || 60 }))}
+                        InputProps={{ endAdornment: 'seconds' }}
+                        helperText="Maximum time to convert analysis to tasks"
+                        size="small"
+                      />
+                    </Grid>
+
+                    <Grid item xs={12} md={4}>
+                      <TextField
+                        fullWidth
+                        label="Ollama Request Timeout"
+                        type="number"
+                        value={workflowConfigForm.ollamaTimeout}
+                        onChange={(e) => setWorkflowConfigForm(prev => ({ ...prev, ollamaTimeout: parseInt(e.target.value) || 60 }))}
+                        InputProps={{ endAdornment: 'seconds' }}
+                        helperText="Maximum time for individual Ollama API calls"
+                        size="small"
+                      />
+                    </Grid>
+
+                    {/* Retry Settings */}
+                    <Grid item xs={12}>
+                      <Typography variant="subtitle1" sx={{ mb: 2, mt: 2, fontWeight: 600 }}>
+                        Retry Settings
+                      </Typography>
+                      <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
+                        Configure retry behavior for failed operations
+                      </Typography>
+                    </Grid>
+
+                    <Grid item xs={12} md={6}>
+                      <TextField
+                        fullWidth
+                        label="Maximum Retries"
+                        type="number"
+                        value={workflowConfigForm.maxRetries}
+                        onChange={(e) => setWorkflowConfigForm(prev => ({ ...prev, maxRetries: parseInt(e.target.value) || 3 }))}
+                        helperText="Number of retry attempts for failed operations"
+                        size="small"
+                      />
+                    </Grid>
+
+                    <Grid item xs={12} md={6}>
+                      <TextField
+                        fullWidth
+                        label="Retry Delay"
+                        type="number"
+                        value={workflowConfigForm.retryDelay}
+                        onChange={(e) => setWorkflowConfigForm(prev => ({ ...prev, retryDelay: parseInt(e.target.value) || 1 }))}
+                        InputProps={{ endAdornment: 'seconds' }}
+                        helperText="Delay between retry attempts"
+                        size="small"
+                      />
+                    </Grid>
+
+                    {/* Save Button */}
+                    <Grid item xs={12}>
+                      <Divider sx={{ my: 2 }} />
+                      <Button
+                        variant="contained"
+                        startIcon={<Settings />}
+                        onClick={handleSaveWorkflowConfig}
+                        sx={{ mt: 1 }}
+                      >
+                        Save Workflow Settings
+                      </Button>
+                    </Grid>
+                  </Grid>
                 </CardContent>
               </Card>
 
@@ -2104,10 +2234,8 @@ const EmailAssistant: React.FC = () => {
               </Card>
             </Box>
           )}
-        </CardContent>
-      </Card>
 
-      {/* Logs Dialog */}
+          {/* Logs Dialog */}
       <Dialog
         open={logsDialogOpen}
         onClose={() => setLogsDialogOpen(false)}
@@ -2532,6 +2660,8 @@ const EmailAssistant: React.FC = () => {
           </Button>
         </DialogActions>
       </Dialog>
+        </CardContent>
+      </Card>
 
       {/* Success/Error Snackbars */}
       <Snackbar

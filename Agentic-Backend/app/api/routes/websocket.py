@@ -41,25 +41,30 @@ async def validate_websocket_token(token: str, db: AsyncSession) -> User:
 
 class ConnectionManager:
     """Manages WebSocket connections."""
-    
+
     def __init__(self):
         self.active_connections: Dict[str, WebSocket] = {}
+        self.connection_users: Dict[str, User] = {}  # Track which user owns each connection
         self.task_subscriptions: Dict[UUID, set] = {}
         self.log_subscriptions: Dict[str, dict] = {}
     
-    async def connect(self, websocket: WebSocket, connection_id: str):
+    async def connect(self, websocket: WebSocket, connection_id: str, user: Optional[User] = None):
         """Accept WebSocket connection."""
         await websocket.accept()
         self.active_connections[connection_id] = websocket
+        if user:
+            self.connection_users[connection_id] = user
         MetricsCollector.increment_websocket_connections("logs", 1)
-        logger.info(f"WebSocket connected: {connection_id}")
-    
+        logger.info(f"WebSocket connected: {connection_id} (user: {user.username if user else 'anonymous'})")
+
     def disconnect(self, connection_id: str):
         """Remove WebSocket connection."""
         if connection_id in self.active_connections:
             del self.active_connections[connection_id]
-            MetricsCollector.increment_websocket_connections("logs", -1)
-            logger.info(f"WebSocket disconnected: {connection_id}")
+        if connection_id in self.connection_users:
+            del self.connection_users[connection_id]
+        MetricsCollector.increment_websocket_connections("logs", -1)
+        logger.info(f"WebSocket disconnected: {connection_id}")
     
     async def send_personal_message(self, message: dict, connection_id: str):
         """Send message to specific connection."""
@@ -116,6 +121,94 @@ class ConnectionManager:
             del self.log_subscriptions[connection_id]
         logger.info(f"Connection {connection_id} unsubscribed from logs")
 
+    async def broadcast_log(self, log_data: Dict[str, Any], user_id: Optional[int] = None, scope: str = "user"):
+        """Broadcast log to appropriate WebSocket subscribers based on permissions and scope."""
+        try:
+            # Filter subscribers based on user permissions and scope
+            eligible_connections = []
+
+            for connection_id, filters in self.log_subscriptions.items():
+                # Check if this connection should receive this log
+                should_receive = False
+
+                # System scope logs - only admins can see these
+                if scope == "admin":
+                    # Check if connection user is an admin/superuser
+                    if connection_id in self.connection_users:
+                        connection_user = self.connection_users[connection_id]
+                        if connection_user.is_superuser:
+                            should_receive = True
+
+                # User scope logs - user can see their own logs, admins can see all user logs
+                elif scope == "user":
+                    # If log has user_id, only that user (or admins) should see it
+                    if user_id and connection_id in self.connection_users:
+                        connection_user = self.connection_users[connection_id]
+                        # User can see their own logs, or admins can see all logs
+                        if connection_user.id == user_id or connection_user.is_superuser:
+                            should_receive = True
+                    else:
+                        # Logs without user_id are general system logs - visible to all authenticated users
+                        if connection_id in self.connection_users:
+                            should_receive = True
+
+                # System logs - visible to all connected users
+                else:
+                    should_receive = True
+
+                # Apply additional filters
+                if should_receive and self._matches_log_filters(log_data, filters):
+                    eligible_connections.append(connection_id)
+
+            # Broadcast to eligible connections
+            if eligible_connections:
+                message = {
+                    "type": "log",
+                    "data": log_data,
+                    "timestamp": log_data.get("timestamp"),
+                    "scope": scope
+                }
+
+                disconnected = set()
+                for connection_id in eligible_connections:
+                    if connection_id in self.active_connections:
+                        websocket = self.active_connections[connection_id]
+                        try:
+                            await websocket.send_text(json.dumps(message))
+                        except Exception as e:
+                            logger.error(f"Failed to broadcast log to {connection_id}: {e}")
+                            disconnected.add(connection_id)
+
+                # Clean up disconnected clients
+                for connection_id in disconnected:
+                    self.disconnect(connection_id)
+
+                logger.debug(f"Broadcasted log to {len(eligible_connections) - len(disconnected)} connections")
+
+        except Exception as e:
+            logger.error(f"Failed to broadcast log: {e}")
+
+    def _matches_log_filters(self, log_data: Dict[str, Any], filters: Dict[str, Any]) -> bool:
+        """Check if log data matches WebSocket subscription filters."""
+        if not filters:
+            return True
+
+        for key, value in filters.items():
+            # Skip special filter keys
+            if key in ["admin_mode"]:
+                continue
+
+            if key not in log_data:
+                continue
+
+            if isinstance(value, list):
+                if log_data[key] not in value:
+                    return False
+            elif log_data[key] != str(value):
+                return False
+
+        return True
+
 
 manager = ConnectionManager()
 
@@ -141,7 +234,7 @@ async def websocket_logs(
         await websocket.close(code=1008, reason="Authentication failed")
         return
 
-    await manager.connect(websocket, connection_id)
+    await manager.connect(websocket, connection_id, user)
     
     try:
         # Set up subscription filters
@@ -225,7 +318,7 @@ async def websocket_task(
         await websocket.close(code=1008, reason="Authentication failed")
         return
 
-    await manager.connect(websocket, connection_id)
+    await manager.connect(websocket, connection_id, user)
     
     try:
         manager.subscribe_to_task(connection_id, task_id)
@@ -299,7 +392,7 @@ async def websocket_chat(
         await websocket.close(code=1008, reason="Chat session is not active")
         return
 
-    await manager.connect(websocket, connection_id)
+    await manager.connect(websocket, connection_id, user)
 
     try:
         # Send welcome message
@@ -441,7 +534,7 @@ async def websocket_email_progress(
         await websocket.close(code=1008, reason="Authentication failed")
         return
 
-    await manager.connect(websocket, connection_id)
+    await manager.connect(websocket, connection_id, user)
 
     try:
         # Send welcome message

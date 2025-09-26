@@ -97,7 +97,7 @@ services:
       - knowledge_base_models:/app/models_cache
       - ollama_models:/root/.ollama
       - playwright_cache:/home/app/.cache
-    command: celery -A app.celery_app worker --loglevel=info --concurrency=4 -Q agent_tasks
+    command: celery -A app.celery_app worker --loglevel=info --concurrency=4 -Q agent_tasks,email_sync
     healthcheck:
       disable: true
 
@@ -114,6 +114,29 @@ services:
     volumes:
       - .:/app
     command: celery -A app.celery_app flower --port=5555
+    healthcheck:
+      disable: true
+
+  beat:
+    build: .
+    restart: unless-stopped
+    environment:
+      - DATABASE_URL=postgresql+asyncpg://postgres:secret@db:5432/ai_db
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/0
+      - CELERY_RESULT_BACKEND=redis://redis:6379/0
+      - OLLAMA_BASE_URL=http://whyland-ai.nakedsun.xyz:11434
+      - SECRET_KEY=your-secret-key-change-in-production
+      - LOG_LEVEL=INFO
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    volumes:
+      - .:/app
+      - ./logs:/app/logs
+    command: celery -A app.celery_app beat --loglevel=info
     healthcheck:
       disable: true
 

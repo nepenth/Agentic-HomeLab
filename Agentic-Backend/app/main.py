@@ -12,6 +12,9 @@ from app.api.security_middleware import AgentSecurityMiddleware, RequestValidati
 from app.api.routes import api_router, ws_router
 from app.utils.logging import get_logger
 from app.db.database import check_database_health, engine
+from app.services.pubsub_service import pubsub_service
+from app.services.semantic_processing_service import semantic_processing_service
+from app.services.model_capability_service import model_capability_service
 
 # Setup logging
 setup_logging()
@@ -67,10 +70,27 @@ async def lifespan(app: FastAPI):
             raise RuntimeError("Database connection failed")
         
         logger.info("Database connection established successfully")
-        
+
+        # Initialize Redis PubSub service
+        logger.info("Initializing Redis PubSub service...")
+        await pubsub_service.connect()
+        logger.info("Redis PubSub service connected successfully")
+
+        # Initialize AI/ML services for email processing
+        logger.info("Initializing AI/ML services...")
+
+        # Initialize model capability service first
+        await model_capability_service.initialize()
+        logger.info("Model capability service initialized")
+
+        # Initialize semantic processing service (depends on model capability service)
+        await semantic_processing_service.initialize()
+        logger.info("Semantic processing service initialized")
+
         # Store engine reference in app state for access
         app.state.db_engine = engine
-        
+        app.state.pubsub_service = pubsub_service
+
         logger.info("Application startup complete")
         yield
         
@@ -82,6 +102,11 @@ async def lifespan(app: FastAPI):
         logger.info("Shutting down application...")
         
         try:
+            # Disconnect Redis PubSub service
+            if hasattr(app.state, 'pubsub_service'):
+                await app.state.pubsub_service.disconnect()
+                logger.info("Redis PubSub service disconnected")
+
             # Dispose of database engine connections
             if hasattr(app.state, 'db_engine'):
                 await app.state.db_engine.dispose()

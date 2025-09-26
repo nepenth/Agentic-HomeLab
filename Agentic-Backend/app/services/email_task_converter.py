@@ -15,7 +15,8 @@ from datetime import datetime, timedelta
 from dataclasses import dataclass, field
 
 from app.services.email_analysis_service import EmailAnalysis
-from app.db.models.task import Task, TaskStatus
+from app.db.models.task import Task, TaskStatus, LogLevel
+from app.services.unified_log_service import unified_log_service, WorkflowType, LogScope
 from app.utils.logging import get_logger
 
 logger = get_logger("email_task_converter")
@@ -179,97 +180,276 @@ class EmailTaskConverter:
         """
         start_time = datetime.now()
 
-        try:
-            analysis = request.email_analysis
+        # Create unified workflow context for task creation
+        async with unified_log_service.workflow_context(
+            user_id=int(request.user_id),
+            workflow_type=WorkflowType.AGENT_TASK,
+            workflow_name=f"Email task creation for {request.email_metadata.get('subject', 'Unknown')}",
+            scope=LogScope.USER
+        ) as workflow_context:
 
-            # Only skip obvious spam emails
-            if analysis.spam_probability > 0.8:
-                self.logger.info(f"Skipping task creation for spam email: {analysis.email_id}")
+            try:
+                analysis = request.email_analysis
+
+                await unified_log_service.log(
+                    context=workflow_context,
+                    level=LogLevel.INFO,
+                    message="Starting email task conversion",
+                    component="email_task_converter",
+                    extra_metadata={
+                        "email_id": analysis.email_id,
+                        "importance_score": analysis.importance_score,
+                        "action_required": analysis.action_required,
+                        "spam_probability": analysis.spam_probability
+                    }
+                )
+
+                # Only skip obvious spam emails
+                if analysis.spam_probability > 0.8:
+                    await unified_log_service.log(
+                        context=workflow_context,
+                        level=LogLevel.INFO,
+                        message="Skipping task creation for spam email",
+                        component="email_task_converter",
+                        extra_metadata={"spam_probability": analysis.spam_probability}
+                    )
+                    return TaskCreationResult(
+                        tasks_created=[],
+                        follow_up_scheduled=False,
+                        follow_up_date=None,
+                        processing_time_ms=(datetime.now() - start_time).total_seconds() * 1000
+                    )
+
+                # Create appropriate tasks based on importance and analysis
+                async with unified_log_service.task_context(
+                    parent_context=workflow_context,
+                    task_name="Create tasks from email analysis",
+                    agent_id="task_creation_agent"
+                ) as task_context:
+
+                    tasks_created = await self._create_tasks_for_email_with_logging(
+                        analysis, request, db_session, task_context
+                    )
+
+                    if not tasks_created:
+                        await unified_log_service.log(
+                            context=task_context,
+                            level=LogLevel.INFO,
+                            message="No specific tasks identified, creating general review task",
+                            component="email_task_converter"
+                        )
+                        # If no specific tasks created, create a general review task
+                        review_task = await self._create_review_task_with_logging(
+                            analysis, request, db_session, task_context
+                        )
+                        if review_task:
+                            tasks_created = [review_task]
+
+                    await unified_log_service.log(
+                        context=task_context,
+                        level=LogLevel.INFO,
+                        message=f"Created {len(tasks_created)} tasks from email",
+                        component="email_task_converter",
+                        extra_metadata={"tasks_count": len(tasks_created)}
+                    )
+
+                # If we created custom tasks, use those instead of templates
+                if tasks_created:
+                    # Schedule follow-up if needed for high importance emails
+                    follow_up_scheduled = False
+                    follow_up_date = None
+
+                    if analysis.importance_score >= 0.7 and analysis.action_required:
+                        follow_up_date = datetime.now() + timedelta(days=3)  # Follow up in 3 days
+                        follow_up_scheduled = True
+
+                        await unified_log_service.log(
+                            context=workflow_context,
+                            level=LogLevel.INFO,
+                            message="Scheduled follow-up for high importance email",
+                            component="email_task_converter",
+                            extra_metadata={
+                                "follow_up_date": follow_up_date.isoformat(),
+                                "importance_score": analysis.importance_score
+                            }
+                        )
+
+                    processing_time = (datetime.now() - start_time).total_seconds() * 1000
+
+                    await unified_log_service.log(
+                        context=workflow_context,
+                        level=LogLevel.INFO,
+                        message="Email task conversion completed successfully",
+                        component="email_task_converter",
+                        extra_metadata={
+                            "processing_time_ms": processing_time,
+                            "tasks_created": len(tasks_created),
+                            "follow_up_scheduled": follow_up_scheduled
+                        }
+                    )
+                
+                    return TaskCreationResult(
+                        tasks_created=tasks_created,
+                        follow_up_scheduled=follow_up_scheduled,
+                        follow_up_date=follow_up_date,
+                        processing_time_ms=processing_time
+                    )
+
+                # If no tasks were created from analysis, fallback to template approach
+                if not tasks_created:
+                    await unified_log_service.log(
+                        context=workflow_context,
+                        level=LogLevel.INFO,
+                        message="No tasks created, using fallback template approach",
+                        component="email_task_converter"
+                    )
+
+                    # Determine task templates to use
+                    applicable_templates = self._select_task_templates(analysis, request.email_content)
+
+                    # Create tasks from templates
+                    template_tasks = []
+                    for template in applicable_templates:
+                        task = await self._create_task_from_template(
+                            template, request, analysis, db_session
+                        )
+                        if task:
+                            template_tasks.append(task)
+
+                    # Schedule follow-up if needed
+                    follow_up_scheduled = False
+                    follow_up_date = None
+
+                    if analysis.action_required and any(template.requires_follow_up for template in applicable_templates):
+                        follow_up_date = self._calculate_follow_up_date(analysis, applicable_templates)
+                        follow_up_scheduled = True
+
+                        # Create follow-up task
+                        followup_task = await self._create_followup_task(
+                            request, analysis, follow_up_date, db_session
+                        )
+                        if followup_task:
+                            template_tasks.append(followup_task)
+
+                    processing_time = (datetime.now() - start_time).total_seconds() * 1000
+
+                    await unified_log_service.log(
+                        context=workflow_context,
+                        level=LogLevel.INFO,
+                        message=f"Template approach created {len(template_tasks)} tasks",
+                        component="email_task_converter",
+                        extra_metadata={
+                            "template_tasks": len(template_tasks),
+                            "follow_up_scheduled": follow_up_scheduled
+                        }
+                    )
+
+                    return TaskCreationResult(
+                        tasks_created=template_tasks,
+                        follow_up_scheduled=follow_up_scheduled,
+                        follow_up_date=follow_up_date,
+                        processing_time_ms=processing_time
+                    )
+
+            except Exception as e:
+                await unified_log_service.log(
+                    context=workflow_context,
+                    level=LogLevel.ERROR,
+                    message="Failed to convert email to tasks",
+                    component="email_task_converter",
+                    error=e
+                )
+                processing_time = (datetime.now() - start_time).total_seconds() * 1000
+
                 return TaskCreationResult(
                     tasks_created=[],
                     follow_up_scheduled=False,
                     follow_up_date=None,
-                    processing_time_ms=(datetime.now() - start_time).total_seconds() * 1000
-                )
-
-            # Create appropriate tasks based on importance and analysis
-            tasks_created = self._create_tasks_for_email(analysis, request, db_session)
-            
-            if not tasks_created:
-                # If no specific tasks created, create a general review task
-                review_task = self._create_review_task(analysis, request, db_session)
-                if review_task:
-                    tasks_created = [review_task]
-
-            # If we created custom tasks, use those instead of templates
-            if tasks_created:
-                # Schedule follow-up if needed for high importance emails
-                follow_up_scheduled = False
-                follow_up_date = None
-                
-                if analysis.importance_score >= 0.7 and analysis.action_required:
-                    follow_up_date = datetime.now() + timedelta(days=3)  # Follow up in 3 days
-                    follow_up_scheduled = True
-                    
-                processing_time = (datetime.now() - start_time).total_seconds() * 1000
-                
-                return TaskCreationResult(
-                    tasks_created=tasks_created,
-                    follow_up_scheduled=follow_up_scheduled,
-                    follow_up_date=follow_up_date,
                     processing_time_ms=processing_time
                 )
 
-            # Fallback to original template-based approach
-            # Determine task templates to use
-            applicable_templates = self._select_task_templates(analysis, request.email_content)
-
-            # Create tasks from templates
-            tasks_created = []
-            for template in applicable_templates:
-                task = await self._create_task_from_template(
-                    template, request, analysis, db_session
-                )
-                if task:
-                    tasks_created.append(task)
-
-            # Schedule follow-up if needed
-            follow_up_scheduled = False
-            follow_up_date = None
-
-            if analysis.action_required and any(template.requires_follow_up for template in applicable_templates):
-                follow_up_date = self._calculate_follow_up_date(analysis, applicable_templates)
-                follow_up_scheduled = True
-
-                # Create follow-up task
-                followup_task = await self._create_followup_task(
-                    request, analysis, follow_up_date, db_session
-                )
-                if followup_task:
-                    tasks_created.append(followup_task)
-
-            processing_time = (datetime.now() - start_time).total_seconds() * 1000
-
-            result = TaskCreationResult(
-                tasks_created=tasks_created,
-                follow_up_scheduled=follow_up_scheduled,
-                follow_up_date=follow_up_date,
-                processing_time_ms=processing_time
+    async def _create_tasks_for_email_with_logging(
+        self,
+        analysis: EmailAnalysis,
+        request: TaskCreationRequest,
+        db_session: Any,
+        task_context
+    ) -> List[Task]:
+        """Create tasks for email with unified logging."""
+        try:
+            await unified_log_service.log(
+                context=task_context,
+                level=LogLevel.INFO,
+                message="Analyzing email for task creation",
+                component="email_task_converter",
+                extra_metadata={
+                    "importance_score": analysis.importance_score,
+                    "action_required": analysis.action_required,
+                    "urgency_level": analysis.urgency_level,
+                    "sentiment": analysis.sentiment
+                }
             )
 
-            self.logger.info(f"Created {len(tasks_created)} tasks from email {analysis.email_id}")
-            return result
+            tasks = self._create_tasks_for_email(analysis, request, db_session)
+
+            await unified_log_service.log(
+                context=task_context,
+                level=LogLevel.INFO,
+                message=f"Task analysis complete - {len(tasks)} tasks identified",
+                component="email_task_converter",
+                extra_metadata={"tasks_identified": len(tasks)}
+            )
+
+            return tasks
 
         except Exception as e:
-            self.logger.error(f"Failed to convert email to tasks: {e}")
-            processing_time = (datetime.now() - start_time).total_seconds() * 1000
-
-            return TaskCreationResult(
-                tasks_created=[],
-                follow_up_scheduled=False,
-                follow_up_date=None,
-                processing_time_ms=processing_time
+            await unified_log_service.log(
+                context=task_context,
+                level=LogLevel.ERROR,
+                message="Failed to create tasks from email",
+                component="email_task_converter",
+                error=e
             )
+            return []
+
+    async def _create_review_task_with_logging(
+        self,
+        analysis: EmailAnalysis,
+        request: TaskCreationRequest,
+        db_session: Any,
+        task_context
+    ) -> Optional[Task]:
+        """Create review task with unified logging."""
+        try:
+            await unified_log_service.log(
+                context=task_context,
+                level=LogLevel.INFO,
+                message="Creating general review task",
+                component="email_task_converter"
+            )
+
+            task = self._create_review_task(analysis, request, db_session)
+
+            if task:
+                await unified_log_service.log(
+                    context=task_context,
+                    level=LogLevel.INFO,
+                    message="Review task created successfully",
+                    component="email_task_converter",
+                    extra_metadata={"task_id": str(task.id)}
+                )
+
+            return task
+
+        except Exception as e:
+            await unified_log_service.log(
+                context=task_context,
+                level=LogLevel.ERROR,
+                message="Failed to create review task",
+                component="email_task_converter",
+                error=e
+            )
+            return None
 
     def _select_task_templates(self, analysis: EmailAnalysis, email_content: str) -> List[TaskTemplate]:
         """Select appropriate task templates based on email analysis."""

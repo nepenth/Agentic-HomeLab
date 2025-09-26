@@ -28,5 +28,10 @@ class User(Base):
     # Relationships
     processed_emails = relationship("ProcessedEmail", back_populates="user")
 
+    # Email sync system relationships
+    email_accounts = relationship("EmailAccount", back_populates="user", cascade="all, delete-orphan")
+    emails = relationship("Email", back_populates="user")
+    email_tasks = relationship("EmailTask", back_populates="user", foreign_keys="EmailTask.user_id")
+
     def __repr__(self):
         return f"<User(id={self.id}, username='{self.username}', email='{self.email}')>"
