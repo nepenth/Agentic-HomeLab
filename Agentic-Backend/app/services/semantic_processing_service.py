@@ -161,8 +161,12 @@ class SemanticProcessingService:
             # Ensure model capability service is initialized
             await model_capability_service.initialize()
 
-            # Prioritize known working embedding models
-            preferred_models = ["snowflake-arctic-embed2:latest", "embeddinggemma:latest"]
+            # Get default embedding model from config
+            from app.config import settings
+            default_model = settings.default_embedding_model
+
+            # Prioritize configured default, then known working embedding models
+            preferred_models = [default_model, "snowflake-arctic-embed2:latest", "embeddinggemma:latest"]
 
             # Check if preferred models are available
             available_embedding_models = await model_capability_service.get_embedding_models()
@@ -187,7 +191,7 @@ class SemanticProcessingService:
                     self.logger.error("No embedding models available")
 
             if self.embedding_model:
-                self.logger.info(f"Semantic Processing Service initialized successfully with model: {self.embedding_model}")
+                self.logger.info(f"Semantic Processing Service initialized successfully with model: {self.embedding_model} (default from config: {default_model})")
             else:
                 raise ValueError("No embedding model could be selected")
 

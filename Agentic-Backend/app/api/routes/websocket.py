@@ -1,4 +1,4 @@
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Depends, Query, HTTPException
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query, HTTPException, Depends
 from typing import Optional, Dict, Any
 from uuid import UUID
 import json
@@ -6,8 +6,6 @@ import asyncio
 from app.utils.logging import get_logger
 from app.utils.metrics import MetricsCollector
 from app.utils.auth import verify_token
-from app.api.dependencies import get_db_session
-from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.models.user import User
 from sqlalchemy import select
 from app.services.chat_service import ChatService
@@ -21,8 +19,8 @@ logger = get_logger("websocket")
 router = APIRouter()
 
 
-async def validate_websocket_token(token: str, db: AsyncSession) -> User:
-    """Validate JWT token for WebSocket connections."""
+async def validate_websocket_token(token: str) -> User:
+    """Validate JWT token for WebSocket connections using scoped database session."""
     if not token:
         raise HTTPException(status_code=401, detail="Token required")
 
@@ -30,13 +28,16 @@ async def validate_websocket_token(token: str, db: AsyncSession) -> User:
     if not username:
         raise HTTPException(status_code=401, detail="Invalid token")
 
-    result = await db.execute(select(User).where(User.username == username))
-    user = result.scalar_one_or_none()
+    # Use scoped session that will be properly closed
+    from app.db.database import get_session_context
+    async with get_session_context() as db:
+        result = await db.execute(select(User).where(User.username == username))
+        user = result.scalar_one_or_none()
 
-    if not user or not user.is_active:
-        raise HTTPException(status_code=401, detail="User not found or inactive")
+        if not user or not user.is_active:
+            raise HTTPException(status_code=401, detail="User not found or inactive")
 
-    return user
+        return user
 
 
 class ConnectionManager:
@@ -219,15 +220,14 @@ async def websocket_logs(
     token: str = Query(..., description="JWT authentication token"),
     agent_id: Optional[str] = Query(None),
     task_id: Optional[str] = Query(None),
-    level: Optional[str] = Query(None),
-    db: AsyncSession = Depends(get_db_session)
+    level: Optional[str] = Query(None)
 ):
     """WebSocket endpoint for real-time log streaming with subscription filters."""
     connection_id = f"logs_{id(websocket)}"
 
     # Validate JWT token
     try:
-        user = await validate_websocket_token(token, db)
+        user = await validate_websocket_token(token)
         logger.info(f"WebSocket authenticated for user: {user.username}")
     except HTTPException as e:
         logger.warning(f"WebSocket authentication failed: {e.detail}")
@@ -303,15 +303,14 @@ async def websocket_logs(
 async def websocket_task(
     websocket: WebSocket,
     task_id: UUID,
-    token: str = Query(..., description="JWT authentication token"),
-    db: AsyncSession = Depends(get_db_session)
+    token: str = Query(..., description="JWT authentication token")
 ):
     """WebSocket endpoint for real-time updates for specific task."""
     connection_id = f"task_{task_id}_{id(websocket)}"
 
     # Validate JWT token
     try:
-        user = await validate_websocket_token(token, db)
+        user = await validate_websocket_token(token)
         logger.info(f"Task WebSocket authenticated for user: {user.username}")
     except HTTPException as e:
         logger.warning(f"Task WebSocket authentication failed: {e.detail}")
@@ -363,15 +362,14 @@ async def websocket_task(
 async def websocket_chat(
     websocket: WebSocket,
     session_id: UUID,
-    token: str = Query(..., description="JWT authentication token"),
-    db: AsyncSession = Depends(get_db_session)
+    token: str = Query(..., description="JWT authentication token")
 ):
     """WebSocket endpoint for real-time chat with LLM."""
     connection_id = f"chat_{session_id}_{id(websocket)}"
 
     # Validate JWT token
     try:
-        user = await validate_websocket_token(token, db)
+        user = await validate_websocket_token(token)
         logger.info(f"Chat WebSocket authenticated for user: {user.username}")
     except HTTPException as e:
         logger.warning(f"Chat WebSocket authentication failed: {e.detail}")
@@ -519,15 +517,14 @@ async def websocket_email_progress(
     websocket: WebSocket,
     token: str = Query(..., description="JWT authentication token"),
     user_id: Optional[str] = Query(None),
-    workflow_id: Optional[str] = Query(None),
-    db: AsyncSession = Depends(get_db_session)
+    workflow_id: Optional[str] = Query(None)
 ):
     """WebSocket endpoint for real-time email workflow progress monitoring."""
     connection_id = f"email_progress_{id(websocket)}"
 
     # Validate JWT token
     try:
-        user = await validate_websocket_token(token, db)
+        user = await validate_websocket_token(token)
         logger.info(f"Email progress WebSocket authenticated for user: {user.username}")
     except HTTPException as e:
         logger.warning(f"Email progress WebSocket authentication failed: {e.detail}")
@@ -607,7 +604,7 @@ async def websocket_email_progress(
 
                 elif message.get("type") == "get_dashboard_stats":
                     # Send current dashboard statistics
-                    target_user_id = user_id or user.username
+                    target_user_id = user_id or str(user.id)
 
                     # Get workflow stats
                     total_workflows_query = select(func.count(EmailWorkflow.id)).where(EmailWorkflow.user_id == target_user_id)
@@ -654,7 +651,7 @@ async def websocket_email_progress(
 
                 elif message.get("type") == "get_recent_activity":
                     # Send recent activity
-                    target_user_id = user_id or user.username
+                    target_user_id = user_id or str(user.id)
                     limit = message.get("limit", 10)
 
                     activities = []

@@ -38,8 +38,8 @@ def create_optimized_async_engine():
         "connect_args": connect_args,
         
         # Connection Pool Configuration (async engines handle pooling internally)
-        "pool_size": 20,  # Number of connections to maintain
-        "max_overflow": 30,  # Additional connections beyond pool_size
+        "pool_size": 10,  # Number of connections to maintain per service
+        "max_overflow": 15,  # Additional connections beyond pool_size
         "pool_timeout": 30,  # Timeout for getting connection from pool
         "pool_recycle": 1800,  # Recycle connections every 30 minutes
         "pool_reset_on_return": "commit",  # Clean state on connection return
@@ -137,8 +137,8 @@ from sqlalchemy.orm import sessionmaker
 # Create sync engine with optimized settings
 sync_engine = create_engine(
     settings.database_url.replace('+asyncpg', ''),
-    pool_size=10,
-    max_overflow=20,
+    pool_size=5,  # Smaller pool for sync operations
+    max_overflow=10,
     pool_timeout=30,
     pool_recycle=1800,
     pool_pre_ping=True,
@@ -156,6 +156,31 @@ sync_session_factory = sessionmaker(
 def get_sync_session():
     """Get synchronous database session for Celery tasks and sync contexts."""
     return sync_session_factory()
+
+@contextlib.contextmanager
+def get_celery_db_session():
+    """
+    Context manager for synchronous database sessions in Celery tasks.
+
+    This provides automatic transaction management and proper cleanup
+    for background job processing.
+
+    Usage:
+        with get_celery_db_session() as db:
+            # Your database operations
+            account = db.query(EmailAccount).filter_by(id=account_id).first()
+            # Commit happens automatically on context exit
+    """
+    session = sync_session_factory()
+    try:
+        yield session
+        session.commit()
+    except Exception:
+        session.rollback()
+        logger.error("Celery database session error - rolled back transaction")
+        raise
+    finally:
+        session.close()
 
 
 # Health check function

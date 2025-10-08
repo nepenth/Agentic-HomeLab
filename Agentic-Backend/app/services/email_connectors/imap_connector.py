@@ -170,6 +170,12 @@ class IMAPConnector(BaseEmailConnector):
 
                     # Process emails in batches
                     ids = message_ids[0].split()
+
+                    # CRITICAL FIX: Reverse order to process NEWEST emails first
+                    # IMAP typically returns oldest-first, but we want newest-first
+                    # so that recent emails are prioritized when hitting limits
+                    ids.reverse()
+
                     total_emails = len(ids)
 
                     if total_emails == 0:
@@ -178,11 +184,23 @@ class IMAPConnector(BaseEmailConnector):
 
                     batch_size = min(self.settings.max_emails_per_batch, 50)
 
-                    # Apply configured email limit
-                    max_emails_limit = getattr(self.settings, 'max_emails_limit', None) or 5000
-                    emails_to_process = min(total_emails, max_emails_limit)
+                    # Apply configured email limit (respect null = unlimited)
+                    max_emails_limit = getattr(self.settings, 'max_emails_limit', None)
+                    if max_emails_limit is None:
+                        emails_to_process = total_emails
+                        self.logger.info(f"Processing ALL {total_emails} emails (unlimited) in folder: {folder_name}")
+                    else:
+                        emails_to_process = min(total_emails, max_emails_limit)
+                        self.logger.info(f"Processing {emails_to_process} emails (found {total_emails}, limit {max_emails_limit}) in folder: {folder_name}")
 
-                    self.logger.info(f"Processing {emails_to_process} emails (found {total_emails}, limit {max_emails_limit}) in folder: {folder_name}")
+                        # VALIDATION: Warn if hitting email limit
+                        if total_emails > max_emails_limit:
+                            missing_count = total_emails - max_emails_limit
+                            self.logger.warning(f"EMAIL SYNC LIMIT HIT: {missing_count} emails will be skipped due to max_emails_limit={max_emails_limit}")
+
+                    # VALIDATION: Pre-sync validation
+                    if total_emails > emails_to_process:
+                        self.logger.warning(f"SYNC VALIDATION FAILURE: Only processing {emails_to_process} of {total_emails} emails - {total_emails - emails_to_process} emails will be missing")
 
                     for i in range(0, emails_to_process, batch_size):
                         batch_ids = ids[i:i + batch_size]
@@ -217,11 +235,23 @@ class IMAPConnector(BaseEmailConnector):
                 # Use the last sync time if provided
                 since_date = last_sync_time.strftime("%d-%b-%Y")
                 criteria = f'SINCE "{since_date}"'
+                self.logger.info(f"Using incremental sync since last sync: {since_date}")
             else:
-                # Search for emails from configured days back for incremental sync
-                days_back = getattr(self.settings, 'sync_days_back', None) or getattr(self.settings, 'date_range_days', None) or 30
-                since_date = (datetime.utcnow() - timedelta(days=days_back)).strftime("%d-%b-%Y")
-                criteria = f'SINCE "{since_date}"'
+                # Check for configured date range (respect null = unlimited)
+                days_back = getattr(self.settings, 'sync_days_back', None)
+                if days_back is None:
+                    # If sync_days_back is null, sync ALL emails (no date filter)
+                    criteria = "ALL"
+                    self.logger.info("Using unlimited date range for incremental sync (sync_days_back=null)")
+                else:
+                    # Use configured days back for incremental sync
+                    since_date = (datetime.utcnow() - timedelta(days=days_back)).strftime("%d-%b-%Y")
+                    criteria = f'SINCE "{since_date}"'
+                    self.logger.info(f"Using incremental sync for last {days_back} days since: {since_date}")
+        else:
+            # For FULL sync, always sync ALL emails regardless of date
+            criteria = "ALL"
+            self.logger.info("Using FULL sync - processing ALL emails regardless of date")
 
         return criteria
 
