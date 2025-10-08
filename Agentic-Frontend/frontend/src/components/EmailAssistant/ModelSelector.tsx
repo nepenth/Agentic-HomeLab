@@ -537,7 +537,6 @@ const ModelSelector: React.FC<ModelSelectorProps> = ({
             </Typography>
           </Box>
         )}
-      </Box>
     </Box>
   );
 };

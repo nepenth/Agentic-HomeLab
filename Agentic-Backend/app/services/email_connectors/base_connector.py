@@ -96,6 +96,13 @@ class EmailSyncResult:
     error_details: Dict[str, Any] = field(default_factory=dict)
     performance_metrics: Dict[str, Any] = field(default_factory=dict)
 
+    # VALIDATION METRICS
+    total_emails_in_mailbox: Optional[int] = None
+    emails_within_date_range: Optional[int] = None
+    emails_missing_due_to_limits: int = 0
+    validation_warnings: List[str] = field(default_factory=list)
+    sync_gaps_detected: List[Dict[str, Any]] = field(default_factory=list)
+
 
 @dataclass
 class AuthCredentials:

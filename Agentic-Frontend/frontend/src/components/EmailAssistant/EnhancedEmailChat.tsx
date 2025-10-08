@@ -589,23 +589,10 @@ const EnhancedEmailChat: React.FC = () => {
   });
 
   const handleSendMessage = async () => {
-    if (!inputValue.trim() || sendMessageMutation.isLoading) return;
+    if (!inputValue.trim() || isLoading) return;
 
-    const userMessage: ChatMessage = {
-      id: Date.now().toString(),
-      content: inputValue,
-      messageType: 'user',
-      timestamp: new Date().toISOString()
-    };
-
-    setMessages(prev => [...prev, userMessage]);
-    setInputValue('');
-
-    await sendMessageMutation.mutateAsync({
-      message: inputValue,
-      sessionId: currentSession,
-      modelName: selectedModel
-    });
+    // Use the new sendMessage function instead of the old mutation
+    await sendMessage(inputValue);
   };
 
   const handleQuickAction = (actionId: string, message: string) => {

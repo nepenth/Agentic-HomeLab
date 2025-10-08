@@ -41,6 +41,7 @@ class EmailAccount(Base):
     sync_settings = Column(JSONB, default={})  # folders, date ranges, filters
     sync_interval_minutes = Column(Integer, default=15)
     auto_sync_enabled = Column(Boolean, default=True)
+    embedding_model = Column(String(200))  # Embedding model for this account (None = use system default)
 
     # Sync status
     last_sync_at = Column(TIMESTAMP(timezone=True))

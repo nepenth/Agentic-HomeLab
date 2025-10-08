@@ -630,3 +630,500 @@ async def get_synced_emails(
             status_code=status_codes.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to retrieve synced emails"
         )
+
+@router.get("/models/embedding")
+async def get_available_embedding_models():
+    """
+    Get list of available embedding models from Ollama.
+    
+    Returns available models with metadata including dimensions,
+    performance characteristics, and the current system default.
+    """
+    try:
+        from app.services.model_capability_service import model_capability_service
+        from app.config import settings
+        
+        # Initialize model capability service
+        await model_capability_service.initialize()
+        
+        # Get embedding models
+        embedding_models = await model_capability_service.get_embedding_models()
+        
+        models_list = []
+        for model in embedding_models:
+            models_list.append({
+                "name": model.name,
+                "display_name": model.display_name or model.name,
+                "description": f"Embedding model with {model.context_length} dimensions",
+                "dimensions": model.context_length,
+                "capabilities": model.capabilities,
+                "parameter_size": getattr(model, 'parameter_size', None),
+                "is_available": True
+            })
+        
+        return {
+            "models": models_list,
+            "system_default": settings.default_embedding_model,
+            "total_count": len(models_list)
+        }
+    
+    except Exception as e:
+        logger.error(f"Failed to get embedding models: {e}")
+        # Return fallback response
+        return {
+            "models": [
+                {
+                    "name": settings.default_embedding_model,
+                    "display_name": settings.default_embedding_model,
+                    "description": "Default embedding model",
+                    "dimensions": 1024,
+                    "capabilities": [],
+                    "parameter_size": None,
+                    "is_available": True
+                }
+            ],
+            "system_default": settings.default_embedding_model,
+            "total_count": 1,
+            "error": "Failed to fetch models from Ollama"
+        }
+
+
+class EmbeddingModelUpdateRequest(BaseModel):
+    """Request to update embedding model for an account."""
+    model_name: Optional[str] = Field(None, description="Model name (null for system default)")
+    regenerate_embeddings: bool = Field(False, description="Regenerate existing embeddings")
+
+
+@router.patch("/accounts/{account_id}/embedding-model")
+async def update_account_embedding_model(
+    account_id: UUID,
+    request: EmbeddingModelUpdateRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db_session)
+):
+    """
+    Update the embedding model for a specific email account.
+    
+    Allows per-account embedding model configuration. Setting model_name to null
+    will use the system default model.
+    """
+    try:
+        from app.db.models.email import EmailAccount
+        from sqlalchemy import select
+        
+        # Get account
+        result = await db.execute(
+            select(EmailAccount).where(EmailAccount.id == account_id)
+        )
+        account = result.scalar_one_or_none()
+        
+        if not account:
+            raise HTTPException(
+                status_code=status_codes.HTTP_404_NOT_FOUND,
+                detail="Email account not found"
+            )
+        
+        # Check ownership
+        if account.user_id != current_user.id:
+            raise HTTPException(
+                status_code=status_codes.HTTP_403_FORBIDDEN,
+                detail="Not authorized to modify this account"
+            )
+        
+        # Update embedding model
+        account.embedding_model = request.model_name
+        await db.commit()
+        
+        logger.info(
+            f"Updated embedding model for account {account_id} to "
+            f"{request.model_name or 'system default'}"
+        )
+        
+        # Optionally trigger re-embedding
+        regenerate_task_id = None
+        if request.regenerate_embeddings:
+            from app.tasks.email_sync_tasks import regenerate_account_embeddings
+            task = regenerate_account_embeddings.delay(
+                str(account_id),
+                request.model_name
+            )
+            regenerate_task_id = task.id
+            logger.info(f"Scheduled re-embedding for account {account_id} with task {task.id}")
+
+        return {
+            "message": "Embedding model updated successfully",
+            "account_id": str(account_id),
+            "embedding_model": request.model_name or "system_default",
+            "regenerate_scheduled": request.regenerate_embeddings,
+            "regenerate_task_id": regenerate_task_id
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to update embedding model: {e}")
+        raise HTTPException(
+            status_code=status_codes.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to update embedding model"
+        )
+
+
+@router.get("/emails/{email_id}")
+async def get_email_detail(
+    email_id: UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db_session)
+):
+    """
+    Get full email details including content, attachments, and thread context.
+    
+    This endpoint provides complete email information for display in the UI,
+    including the ability to view full email body, download attachments,
+    and see related emails in the thread.
+    """
+    try:
+        from app.db.models.email import Email, EmailTask
+        from sqlalchemy import select
+        from sqlalchemy.orm import selectinload
+        
+        # Get email with related data
+        result = await db.execute(
+            select(Email)
+            .options(selectinload(Email.attachments))
+            .where(Email.id == email_id)
+        )
+        email = result.scalar_one_or_none()
+        
+        if not email:
+            raise HTTPException(
+                status_code=status_codes.HTTP_404_NOT_FOUND,
+                detail="Email not found"
+            )
+        
+        # Check ownership
+        if email.user_id != current_user.id:
+            raise HTTPException(
+                status_code=status_codes.HTTP_403_FORBIDDEN,
+                detail="Not authorized to view this email"
+            )
+        
+        # Get related tasks
+        tasks_result = await db.execute(
+            select(EmailTask).where(EmailTask.email_id == email_id)
+        )
+        related_tasks = tasks_result.scalars().all()
+        
+        # Get thread emails if thread_id exists
+        thread_emails = []
+        if email.thread_id:
+            thread_result = await db.execute(
+                select(Email)
+                .where(Email.thread_id == email.thread_id)
+                .order_by(Email.sent_at)
+            )
+            thread_emails_raw = thread_result.scalars().all()
+            thread_emails = [
+                {
+                    "id": str(e.id),
+                    "subject": e.subject,
+                    "sender_email": e.sender_email,
+                    "sent_at": e.sent_at.isoformat() if e.sent_at else None,
+                    "is_current": e.id == email_id
+                }
+                for e in thread_emails_raw
+            ]
+        
+        return {
+            "email": {
+                "id": str(email.id),
+                "message_id": email.message_id,
+                "thread_id": email.thread_id,
+                "subject": email.subject,
+                "sender_email": email.sender_email,
+                "sender_name": email.sender_name,
+                "body_text": email.body_text,
+                "body_html": email.body_html,
+                "sent_at": email.sent_at.isoformat() if email.sent_at else None,
+                "received_at": email.received_at.isoformat() if email.received_at else None,
+                "folder_path": email.folder_path,
+                "labels": email.labels,
+                "is_read": email.is_read,
+                "is_flagged": email.is_flagged,
+                "is_important": email.is_important,
+                "importance_score": email.importance_score,
+                "category": email.category,
+                "has_attachments": email.has_attachments,
+                "attachments": [
+                    {
+                        "id": str(att.id),
+                        "filename": att.filename,
+                        "content_type": att.content_type,
+                        "size_bytes": att.size_bytes,
+                        "is_inline": att.is_inline
+                    }
+                    for att in (email.attachments or [])
+                ]
+            },
+            "thread": {
+                "emails": thread_emails,
+                "total_count": len(thread_emails)
+            } if thread_emails else None,
+            "related_tasks": [
+                {
+                    "id": str(task.id),
+                    "description": task.description,
+                    "status": task.status.value if hasattr(task.status, 'value') else task.status,
+                    "priority": task.priority,
+                    "due_date": task.due_date.isoformat() if task.due_date else None
+                }
+                for task in related_tasks
+            ]
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get email detail: {e}")
+        raise HTTPException(
+            status_code=status_codes.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to retrieve email details"
+        )
+
+
+@router.get("/accounts/{account_id}/embedding-stats")
+async def get_account_embedding_stats(
+    account_id: UUID,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db_session)
+):
+    """
+    Get embedding statistics for a specific email account.
+
+    Returns:
+    - Total emails for account
+    - Emails with embeddings
+    - Emails without embeddings
+    - Breakdown by embedding model used
+    - Embedding types generated
+    """
+    try:
+        from app.db.models.email import EmailAccount, Email, EmailEmbedding
+        from sqlalchemy import select, func
+
+        # Verify account belongs to user
+        result = await db.execute(
+            select(EmailAccount).where(EmailAccount.id == account_id)
+        )
+        account = result.scalar_one_or_none()
+
+        if not account:
+            raise HTTPException(
+                status_code=status_codes.HTTP_404_NOT_FOUND,
+                detail="Email account not found"
+            )
+
+        if account.user_id != current_user.id:
+            raise HTTPException(
+                status_code=status_codes.HTTP_403_FORBIDDEN,
+                detail="Not authorized to access this account"
+            )
+
+        # Get total emails
+        total_emails_result = await db.execute(
+            select(func.count(Email.id)).where(Email.account_id == account_id)
+        )
+        total_emails = total_emails_result.scalar() or 0
+
+        # Get emails with embeddings
+        emails_with_embeddings_result = await db.execute(
+            select(func.count(Email.id)).where(
+                Email.account_id == account_id,
+                Email.embeddings_generated == True
+            )
+        )
+        emails_with_embeddings = emails_with_embeddings_result.scalar() or 0
+
+        # Get embedding breakdown by model
+        model_breakdown_result = await db.execute(
+            select(
+                EmailEmbedding.model_name,
+                EmailEmbedding.embedding_type,
+                func.count(EmailEmbedding.id).label('count')
+            ).join(Email, Email.id == EmailEmbedding.email_id)
+            .where(Email.account_id == account_id)
+            .group_by(EmailEmbedding.model_name, EmailEmbedding.embedding_type)
+        )
+
+        model_breakdown = []
+        for row in model_breakdown_result:
+            model_breakdown.append({
+                "model_name": row.model_name,
+                "embedding_type": row.embedding_type,
+                "count": row.count
+            })
+
+        return {
+            "account_id": str(account_id),
+            "email_address": account.email_address,
+            "current_embedding_model": account.embedding_model,
+            "total_emails": total_emails,
+            "emails_with_embeddings": emails_with_embeddings,
+            "emails_without_embeddings": total_emails - emails_with_embeddings,
+            "embedding_coverage_percent": round((emails_with_embeddings / total_emails * 100), 2) if total_emails > 0 else 0,
+            "model_breakdown": model_breakdown
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get embedding stats: {e}")
+        raise HTTPException(
+            status_code=status_codes.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to retrieve embedding statistics"
+        )
+
+
+class RegenerateEmbeddingsRequest(BaseModel):
+    """Request to regenerate embeddings."""
+    model_name: Optional[str] = Field(None, description="Target model (null = use account default)")
+    filter_by_current_model: Optional[str] = Field(None, description="Only regenerate embeddings from this model")
+    email_ids: Optional[List[UUID]] = Field(None, description="Specific emails to regenerate (null = all)")
+    embedding_types: Optional[List[str]] = Field(None, description="Specific embedding types to regenerate")
+    delete_existing: bool = Field(True, description="Delete existing embeddings before regenerating")
+
+
+@router.post("/accounts/{account_id}/regenerate-embeddings")
+async def regenerate_account_embeddings_endpoint(
+    account_id: UUID,
+    request: RegenerateEmbeddingsRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db_session)
+):
+    """
+    Regenerate embeddings for emails in an account.
+
+    Supports:
+    - Regenerating all embeddings
+    - Regenerating only embeddings from specific models
+    - Regenerating specific emails
+    - Regenerating specific embedding types
+    - Optionally preserving old embeddings
+    """
+    try:
+        from app.db.models.email import EmailAccount
+        from app.tasks.email_sync_tasks import regenerate_account_embeddings
+        from sqlalchemy import select
+
+        # Verify account belongs to user
+        result = await db.execute(
+            select(EmailAccount).where(EmailAccount.id == account_id)
+        )
+        account = result.scalar_one_or_none()
+
+        if not account:
+            raise HTTPException(
+                status_code=status_codes.HTTP_404_NOT_FOUND,
+                detail="Email account not found"
+            )
+
+        if account.user_id != current_user.id:
+            raise HTTPException(
+                status_code=status_codes.HTTP_403_FORBIDDEN,
+                detail="Not authorized to modify this account"
+            )
+
+        # Trigger regeneration task
+        task = regenerate_account_embeddings.delay(
+            str(account_id),
+            request.model_name,
+            request.filter_by_current_model,
+            [str(eid) for eid in request.email_ids] if request.email_ids else None,
+            request.embedding_types,
+            request.delete_existing
+        )
+
+        logger.info(
+            f"Scheduled embedding regeneration for account {account_id} "
+            f"with task {task.id}"
+        )
+
+        return {
+            "message": "Embedding regeneration scheduled successfully",
+            "task_id": task.id,
+            "account_id": str(account_id),
+            "target_model": request.model_name or account.embedding_model or "system_default",
+            "filter_by_model": request.filter_by_current_model,
+            "email_count": len(request.email_ids) if request.email_ids else "all"
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to schedule embedding regeneration: {e}")
+        raise HTTPException(
+            status_code=status_codes.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to schedule embedding regeneration"
+        )
+
+
+@router.get("/embedding-models/comparison")
+async def get_embedding_models_comparison(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db_session)
+):
+    """
+    Get comparison of embedding models used across all user's accounts.
+
+    Useful for understanding which models are in use and making migration decisions.
+    """
+    try:
+        from app.db.models.email import EmailAccount, Email, EmailEmbedding
+        from sqlalchemy import select, func
+
+        # Get user's accounts
+        accounts_result = await db.execute(
+            select(EmailAccount).where(EmailAccount.user_id == current_user.id)
+        )
+        accounts = accounts_result.scalars().all()
+
+        account_summaries = []
+        for account in accounts:
+            # Get embedding model breakdown for this account
+            model_stats_result = await db.execute(
+                select(
+                    EmailEmbedding.model_name,
+                    func.count(EmailEmbedding.id).label('count')
+                ).join(Email, Email.id == EmailEmbedding.email_id)
+                .where(Email.account_id == account.id)
+                .group_by(EmailEmbedding.model_name)
+            )
+
+            model_stats = {}
+            for row in model_stats_result:
+                model_stats[row.model_name or "unknown"] = row.count
+
+            # Get total emails
+            total_emails_result = await db.execute(
+                select(func.count(Email.id)).where(Email.account_id == account.id)
+            )
+            total_emails = total_emails_result.scalar() or 0
+
+            account_summaries.append({
+                "account_id": str(account.id),
+                "email_address": account.email_address,
+                "configured_model": account.embedding_model,
+                "total_emails": total_emails,
+                "models_in_use": model_stats
+            })
+
+        return {
+            "accounts": account_summaries,
+            "total_accounts": len(accounts)
+        }
+
+    except Exception as e:
+        logger.error(f"Failed to get model comparison: {e}")
+        raise HTTPException(
+            status_code=status_codes.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to retrieve model comparison"
+        )

@@ -33,6 +33,9 @@ class Settings(BaseSettings):
     email_sync_default_days_back: int = Field(default=365, env="EMAIL_SYNC_DEFAULT_DAYS_BACK")
     email_sync_default_max_emails: int = Field(default=5000, env="EMAIL_SYNC_DEFAULT_MAX_EMAILS")
     email_sync_batch_size: int = Field(default=50, env="EMAIL_SYNC_BATCH_SIZE")
+
+    # Email Embedding Configuration (can be overridden per account)
+    default_embedding_model: str = Field(default="snowflake-arctic-embed2:latest", env="DEFAULT_EMBEDDING_MODEL")
     app_version: str = Field(default="0.1.0", env="APP_VERSION")
     debug: bool = Field(default=False, env="DEBUG")
     

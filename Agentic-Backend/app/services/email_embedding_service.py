@@ -170,7 +170,8 @@ class EmailEmbeddingService:
         self,
         db: AsyncSession,
         email: Email,
-        force_regenerate: bool = False
+        force_regenerate: bool = False,
+        account_embedding_model: Optional[str] = None
     ) -> List[EmailEmbedding]:
         """
         Generate embeddings for a single email.
@@ -179,6 +180,7 @@ class EmailEmbeddingService:
             db: Database session
             email: Email to process
             force_regenerate: Regenerate even if embeddings exist
+            account_embedding_model: Specific embedding model for this account (overrides default)
 
         Returns:
             List of generated EmailEmbedding objects
@@ -219,17 +221,23 @@ class EmailEmbeddingService:
                         generated_embeddings.append(existing)
                         continue
 
-                # Generate embedding vector
-                embedding_vector = await semantic_processing_service.generate_embedding(content)
+                # Generate embedding vector using account-specific model if provided
+                embedding_vector = await semantic_processing_service.generate_embedding(
+                    content,
+                    model_name=account_embedding_model
+                )
 
                 if embedding_vector:
+                    # Determine which model was actually used
+                    used_model = account_embedding_model or semantic_processing_service.embedding_model
+
                     # Create EmailEmbedding record
                     email_embedding = EmailEmbedding(
                         email_id=email.id,
                         embedding_type=embedding_type,
                         content_hash=content_hash,
                         embedding_vector=embedding_vector,
-                        model_name=semantic_processing_service.embedding_model,
+                        model_name=used_model,
                         model_version="1.0"
                     )
 
@@ -545,20 +553,27 @@ class EmailEmbeddingService:
         if email.subject:
             content_types["subject"] = email.subject[:500]  # Limit subject length
 
-        # Body embedding (text only)
+        # Body embedding (text or HTML)
+        body_content = None
         if email.body_text:
+            body_content = email.body_text
+        elif email.body_html:
+            # Extract text from HTML
+            body_content = self._extract_text_from_html(email.body_html)
+
+        if body_content:
             # Clean and truncate body text
-            clean_body = self._clean_email_text(email.body_text)
+            clean_body = self._clean_email_text(body_content)
             content_types["body"] = clean_body[:self.max_content_length]
 
         # Combined embedding (subject + body)
-        if email.subject and email.body_text:
-            combined = f"Subject: {email.subject}\n\nBody: {email.body_text}"
+        if email.subject and body_content:
+            combined = f"Subject: {email.subject}\n\nBody: {body_content}"
             clean_combined = self._clean_email_text(combined)
             content_types["combined"] = clean_combined[:self.max_content_length]
 
         # Summary embedding (for long emails)
-        if email.body_text and len(email.body_text) > 2000:
+        if body_content and len(body_content) > 2000:
             # Create a summary of the email for embedding
             summary = await self._generate_email_summary(email)
             if summary:
@@ -748,6 +763,35 @@ class EmailEmbeddingService:
             alignment_score += 0.1
 
         return min(1.0, alignment_score)
+
+    def _extract_text_from_html(self, html_content: str) -> str:
+        """Extract plain text from HTML content."""
+        if not html_content:
+            return ""
+
+        try:
+            import re
+            from html import unescape
+
+            # Remove script and style elements
+            html_content = re.sub(r'<(script|style)[^>]*>.*?</\1>', '', html_content, flags=re.DOTALL | re.IGNORECASE)
+
+            # Remove HTML tags
+            text = re.sub(r'<[^>]+>', '', html_content)
+
+            # Unescape HTML entities
+            text = unescape(text)
+
+            # Clean up whitespace
+            text = re.sub(r'\s+', ' ', text).strip()
+
+            return text
+
+        except Exception as e:
+            self.logger.warning(f"Failed to extract text from HTML: {e}")
+            # Fallback: return HTML with tags stripped using simple regex
+            import re
+            return re.sub(r'<[^>]+>', '', html_content or "").strip()
 
 
 # Global instance
