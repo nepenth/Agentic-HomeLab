@@ -55,7 +55,7 @@ export const EmbeddingModelSelector: React.FC<EmbeddingModelSelectorProps> = ({
   const { data: modelsData, isLoading: modelsLoading } = useQuery({
     queryKey: ['embedding-models'],
     queryFn: async () => {
-      const response = await apiClient.get('/email-sync/models/embedding');
+      const response = await apiClient.get('/api/v1/email-sync/models/embedding');
       return response.data;
     }
   });
@@ -64,7 +64,7 @@ export const EmbeddingModelSelector: React.FC<EmbeddingModelSelectorProps> = ({
   const { data: statsData, refetch: refetchStats } = useQuery({
     queryKey: ['embedding-stats', accountId],
     queryFn: async () => {
-      const response = await apiClient.get(`/email-sync/accounts/${accountId}/embedding-stats`);
+      const response = await apiClient.get(`/api/v1/email-sync/accounts/${accountId}/embedding-stats`);
       return response.data;
     },
     enabled: showStats && !!accountId

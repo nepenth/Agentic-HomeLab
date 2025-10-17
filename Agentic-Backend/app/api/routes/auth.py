@@ -4,7 +4,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from datetime import timedelta
 
 from app.api.dependencies import get_db_session, get_current_user
-from app.api.schemas.auth import UserLogin, UserResponse, Token, ChangePassword, AdminChangePassword
+from app.api.schemas.auth import UserLogin, UserResponse, Token, ChangePassword, AdminChangePassword, UserUpdate
 from app.utils.auth import authenticate_user, create_access_token, get_password_hash, verify_password, get_user_by_username
 from app.config import settings
 from app.db.models.user import User
@@ -119,6 +119,47 @@ async def get_current_user_info(current_user: User = Depends(get_current_user)):
     """
     Get information about the currently authenticated user.
     """
+    return current_user
+
+
+@router.put("/profile", response_model=UserResponse, summary="Update User Profile")
+async def update_user_profile(
+    user_update: UserUpdate,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db_session)
+):
+    """
+    Update the current user's profile information.
+
+    - **username**: New username (optional)
+    - **email**: New email address (optional)
+    """
+    # Check if username is being updated and if it's already taken
+    if user_update.username and user_update.username != current_user.username:
+        result = await db.execute(select(User).where(User.username == user_update.username))
+        existing_user = result.scalar_one_or_none()
+        if existing_user:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Username already taken"
+            )
+        current_user.username = user_update.username
+
+    # Check if email is being updated and if it's already taken
+    if user_update.email and user_update.email != current_user.email:
+        result = await db.execute(select(User).where(User.email == user_update.email))
+        existing_user = result.scalar_one_or_none()
+        if existing_user:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Email already taken"
+            )
+        current_user.email = user_update.email
+
+    # Commit changes
+    await db.commit()
+    await db.refresh(current_user)
+
     return current_user
 
 

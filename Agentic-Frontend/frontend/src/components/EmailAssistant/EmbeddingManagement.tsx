@@ -57,7 +57,7 @@ export const EmbeddingManagement: React.FC<EmbeddingManagementProps> = ({ accoun
   const { data: comparisonData, isLoading: comparisonLoading, refetch: refetchComparison } = useQuery({
     queryKey: ['embedding-models-comparison'],
     queryFn: async () => {
-      const response = await apiClient.get('/email-sync/embedding-models/comparison');
+      const response = await apiClient.get('/api/v1/email-sync/embedding-models/comparison');
       return response.data;
     },
     enabled: !accountId // Only fetch if we're showing all accounts
@@ -67,17 +67,17 @@ export const EmbeddingManagement: React.FC<EmbeddingManagementProps> = ({ accoun
   const { data: accountStats, refetch: refetchAccountStats } = useQuery({
     queryKey: ['embedding-stats', accountId],
     queryFn: async () => {
-      const response = await apiClient.get(`/email-sync/accounts/${accountId}/embedding-stats`);
+      const response = await apiClient.get(`/api/v1/email-sync/accounts/${accountId}/embedding-stats`);
       return response.data;
     },
     enabled: !!accountId
   });
 
   // Fetch available models
-  const { data: modelsData } = useQuery({
+  const { data: modelsData} = useQuery({
     queryKey: ['embedding-models'],
     queryFn: async () => {
-      const response = await apiClient.get('/email-sync/models/embedding');
+      const response = await apiClient.get('/api/v1/email-sync/models/embedding');
       return response.data;
     }
   });
@@ -91,7 +91,7 @@ export const EmbeddingManagement: React.FC<EmbeddingManagementProps> = ({ accoun
       delete_existing: boolean;
     }) => {
       const response = await apiClient.post(
-        `/email-sync/accounts/${data.account_id}/regenerate-embeddings`,
+        `/api/v1/email-sync/accounts/${data.account_id}/regenerate-embeddings`,
         {
           model_name: data.model_name || null,
           filter_by_current_model: data.filter_by_current_model || null,

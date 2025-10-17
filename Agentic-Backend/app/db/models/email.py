@@ -10,7 +10,7 @@ This module defines SQLAlchemy models for the email sync system including:
 - Email sync history (audit trail)
 """
 
-from sqlalchemy import Column, String, Text, Integer, Float, Boolean, TIMESTAMP, ForeignKey, UniqueConstraint
+from sqlalchemy import Column, String, Text, Integer, BigInteger, Float, Boolean, TIMESTAMP, ForeignKey, UniqueConstraint
 from sqlalchemy.dialects.postgresql import UUID, JSONB, ARRAY
 from sqlalchemy.orm import relationship
 from sqlalchemy.sql import func
@@ -43,6 +43,13 @@ class EmailAccount(Base):
     auto_sync_enabled = Column(Boolean, default=True)
     embedding_model = Column(String(200))  # Embedding model for this account (None = use system default)
 
+    # UID-based sync configuration (new)
+    sync_window_days = Column(Integer, nullable=False, default=90)  # How many days back to sync
+    sync_folders = Column(JSONB, nullable=False, default=["INBOX"])  # Which folders to sync
+    supports_condstore = Column(Boolean, nullable=False, default=False)  # Server supports CONDSTORE extension
+    supports_qresync = Column(Boolean, nullable=False, default=False)  # Server supports QRESYNC extension
+    folders_discovered = Column(Boolean, nullable=False, default=False)  # Have we discovered available folders
+
     # Sync status
     last_sync_at = Column(TIMESTAMP(timezone=True))
     next_sync_at = Column(TIMESTAMP(timezone=True))
@@ -65,6 +72,37 @@ class EmailAccount(Base):
     )
 
 
+class FolderSyncState(Base):
+    """Tracks UID-based sync state for each folder in each account."""
+
+    __tablename__ = "folder_sync_state"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    account_id = Column(UUID(as_uuid=True), ForeignKey("email_accounts.id", ondelete="CASCADE"), nullable=False)
+
+    # Folder identification
+    folder_name = Column(String(255), nullable=False)  # e.g., "INBOX", "Sent", "Drafts"
+
+    # IMAP sync state
+    uid_validity = Column(BigInteger, nullable=True)  # Current UIDVALIDITY from server
+    highest_mod_seq = Column(BigInteger, nullable=True)  # HIGHESTMODSEQ for CONDSTORE
+    last_synced_uid = Column(BigInteger, nullable=True)  # Highest UID we've fetched
+    last_sync_at = Column(TIMESTAMP(timezone=True), nullable=True)  # When we last synced this folder
+    email_count = Column(Integer, default=0)  # Our local count for this folder
+
+    # Metadata
+    created_at = Column(TIMESTAMP(timezone=True), server_default=func.now())
+    updated_at = Column(TIMESTAMP(timezone=True), server_default=func.now(), onupdate=func.now())
+
+    # Relationships
+    account = relationship("EmailAccount", backref="folder_states")
+
+    # Constraints
+    __table_args__ = (
+        UniqueConstraint("account_id", "folder_name", name="uq_folder_sync_account_folder"),
+    )
+
+
 class Email(Base):
     """Local storage of synchronized email content."""
 
@@ -75,9 +113,13 @@ class Email(Base):
     account_id = Column(UUID(as_uuid=True), ForeignKey("email_accounts.id", ondelete="CASCADE"), nullable=False)
 
     # Email identifiers
-    message_id = Column(String(255), nullable=False)  # From email headers
+    message_id = Column(String(255), nullable=False)  # From email headers (RFC 5322)
     thread_id = Column(String(255))
     in_reply_to = Column(String(255))
+
+    # IMAP UID-based identifiers (new)
+    imap_uid = Column(BigInteger, nullable=True)  # IMAP UID (unique per folder)
+    uid_validity = Column(BigInteger, nullable=True)  # UIDVALIDITY for folder
 
     # Content
     subject = Column(Text)
@@ -109,12 +151,16 @@ class Email(Base):
     has_attachments = Column(Boolean, default=False)
     attachment_count = Column(Integer, default=0)
 
-    # Status flags
-    is_read = Column(Boolean, default=False)
-    is_flagged = Column(Boolean, default=False)
-    is_important = Column(Boolean, default=False)
-    is_spam = Column(Boolean, default=False)
-    is_deleted = Column(Boolean, default=False)
+    # IMAP RFC 3501 standard flags
+    is_read = Column(Boolean, default=False)      # \Seen - Message has been read
+    is_flagged = Column(Boolean, default=False)   # \Flagged - Message is flagged for urgent/special attention
+    is_deleted = Column(Boolean, default=False)   # \Deleted - Message is marked for deletion
+    is_draft = Column(Boolean, default=False)     # \Draft - Message is a draft
+    is_answered = Column(Boolean, default=False)  # \Answered - Message has been answered
+
+    # Additional status flags (application-specific)
+    is_important = Column(Boolean, default=False)  # Derived from importance_score or headers
+    is_spam = Column(Boolean, default=False)       # Email is spam/junk
 
     # Processing status
     embeddings_generated = Column(Boolean, default=False)

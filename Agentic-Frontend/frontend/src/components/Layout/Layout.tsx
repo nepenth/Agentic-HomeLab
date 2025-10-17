@@ -104,7 +104,10 @@ const Layout: React.FC<LayoutProps> = ({ children, drawerWidth = 280 }) => {
           <Box
             sx={{
               p: { xs: 2, md: 3 },
+              height: '100%', // Allow flex children to fill height
               minHeight: '100%', // Ensure content takes full height for scrolling
+              display: 'flex',
+              flexDirection: 'column',
             }}
           >
             {children}

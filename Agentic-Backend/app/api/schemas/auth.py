@@ -42,3 +42,8 @@ class ChangePassword(BaseModel):
 class AdminChangePassword(BaseModel):
     username: str
     new_password: str
+
+
+class UserUpdate(BaseModel):
+    username: Optional[str] = None
+    email: Optional[str] = None

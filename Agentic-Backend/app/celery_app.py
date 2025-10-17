@@ -48,6 +48,12 @@ celery_app.conf.beat_schedule = {
         'schedule': 3600.0,  # Run every hour
         'options': {'queue': 'email_sync'}
     },
+    'cleanup-deleted-emails': {
+        'task': 'app.tasks.email_sync_tasks.cleanup_deleted_emails',
+        'schedule': 86400.0,  # Run once per day (24 hours)
+        'options': {'queue': 'email_sync'},
+        'kwargs': {'days_threshold': 60}  # 60-day retention policy
+    },
 }
 
 if __name__ == "__main__":

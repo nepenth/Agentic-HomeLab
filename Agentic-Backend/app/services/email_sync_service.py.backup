@@ -1,0 +1,1043 @@
+"""
+Email Synchronization Service
+
+Orchestrates email synchronization across multiple accounts and providers.
+Handles scheduling, background processing, error recovery, and progress tracking.
+"""
+
+import asyncio
+from typing import List, Dict, Any, Optional
+from datetime import datetime, timedelta, timezone
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy import select, and_, or_, update
+from sqlalchemy.orm import selectinload
+
+from app.db.models.email import EmailAccount, Email, EmailSyncHistory
+from app.db.models.user import User
+from app.db.models.task import LogLevel
+from app.services.email_connectors import EmailConnectorFactory
+from app.services.email_connectors.base_connector import SyncType, EmailSyncResult
+from app.services.email_embedding_service import email_embedding_service
+from app.services.semantic_processing_service import semantic_processing_service
+from app.services.unified_log_service import unified_log_service, WorkflowType, LogScope
+from app.utils.logging import get_logger
+from app.api.dependencies import get_db_session
+
+logger = get_logger("email_sync_service")
+
+
+class EmailSyncService:
+    """Service for orchestrating email synchronization operations."""
+
+    def __init__(self):
+        self.logger = get_logger("email_sync_service")
+        self.connector_factory = EmailConnectorFactory()
+        self.max_concurrent_syncs = 3  # Limit concurrent sync operations
+        self.sync_timeout_minutes = 30  # Timeout for sync operations
+
+    async def sync_account(
+        self,
+        db: AsyncSession,
+        account_id: str,
+        sync_type: SyncType = SyncType.INCREMENTAL,
+        force_sync: bool = False
+    ) -> EmailSyncResult:
+        """
+        Synchronize a single email account.
+
+        Args:
+            db: Database session
+            account_id: EmailAccount UUID
+            sync_type: Type of synchronization
+            force_sync: Force sync even if recently synced
+
+        Returns:
+            EmailSyncResult with sync details
+        """
+        start_time = datetime.now(timezone.utc)
+        sync_result = EmailSyncResult(
+            sync_type=sync_type,
+            started_at=start_time
+        )
+
+        try:
+            # Get email account with user info
+            account_query = select(EmailAccount).options(
+                selectinload(EmailAccount.user)
+            ).where(EmailAccount.id == account_id)
+
+            result = await db.execute(account_query)
+            account = result.scalar_one_or_none()
+
+            if not account:
+                sync_result.error_message = f"Account {account_id} not found"
+                return sync_result
+
+            # Create unified workflow context for this sync operation
+            async with unified_log_service.workflow_context(
+                user_id=account.user_id,
+                workflow_type=WorkflowType.EMAIL_SYNC,
+                workflow_name=f"Email sync for {account.email_address}",
+                scope=LogScope.USER
+            ) as workflow_context:
+
+                await unified_log_service.log(
+                    context=workflow_context,
+                    level=LogLevel.INFO,
+                    message=f"Starting {sync_type.value} sync for account {account.email_address}",
+                    component="email_sync_service",
+                    extra_metadata={
+                        "account_id": str(account.id),
+                        "account_type": account.account_type,
+                        "sync_type": sync_type.value,
+                        "force_sync": force_sync
+                    }
+                )
+
+                # Check if sync is needed
+                if not force_sync and not await self._should_sync_account(account, sync_type):
+                    await unified_log_service.log(
+                        context=workflow_context,
+                        level=LogLevel.INFO,
+                        message="Sync not needed - account recently synced",
+                        component="email_sync_service"
+                    )
+                    sync_result.success = True
+                    sync_result.emails_skipped = 1
+                    sync_result.completed_at = datetime.now(timezone.utc)
+                    return sync_result
+
+                # Update account sync status
+                await self._update_account_sync_status(db, account, "running")
+
+                # Create sync history record
+                sync_history = await self._create_sync_history(db, account, sync_type)
+
+                try:
+                    async with unified_log_service.task_context(
+                        parent_context=workflow_context,
+                        task_name="Email connector sync",
+                        agent_id="email_sync_agent"
+                    ) as task_context:
+
+                        await unified_log_service.log(
+                            context=task_context,
+                            level=LogLevel.INFO,
+                            message=f"Creating {account.account_type} connector",
+                            component="email_sync_service"
+                        )
+
+                        # Create email connector
+                        connector = await self._create_connector(account)
+                        if not connector:
+                            raise Exception(f"Failed to create connector for account type {account.account_type}")
+
+                        # Determine last sync time for incremental sync
+                        last_sync_time = None
+                        if sync_type == SyncType.INCREMENTAL and account.last_sync_at:
+                            last_sync_time = account.last_sync_at
+
+                        await unified_log_service.log(
+                            context=task_context,
+                            level=LogLevel.INFO,
+                            message=f"Starting email synchronization (last sync: {last_sync_time})",
+                            component="email_sync_service",
+                            extra_metadata={
+                                "last_sync_time": last_sync_time.isoformat() if last_sync_time else None
+                            }
+                        )
+
+                        # Perform synchronization
+                        sync_stats = await self._perform_sync_with_logging(
+                            db, account, connector, sync_type, last_sync_time, task_context
+                        )
+
+                        await unified_log_service.log(
+                            context=task_context,
+                            level=LogLevel.INFO,
+                            message="Email synchronization completed successfully",
+                            component="email_sync_service",
+                            extra_metadata=sync_stats
+                        )
+
+                    # Update sync result
+                    sync_result.success = True
+                    sync_result.emails_processed = sync_stats["emails_processed"]
+                    sync_result.emails_added = sync_stats["emails_added"]
+                    sync_result.emails_updated = sync_stats["emails_updated"]
+                    sync_result.attachments_processed = sync_stats["attachments_processed"]
+
+                    # Update account sync info
+                    await self._update_account_after_sync(db, account, sync_stats)
+
+                    # Set completion time before updating sync history
+                    sync_result.completed_at = datetime.now(timezone.utc)
+
+                    # Update sync history
+                    await self._complete_sync_history(db, sync_history, sync_result)
+
+                    # Schedule embedding generation (don't fail sync if this fails)
+                    if sync_stats["emails_added"] > 0:
+                        try:
+                            await unified_log_service.log(
+                                context=workflow_context,
+                                level=LogLevel.INFO,
+                                message="Scheduling embedding generation for new emails",
+                                component="email_sync_service",
+                                extra_metadata={"emails_added": sync_stats["emails_added"]}
+                            )
+                            await self._schedule_embedding_generation(db, account.user_id)
+                        except Exception as embedding_error:
+                            await unified_log_service.log(
+                                context=workflow_context,
+                                level=LogLevel.WARNING,
+                                message="Embedding generation failed but sync succeeded",
+                                component="email_sync_service",
+                                error=embedding_error
+                            )
+
+                    await unified_log_service.log(
+                        context=workflow_context,
+                        level=LogLevel.INFO,
+                        message=f"Successfully synced account {account.email_address}",
+                        component="email_sync_service",
+                        extra_metadata={
+                            "emails_processed": sync_stats["emails_processed"],
+                            "emails_added": sync_stats["emails_added"],
+                            "emails_updated": sync_stats["emails_updated"]
+                        }
+                    )
+
+                except Exception as e:
+                    sync_result.error_message = str(e)
+                    sync_result.error_details = {"account_id": str(account.id), "error": str(e)}
+                    await self._update_account_sync_status(db, account, "error", str(e))
+                    await self._fail_sync_history(db, sync_history, str(e))
+
+                    await unified_log_service.log(
+                        context=workflow_context,
+                        level=LogLevel.ERROR,
+                        message=f"Email sync failed for account {account.email_address}",
+                        component="email_sync_service",
+                        error=e,
+                        extra_metadata={"account_id": str(account.id)}
+                    )
+                    raise
+
+        except Exception as e:
+            self.logger.error(f"Error syncing account {account_id}: {e}")
+            sync_result.error_message = str(e)
+
+        finally:
+            sync_result.completed_at = datetime.now(timezone.utc)
+
+        return sync_result
+
+    async def sync_all_accounts(
+        self,
+        db: AsyncSession,
+        user_id: Optional[int] = None,
+        sync_type: SyncType = SyncType.INCREMENTAL
+    ) -> Dict[str, EmailSyncResult]:
+        """
+        Synchronize all accounts (optionally for a specific user).
+
+        Args:
+            db: Database session
+            user_id: Sync only accounts for this user (None = all users)
+            sync_type: Type of synchronization
+
+        Returns:
+            Dict mapping account_id to sync results
+        """
+        try:
+            # Get accounts that need syncing
+            accounts = await self._get_accounts_for_sync(db, user_id)
+
+            if not accounts:
+                self.logger.info("No accounts found for synchronization")
+                return {}
+
+            self.logger.info(f"Starting sync for {len(accounts)} accounts")
+
+            # Process accounts in batches to avoid overwhelming the system
+            results = {}
+            semaphore = asyncio.Semaphore(self.max_concurrent_syncs)
+
+            async def sync_account_with_semaphore(account):
+                async with semaphore:
+                    return await self.sync_account(db, str(account.id), sync_type)
+
+            # Create tasks for concurrent execution
+            tasks = []
+            for account in accounts:
+                task = asyncio.create_task(
+                    sync_account_with_semaphore(account),
+                    name=f"sync_{account.id}"
+                )
+                tasks.append((str(account.id), task))
+
+            # Wait for all syncs to complete with timeout
+            for account_id, task in tasks:
+                try:
+                    result = await asyncio.wait_for(
+                        task,
+                        timeout=self.sync_timeout_minutes * 60
+                    )
+                    results[account_id] = result
+                except asyncio.TimeoutError:
+                    self.logger.error(f"Sync timeout for account {account_id}")
+                    task.cancel()
+                    results[account_id] = EmailSyncResult(
+                        sync_type=sync_type,
+                        started_at=datetime.now(timezone.utc),
+                        error_message="Sync operation timed out"
+                    )
+
+            self.logger.info(f"Completed sync for {len(results)} accounts")
+            return results
+
+        except Exception as e:
+            self.logger.error(f"Error in sync_all_accounts: {e}")
+            return {}
+
+    async def schedule_periodic_sync(
+        self,
+        db: AsyncSession,
+        account_id: Optional[str] = None
+    ) -> None:
+        """
+        Schedule periodic synchronization for accounts.
+
+        Args:
+            db: Database session
+            account_id: Specific account to schedule (None = all accounts)
+        """
+        try:
+            query = select(EmailAccount).where(
+                and_(
+                    EmailAccount.auto_sync_enabled == True,
+                    or_(
+                        EmailAccount.next_sync_at.is_(None),
+                        EmailAccount.next_sync_at <= datetime.now(timezone.utc)
+                    )
+                )
+            )
+
+            if account_id:
+                query = query.where(EmailAccount.id == account_id)
+
+            result = await db.execute(query)
+            accounts = result.scalars().all()
+
+            for account in accounts:
+                # Calculate next sync time
+                next_sync = datetime.now(timezone.utc) + timedelta(minutes=account.sync_interval_minutes or 15)
+
+                # Update next sync time
+                await db.execute(
+                    update(EmailAccount)
+                    .where(EmailAccount.id == account.id)
+                    .values(next_sync_at=next_sync)
+                )
+
+            await db.commit()
+            self.logger.info(f"Scheduled sync for {len(accounts)} accounts")
+
+        except Exception as e:
+            self.logger.error(f"Error scheduling periodic sync: {e}")
+
+    async def get_sync_status(
+        self,
+        db: AsyncSession,
+        user_id: int
+    ) -> Dict[str, Any]:
+        """
+        Get synchronization status for a user's accounts.
+
+        Args:
+            db: Database session
+            user_id: User ID
+
+        Returns:
+            Dict with sync status information
+        """
+        try:
+            # Get accounts with recent sync history
+            accounts_query = select(EmailAccount).options(
+                selectinload(EmailAccount.sync_history)
+            ).where(EmailAccount.user_id == user_id)
+
+            result = await db.execute(accounts_query)
+            accounts = result.scalars().all()
+
+            status = {
+                "total_accounts": len(accounts),
+                "accounts": [],
+                "overall_status": "healthy",
+                "total_emails_synced": 0,
+                "last_sync_times": []
+            }
+
+            for account in accounts:
+                # Get recent sync history
+                recent_syncs = sorted(
+                    account.sync_history,
+                    key=lambda x: x.started_at,
+                    reverse=True
+                )[:5]
+
+                account_status = {
+                    "account_id": str(account.id),
+                    "email_address": account.email_address,
+                    "account_type": account.account_type,
+                    "sync_status": account.sync_status,
+                    "auto_sync_enabled": account.auto_sync_enabled,
+                    "last_sync_at": account.last_sync_at.isoformat() if account.last_sync_at else None,
+                    "next_sync_at": account.next_sync_at.isoformat() if account.next_sync_at else None,
+                    "total_emails_synced": account.total_emails_synced,
+                    "last_error": account.last_error,
+                    "recent_syncs": [
+                        {
+                            "started_at": sync.started_at.isoformat(),
+                            "status": sync.status,
+                            "emails_processed": sync.emails_processed,
+                            "duration_seconds": sync.duration_seconds
+                        }
+                        for sync in recent_syncs
+                    ]
+                }
+
+                status["accounts"].append(account_status)
+                status["total_emails_synced"] += account.total_emails_synced or 0
+
+                if account.last_sync_at:
+                    status["last_sync_times"].append(account.last_sync_at)
+
+                # Update overall status
+                if account.sync_status == "error":
+                    status["overall_status"] = "error"
+                elif account.sync_status == "running" and status["overall_status"] == "healthy":
+                    status["overall_status"] = "syncing"
+
+            # Calculate average sync frequency
+            if status["last_sync_times"]:
+                status["most_recent_sync"] = max(status["last_sync_times"]).isoformat()
+
+            return status
+
+        except Exception as e:
+            self.logger.error(f"Error getting sync status: {e}")
+            return {"error": str(e)}
+
+    # Private helper methods
+
+    async def _perform_sync_with_logging(
+        self,
+        db: AsyncSession,
+        account: EmailAccount,
+        connector,
+        sync_type: SyncType,
+        last_sync_time: Optional[datetime],
+        task_context
+    ) -> Dict[str, int]:
+        """Perform email synchronization with unified logging."""
+        stats = {
+            "emails_processed": 0,
+            "emails_added": 0,
+            "emails_updated": 0,
+            "attachments_processed": 0,
+            "errors": 0
+        }
+
+        try:
+            # Connect to email provider
+            await unified_log_service.log(
+                context=task_context,
+                level=LogLevel.INFO,
+                message=f"Connecting to {account.account_type} server",
+                component="email_connector"
+            )
+            await connector.connect()
+
+            # Create step context for email processing
+            async with unified_log_service.step_context(
+                parent_context=task_context,
+                step_name="Process emails"
+            ) as step_context:
+
+                # Sync emails
+                async for email_message in connector.sync_emails(sync_type, last_sync_time):
+                    try:
+                        # Check if email already exists
+                        existing_query = select(Email).where(
+                            and_(
+                                Email.account_id == account.id,
+                                Email.message_id == email_message.message_id
+                            )
+                        )
+                        result = await db.execute(existing_query)
+                        existing_email = result.scalar_one_or_none()
+
+                        if existing_email:
+                            # Update existing email
+                            await self._update_email(db, existing_email, email_message)
+                            stats["emails_updated"] += 1
+                        else:
+                            # Create new email
+                            await self._create_email(db, account, email_message)
+                            stats["emails_added"] += 1
+
+                        stats["emails_processed"] += 1
+
+                        # Process attachments if enabled
+                        if account.sync_settings.get("sync_attachments", True):
+                            attachment_count = await self._process_attachments(
+                                db, connector, email_message
+                            )
+                            stats["attachments_processed"] += attachment_count
+
+                        # Log progress every 25 emails
+                        if stats["emails_processed"] % 25 == 0:
+                            await unified_log_service.log(
+                                context=step_context,
+                                level=LogLevel.INFO,
+                                message=f"Processed {stats['emails_processed']} emails",
+                                component="email_processor",
+                                extra_metadata={
+                                    "processed": stats["emails_processed"],
+                                    "added": stats["emails_added"],
+                                    "updated": stats["emails_updated"]
+                                }
+                            )
+
+                        # Commit periodically to avoid large transactions
+                        if stats["emails_processed"] % 50 == 0:
+                            await db.commit()
+
+                    except Exception as e:
+                        await unified_log_service.log(
+                            context=step_context,
+                            level=LogLevel.ERROR,
+                            message=f"Error processing email {email_message.message_id}",
+                            component="email_processor",
+                            error=e,
+                            extra_metadata={"message_id": email_message.message_id}
+                        )
+                        stats["errors"] += 1
+                        await db.rollback()
+
+                # Final commit
+                await db.commit()
+
+                await unified_log_service.log(
+                    context=step_context,
+                    level=LogLevel.INFO,
+                    message="Email processing completed",
+                    component="email_processor",
+                    extra_metadata=stats
+                )
+
+        finally:
+            try:
+                await connector.disconnect()
+                await unified_log_service.log(
+                    context=task_context,
+                    level=LogLevel.INFO,
+                    message="Disconnected from email server",
+                    component="email_connector"
+                )
+            except Exception as e:
+                await unified_log_service.log(
+                    context=task_context,
+                    level=LogLevel.WARNING,
+                    message="Error disconnecting from email server",
+                    component="email_connector",
+                    error=e
+                )
+
+        return stats
+
+    async def _should_sync_account(
+        self,
+        account: EmailAccount,
+        sync_type: SyncType
+    ) -> bool:
+        """Check if account should be synced."""
+        if sync_type == SyncType.FULL:
+            return True
+
+        if not account.auto_sync_enabled:
+            return False
+
+        if account.sync_status == "running":
+            return False  # Already syncing
+
+        # Check sync interval
+        if account.last_sync_at:
+            # Ensure both datetimes are timezone-aware for comparison
+            now = datetime.now(timezone.utc)
+            last_sync = account.last_sync_at
+
+            # If last_sync_at is naive, make it timezone-aware (assume UTC)
+            if last_sync.tzinfo is None:
+                last_sync = last_sync.replace(tzinfo=timezone.utc)
+
+            time_since_sync = now - last_sync
+            min_interval = timedelta(minutes=account.sync_interval_minutes or 15)
+
+            return time_since_sync >= min_interval
+
+        return True  # Never synced before
+
+    async def _create_connector(self, account: EmailAccount):
+        """Create email connector for account."""
+        try:
+            return await self.connector_factory.create_connector(
+                account_type=account.account_type,
+                account_id=str(account.id),
+                credentials=account.auth_credentials,
+                settings=account.sync_settings
+            )
+        except Exception as e:
+            self.logger.error(f"Error creating connector for account {account.id}: {e}")
+            return None
+
+    async def _perform_sync(
+        self,
+        db: AsyncSession,
+        account: EmailAccount,
+        connector,
+        sync_type: SyncType,
+        last_sync_time: Optional[datetime]
+    ) -> Dict[str, int]:
+        """Perform the actual email synchronization."""
+        stats = {
+            "emails_processed": 0,
+            "emails_added": 0,
+            "emails_updated": 0,
+            "attachments_processed": 0,
+            "errors": 0
+        }
+
+        try:
+            # Connect to email provider
+            await connector.connect()
+
+            # Sync emails
+            async for email_message in connector.sync_emails(sync_type, last_sync_time):
+                try:
+                    # Check if email already exists
+                    existing_query = select(Email).where(
+                        and_(
+                            Email.account_id == account.id,
+                            Email.message_id == email_message.message_id
+                        )
+                    )
+                    result = await db.execute(existing_query)
+                    existing_email = result.scalar_one_or_none()
+
+                    if existing_email:
+                        # Update existing email
+                        await self._update_email(db, existing_email, email_message)
+                        stats["emails_updated"] += 1
+                    else:
+                        # Create new email
+                        await self._create_email(db, account, email_message)
+                        stats["emails_added"] += 1
+
+                    stats["emails_processed"] += 1
+
+                    # Process attachments if enabled
+                    if account.sync_settings.get("sync_attachments", True):
+                        attachment_count = await self._process_attachments(
+                            db, connector, email_message
+                        )
+                        stats["attachments_processed"] += attachment_count
+
+                    # Commit periodically to avoid large transactions
+                    if stats["emails_processed"] % 50 == 0:
+                        await db.commit()
+
+                except Exception as e:
+                    self.logger.error(f"Error processing email {email_message.message_id}: {e}")
+                    stats["errors"] += 1
+                    await db.rollback()
+
+            # Final commit
+            await db.commit()
+
+            # Deletion detection - check for emails that no longer exist on server
+            if sync_type == SyncType.FULL:
+                deletion_stats = await self._detect_deletions(db, account, connector)
+                stats["emails_marked_deleted"] = deletion_stats["marked_deleted"]
+                stats["deletion_detection_ran"] = True
+
+        finally:
+            try:
+                await connector.disconnect()
+            except Exception as e:
+                self.logger.warning(f"Error disconnecting connector: {e}")
+
+        return stats
+
+    async def _create_email(
+        self,
+        db: AsyncSession,
+        account: EmailAccount,
+        email_message
+    ) -> Email:
+        """Create new email record from email message."""
+        email = Email(
+            user_id=account.user_id,
+            account_id=account.id,
+            message_id=email_message.message_id,
+            thread_id=email_message.thread_id,
+            subject=email_message.subject,
+            body_text=email_message.body_text,
+            body_html=email_message.body_html,
+            sender_email=email_message.sender_email,
+            sender_name=email_message.sender_name,
+            to_recipients=email_message.recipients,
+            cc_recipients=email_message.cc_recipients,
+            bcc_recipients=email_message.bcc_recipients,
+            sent_at=email_message.sent_at,
+            received_at=email_message.received_at,
+            folder_path=email_message.folder_path,
+            labels=email_message.labels,
+            size_bytes=email_message.size_bytes,
+            has_attachments=email_message.has_attachments,
+            attachment_count=len(email_message.attachments),
+            is_read=email_message.is_read,
+            is_flagged=email_message.is_flagged,
+            importance_score=0.5,  # Will be calculated by ML model
+            category="general"  # Will be categorized by ML model
+        )
+
+        db.add(email)
+        return email
+
+    async def _update_email(
+        self,
+        db: AsyncSession,
+        existing_email: Email,
+        email_message
+    ) -> None:
+        """Update existing email with new data."""
+        # Update mutable fields
+        existing_email.is_read = email_message.is_read
+        existing_email.is_flagged = email_message.is_flagged
+        existing_email.labels = email_message.labels
+        existing_email.folder_path = email_message.folder_path
+        existing_email.updated_at = datetime.now(timezone.utc)
+
+    async def _process_attachments(
+        self,
+        db: AsyncSession,
+        connector,
+        email_message
+    ) -> int:
+        """Process email attachments."""
+        # Placeholder for attachment processing
+        # This would download and store attachments
+        return len(email_message.attachments)
+
+    async def _detect_deletions(
+        self,
+        db: AsyncSession,
+        account: EmailAccount,
+        connector
+    ) -> Dict[str, int]:
+        """
+        Detect emails that have been deleted from the server and mark them locally.
+
+        Uses Message-ID fingerprinting to identify which emails no longer exist
+        on the server and marks them with is_deleted=True and deleted_at timestamp.
+
+        Retains deleted emails for 60 days for searchability and assistant context.
+        """
+        stats = {
+            "marked_deleted": 0,
+            "errors": 0
+        }
+
+        try:
+            from datetime import timezone
+            from app.db.models.email import Email
+
+            self.logger.info(f"Running deletion detection for account {account.id}")
+
+            # Get all message IDs from server for this account's folders
+            server_message_ids = set()
+
+            for folder_name in account.sync_settings.get("folders", ["INBOX"]):
+                try:
+                    # Get message IDs from server without downloading content
+                    # IMAP: SELECT folder, then SEARCH ALL, then get Message-ID headers
+                    await connector.connect()
+                    status, _ = connector._connection.select(folder_name)
+
+                    if status == 'OK':
+                        # Search for all messages in folder
+                        search_status, message_nums = connector._connection.search(None, 'ALL')
+
+                        if search_status == 'OK' and message_nums[0]:
+                            msg_ids = message_nums[0].split()
+
+                            # Fetch just the Message-ID headers (not full content)
+                            # Use BODY.PEEK[] to avoid marking emails as read
+                            for msg_id in msg_ids:
+                                try:
+                                    fetch_status, data = connector._connection.fetch(
+                                        msg_id, '(BODY.PEEK[HEADER.FIELDS (MESSAGE-ID)])'
+                                    )
+                                    if fetch_status == 'OK' and data[0]:
+                                        header_data = data[0][1].decode('utf-8', errors='ignore')
+                                        # Extract Message-ID from header
+                                        for line in header_data.split('\n'):
+                                            if line.lower().startswith('message-id:'):
+                                                message_id = line.split(':', 1)[1].strip()
+                                                server_message_ids.add(message_id)
+                                                break
+                                except Exception as e:
+                                    self.logger.warning(f"Error fetching Message-ID for {msg_id}: {e}")
+
+                except Exception as e:
+                    self.logger.error(f"Error checking folder {folder_name}: {e}")
+
+            # Get all local message IDs for this account (excluding already deleted)
+            local_emails_query = select(Email).where(
+                and_(
+                    Email.account_id == account.id,
+                    Email.is_deleted == False
+                )
+            )
+            result = await db.execute(local_emails_query)
+            local_emails = result.scalars().all()
+
+            # Find deletions: emails in local DB but not on server
+            now = datetime.now(timezone.utc)
+            for email in local_emails:
+                if email.message_id not in server_message_ids:
+                    # Email was deleted from server - mark it locally
+                    email.is_deleted = True
+                    email.deleted_at = now
+                    stats["marked_deleted"] += 1
+
+                    self.logger.info(
+                        f"Marked email as deleted: {email.subject[:50]} "
+                        f"(Message-ID: {email.message_id})"
+                    )
+
+            await db.commit()
+
+            self.logger.info(
+                f"Deletion detection complete: {stats['marked_deleted']} emails marked as deleted"
+            )
+
+        except Exception as e:
+            self.logger.error(f"Error in deletion detection: {e}")
+            stats["errors"] += 1
+            await db.rollback()
+
+        return stats
+
+    async def cleanup_old_deleted_emails(
+        self,
+        db: AsyncSession,
+        retention_days: int = 60
+    ) -> Dict[str, int]:
+        """
+        Permanently delete emails that have been marked as deleted for longer than retention period.
+
+        Args:
+            db: Database session
+            retention_days: Number of days to retain deleted emails (default: 60)
+
+        Returns:
+            Dict with statistics about cleanup operation
+        """
+        stats = {
+            "emails_permanently_deleted": 0,
+            "errors": 0
+        }
+
+        try:
+            from datetime import timedelta, timezone
+            from app.db.models.email import Email
+
+            cutoff_date = datetime.now(timezone.utc) - timedelta(days=retention_days)
+
+            self.logger.info(f"Running cleanup: deleting emails marked as deleted before {cutoff_date}")
+
+            # Find emails that have been deleted for more than retention period
+            old_deleted_query = select(Email).where(
+                and_(
+                    Email.is_deleted == True,
+                    Email.deleted_at < cutoff_date
+                )
+            )
+
+            result = await db.execute(old_deleted_query)
+            emails_to_delete = result.scalars().all()
+
+            for email in emails_to_delete:
+                self.logger.debug(
+                    f"Permanently deleting email: {email.subject[:50]} "
+                    f"(deleted_at: {email.deleted_at})"
+                )
+                await db.delete(email)
+                stats["emails_permanently_deleted"] += 1
+
+            await db.commit()
+
+            self.logger.info(
+                f"Cleanup complete: {stats['emails_permanently_deleted']} emails permanently deleted"
+            )
+
+        except Exception as e:
+            self.logger.error(f"Error in cleanup: {e}")
+            stats["errors"] += 1
+            await db.rollback()
+
+        return stats
+
+    async def _get_accounts_for_sync(
+        self,
+        db: AsyncSession,
+        user_id: Optional[int]
+    ) -> List[EmailAccount]:
+        """Get accounts that need synchronization."""
+        query = select(EmailAccount).where(
+            EmailAccount.auto_sync_enabled == True
+        )
+
+        if user_id:
+            query = query.where(EmailAccount.user_id == user_id)
+
+        result = await db.execute(query)
+        return result.scalars().all()
+
+    async def _update_account_sync_status(
+        self,
+        db: AsyncSession,
+        account: EmailAccount,
+        status: str,
+        error_message: Optional[str] = None
+    ) -> None:
+        """Update account sync status."""
+        update_data = {"sync_status": status, "updated_at": datetime.now(timezone.utc)}
+
+        if status == "completed":
+            update_data["last_sync_at"] = datetime.now(timezone.utc)
+            update_data["last_error"] = None
+        elif error_message:
+            update_data["last_error"] = error_message
+
+        await db.execute(
+            update(EmailAccount)
+            .where(EmailAccount.id == account.id)
+            .values(**update_data)
+        )
+        await db.commit()
+
+    async def _update_account_after_sync(
+        self,
+        db: AsyncSession,
+        account: EmailAccount,
+        sync_stats: Dict[str, int]
+    ) -> None:
+        """Update account after successful sync."""
+        new_total = (account.total_emails_synced or 0) + sync_stats["emails_added"]
+
+        await db.execute(
+            update(EmailAccount)
+            .where(EmailAccount.id == account.id)
+            .values(
+                sync_status="completed",
+                last_sync_at=datetime.now(timezone.utc),
+                total_emails_synced=new_total,
+                last_error=None,
+                updated_at=datetime.now(timezone.utc)
+            )
+        )
+        await db.commit()
+
+    async def _create_sync_history(
+        self,
+        db: AsyncSession,
+        account: EmailAccount,
+        sync_type: SyncType
+    ) -> EmailSyncHistory:
+        """Create sync history record."""
+        sync_history = EmailSyncHistory(
+            account_id=account.id,
+            sync_type=sync_type.value,
+            status="running"
+        )
+        db.add(sync_history)
+        await db.commit()
+        await db.refresh(sync_history)
+        return sync_history
+
+    async def _complete_sync_history(
+        self,
+        db: AsyncSession,
+        sync_history: EmailSyncHistory,
+        sync_result: EmailSyncResult
+    ) -> None:
+        """Complete sync history record."""
+        duration = (sync_result.completed_at - sync_result.started_at).total_seconds()
+
+        await db.execute(
+            update(EmailSyncHistory)
+            .where(EmailSyncHistory.id == sync_history.id)
+            .values(
+                status="completed" if sync_result.success else "failed",
+                completed_at=sync_result.completed_at,
+                emails_processed=sync_result.emails_processed,
+                emails_added=sync_result.emails_added,
+                emails_updated=sync_result.emails_updated,
+                attachments_processed=sync_result.attachments_processed,
+                duration_seconds=int(duration),
+                error_message=sync_result.error_message
+            )
+        )
+        await db.commit()
+
+    async def _fail_sync_history(
+        self,
+        db: AsyncSession,
+        sync_history: EmailSyncHistory,
+        error_message: str
+    ) -> None:
+        """Mark sync history as failed."""
+        await db.execute(
+            update(EmailSyncHistory)
+            .where(EmailSyncHistory.id == sync_history.id)
+            .values(
+                status="failed",
+                completed_at=datetime.now(timezone.utc),
+                error_message=error_message
+            )
+        )
+        await db.commit()
+
+    async def _schedule_embedding_generation(
+        self,
+        db: AsyncSession,
+        user_id: int
+    ) -> None:
+        """Schedule embedding generation for newly synced emails."""
+        try:
+            # This would typically trigger a Celery task
+            # For now, we'll process embeddings directly
+            # The embedding service now uses unified logging internally
+            stats = await email_embedding_service.process_pending_emails(db, user_id)
+            self.logger.info(f"Embedding generation completed: {stats}")
+        except Exception as e:
+            self.logger.error(f"Error scheduling embedding generation: {e}")
+
+
+# Global instance
+email_sync_service = EmailSyncService()

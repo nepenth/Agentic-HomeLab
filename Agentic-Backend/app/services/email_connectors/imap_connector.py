@@ -35,6 +35,39 @@ class IMAPConnector(BaseEmailConnector):
 
         self._connection = None
 
+    def _quote_folder_name(self, folder: str) -> str:
+        """
+        Properly quote IMAP folder name for use with Python's imaplib.
+
+        According to RFC 3501, folder names with special characters must be quoted.
+        Uses imaplib's built-in _quote() method which properly handles:
+        - Spaces in folder names
+        - Special characters
+        - Hierarchical separators (/)
+        - Already-quoted strings
+
+        Args:
+            folder: Raw folder name as returned from LIST command
+
+        Returns:
+            Folder name ready for imaplib commands (quoted if needed)
+        """
+        # Use imaplib's built-in _quote() method for RFC 3501 compliance
+        # This method properly handles all edge cases including:
+        # - Folders with spaces: "INBOX/Applied to Jobs"
+        # - Folders with special chars
+        # - Already quoted strings (won't double-quote)
+        # - Hierarchical folder names with / delimiter
+        if self._connection:
+            return self._connection._quote(folder)
+
+        # Fallback if no connection (shouldn't happen in normal flow)
+        # Manually quote if folder contains spaces
+        if ' ' in folder and not (folder.startswith('"') and folder.endswith('"')):
+            escaped = folder.replace('\\', '\\\\').replace('"', '\\"')
+            return f'"{escaped}"'
+        return folder
+
     async def connect(self) -> bool:
         """
         Connect to the IMAP server.
@@ -154,8 +187,9 @@ class IMAPConnector(BaseEmailConnector):
                 try:
                     self.logger.info(f"Starting sync for folder: {folder_name}")
 
-                    # Select folder
-                    status, _ = self._connection.select(folder_name)
+                    # Select folder (quote for RFC 3501 compliance)
+                    quoted_folder = self._quote_folder_name(folder_name)
+                    status, _ = self._connection.select(quoted_folder)
                     if status != 'OK':
                         self.logger.error(f"Failed to access folder: {folder_name}")
                         continue
@@ -267,14 +301,25 @@ class IMAPConnector(BaseEmailConnector):
             EmailMessage or None if failed
         """
         try:
-            # Fetch email
-            status, msg_data = self._connection.fetch(message_id, '(RFC822)')
+            # Fetch email with FLAGS to get read/flagged status
+            # IMPORTANT: Use BODY.PEEK[] instead of RFC822 to avoid marking emails as read
+            # RFC822 automatically sets \Seen flag, BODY.PEEK[] is read-only
+            status, msg_data = self._connection.fetch(message_id, '(BODY.PEEK[] FLAGS)')
             if status != 'OK':
                 return None
 
-            # Parse email
+            # Parse email and flags
             raw_email = msg_data[0][1]
             email_message = email.message_from_bytes(raw_email)
+
+            # Extract FLAGS from response and parse RFC 3501 standard flags
+            flags_match = msg_data[0][0] if isinstance(msg_data[0][0], bytes) else None
+            flags_str = flags_match.decode() if flags_match else ""
+            is_read = '\\Seen' in flags_str
+            is_flagged = '\\Flagged' in flags_str
+            is_deleted = '\\Deleted' in flags_str
+            is_draft = '\\Draft' in flags_str
+            is_answered = '\\Answered' in flags_str
 
             # Extract email data
             subject = email_message.get('Subject', 'No Subject')
@@ -333,8 +378,12 @@ class IMAPConnector(BaseEmailConnector):
                 folder_path=folder_name,
                 labels=[folder_name],
                 has_attachments=self._has_attachments(email_message),
-                is_read=False,  # IMAP doesn't easily provide read status
-                is_flagged=False,
+                # RFC 3501 IMAP standard flags
+                is_read=is_read,        # \Seen
+                is_flagged=is_flagged,  # \Flagged
+                is_deleted=is_deleted,  # \Deleted
+                is_draft=is_draft,      # \Draft
+                is_answered=is_answered,  # \Answered
                 attachments=[]  # TODO: Implement attachment extraction
             )
 
@@ -430,8 +479,9 @@ class IMAPConnector(BaseEmailConnector):
                 folder_name = 'INBOX'
                 message_id = email_id
 
-            # Select folder
-            status, _ = self._connection.select(folder_name)
+            # Select folder (quote for RFC 3501 compliance)
+            quoted_folder = self._quote_folder_name(folder_name)
+            status, _ = self._connection.select(quoted_folder)
             if status != 'OK':
                 return None
 
@@ -466,8 +516,9 @@ class IMAPConnector(BaseEmailConnector):
                 folder_name = 'INBOX'
                 message_id = email_id
 
-            # Select folder
-            status, _ = self._connection.select(folder_name)
+            # Select folder (quote for RFC 3501 compliance)
+            quoted_folder = self._quote_folder_name(folder_name)
+            status, _ = self._connection.select(quoted_folder)
             if status != 'OK':
                 return False
 
@@ -530,7 +581,8 @@ class IMAPConnector(BaseEmailConnector):
 
                         # Try to get message count
                         try:
-                            status, count = self._connection.select(folder_name)
+                            quoted_folder = self._quote_folder_name(folder_name)
+                            status, count = self._connection.select(quoted_folder)
                             if status == 'OK':
                                 message_count = int(count[0]) if count and count[0] else 0
                             else:
@@ -559,4 +611,439 @@ class IMAPConnector(BaseEmailConnector):
                 "status": "error",
                 "message": f"IMAP sync status error: {str(e)}",
                 "folders": []
+            }
+
+    # ============================================================================
+    # UID-BASED SYNC METHODS (Phase 2 - RFC 3501 Compliant)
+    # ============================================================================
+
+    def get_folder_status(self, folder: str) -> Dict[str, Any]:
+        """
+        Get folder status including UIDVALIDITY, EXISTS, UIDNEXT, and HIGHESTMODSEQ.
+
+        This is a synchronous method (called from sync workers).
+
+        Args:
+            folder: Folder name (e.g., "INBOX", "Sent", "INBOX/Applied to Jobs")
+
+        Returns:
+            Dict with:
+                - uidvalidity: UIDVALIDITY value (mailbox unique ID)
+                - exists: Number of messages in folder
+                - uidnext: Next UID to be assigned
+                - highest_modseq: HIGHESTMODSEQ (if CONDSTORE supported)
+                - recent: Number of recent messages
+        """
+        try:
+            # Quote folder name properly for IMAP commands
+            quoted_folder = self._quote_folder_name(folder)
+
+            # Select folder
+            status, data = self._connection.select(quoted_folder)
+            if status != 'OK':
+                raise SyncError(f"Failed to select folder {folder}: {data}")
+
+            # Parse SELECT response for message count
+            exists = int(data[0]) if data and data[0] else 0
+
+            # Get UIDVALIDITY and UIDNEXT from STATUS command
+            status, status_data = self._connection.status(
+                quoted_folder,
+                '(UIDVALIDITY UIDNEXT MESSAGES RECENT)'
+            )
+
+            if status != 'OK':
+                raise SyncError(f"Failed to get folder status: {status_data}")
+
+            # Parse status response
+            # Example: b'INBOX (MESSAGES 6365 RECENT 0 UIDNEXT 6366 UIDVALIDITY 1695053769)'
+            status_str = status_data[0].decode() if isinstance(status_data[0], bytes) else status_data[0]
+
+            result = {
+                'exists': exists,
+                'uidvalidity': None,
+                'uidnext': None,
+                'recent': 0,
+                'highest_modseq': None
+            }
+
+            # Parse status string
+            import re
+            uidvalidity_match = re.search(r'UIDVALIDITY (\d+)', status_str)
+            uidnext_match = re.search(r'UIDNEXT (\d+)', status_str)
+            messages_match = re.search(r'MESSAGES (\d+)', status_str)
+            recent_match = re.search(r'RECENT (\d+)', status_str)
+
+            if uidvalidity_match:
+                result['uidvalidity'] = int(uidvalidity_match.group(1))
+            if uidnext_match:
+                result['uidnext'] = int(uidnext_match.group(1))
+            if messages_match:
+                result['exists'] = int(messages_match.group(1))
+            if recent_match:
+                result['recent'] = int(recent_match.group(1))
+
+            # Try to get HIGHESTMODSEQ if CONDSTORE is supported
+            try:
+                status, modseq_data = self._connection.status(quoted_folder, '(HIGHESTMODSEQ)')
+                if status == 'OK':
+                    modseq_str = modseq_data[0].decode() if isinstance(modseq_data[0], bytes) else modseq_data[0]
+                    modseq_match = re.search(r'HIGHESTMODSEQ (\d+)', modseq_str)
+                    if modseq_match:
+                        result['highest_modseq'] = int(modseq_match.group(1))
+            except:
+                # CONDSTORE not supported, that's fine
+                pass
+
+            return result
+
+        except Exception as e:
+            self.logger.error(f"Failed to get folder status for {folder}: {e}")
+            raise SyncError(f"Failed to get folder status: {e}")
+
+    def fetch_uids_in_range(self, folder: str, uid_start: int, uid_end: str = '*') -> List[int]:
+        """
+        Fetch UIDs in a specified range.
+
+        Args:
+            folder: Folder name
+            uid_start: Starting UID (inclusive)
+            uid_end: Ending UID (inclusive), or '*' for highest UID
+
+        Returns:
+            List of UIDs in range
+        """
+        try:
+            # Quote folder name properly
+            quoted_folder = self._quote_folder_name(folder)
+
+            # Select folder
+            status, _ = self._connection.select(quoted_folder)
+            if status != 'OK':
+                raise SyncError(f"Failed to select folder {folder}")
+
+            # UID SEARCH for range
+            search_criteria = f'{uid_start}:{uid_end}'
+            status, data = self._connection.uid('SEARCH', None, search_criteria)
+
+            if status != 'OK':
+                raise SyncError(f"UID SEARCH failed: {data}")
+
+            # Parse UIDs from response
+            if not data or not data[0]:
+                return []
+
+            uid_bytes = data[0]
+            uid_str = uid_bytes.decode() if isinstance(uid_bytes, bytes) else uid_bytes
+
+            if not uid_str.strip():
+                return []
+
+            uids = [int(uid) for uid in uid_str.split()]
+            return uids
+
+        except Exception as e:
+            self.logger.error(f"Failed to fetch UIDs in range {uid_start}:{uid_end}: {e}")
+            raise SyncError(f"Failed to fetch UIDs: {e}")
+
+    def fetch_uids_since_date(self, folder: str, since_date: datetime) -> List[int]:
+        """
+        Fetch UIDs for emails received since a specific date.
+
+        Args:
+            folder: Folder name
+            since_date: Fetch emails since this date
+
+        Returns:
+            List of UIDs
+        """
+        try:
+            # Quote folder name properly
+            quoted_folder = self._quote_folder_name(folder)
+
+            # Select folder
+            status, _ = self._connection.select(quoted_folder)
+            if status != 'OK':
+                raise SyncError(f"Failed to select folder {folder}")
+
+            # Format date for IMAP (DD-Mon-YYYY)
+            date_str = since_date.strftime('%d-%b-%Y')
+
+            # UID SEARCH SINCE
+            status, data = self._connection.uid('SEARCH', None, f'SINCE {date_str}')
+
+            if status != 'OK':
+                raise SyncError(f"UID SEARCH SINCE failed: {data}")
+
+            # Parse UIDs
+            if not data or not data[0]:
+                return []
+
+            uid_bytes = data[0]
+            uid_str = uid_bytes.decode() if isinstance(uid_bytes, bytes) else uid_bytes
+
+            if not uid_str.strip():
+                return []
+
+            uids = [int(uid) for uid in uid_str.split()]
+            return uids
+
+        except Exception as e:
+            self.logger.error(f"Failed to fetch UIDs since {since_date}: {e}")
+            raise SyncError(f"Failed to fetch UIDs since date: {e}")
+
+    def fetch_email_by_uid(self, folder: str, uid: int) -> Optional[EmailMessage]:
+        """
+        Fetch a single email by its UID.
+
+        Args:
+            folder: Folder name
+            uid: IMAP UID
+
+        Returns:
+            EmailMessage object or None
+        """
+        try:
+            # Quote folder name properly
+            quoted_folder = self._quote_folder_name(folder)
+
+            # Select folder
+            status, _ = self._connection.select(quoted_folder)
+            if status != 'OK':
+                raise SyncError(f"Failed to select folder {folder}")
+
+            # Fetch email with FLAGS (use BODY.PEEK[] to avoid marking as read)
+            status, msg_data = self._connection.uid('FETCH', str(uid), '(BODY.PEEK[] FLAGS)')
+
+            if status != 'OK' or not msg_data or not msg_data[0]:
+                self.logger.warning(f"Failed to fetch email UID {uid}")
+                return None
+
+            # Parse email and flags
+            raw_email = msg_data[0][1]
+            email_message = email.message_from_bytes(raw_email)
+
+            # Extract FLAGS from response and parse RFC 3501 standard flags
+            flags_match = msg_data[0][0] if isinstance(msg_data[0][0], bytes) else None
+            flags_str = flags_match.decode() if flags_match else ""
+            is_read = '\\Seen' in flags_str
+            is_flagged = '\\Flagged' in flags_str
+            is_deleted = '\\Deleted' in flags_str
+            is_draft = '\\Draft' in flags_str
+            is_answered = '\\Answered' in flags_str
+
+            # Extract email data (reuse existing logic from _fetch_email)
+            subject = email_message.get('Subject', 'No Subject')
+            from_addr = email_message.get('From', '')
+            to_addr = email_message.get('To', '')
+            date_str = email_message.get('Date', '')
+            message_id_header = email_message.get('Message-ID', '')
+
+            # Parse date
+            received_at = None
+            if date_str:
+                try:
+                    parsed_date = email.utils.parsedate_to_datetime(date_str)
+                    if parsed_date.tzinfo is None:
+                        from datetime import timezone
+                        received_at = parsed_date.replace(tzinfo=timezone.utc)
+                    else:
+                        received_at = parsed_date
+                except:
+                    pass
+
+            # Extract body
+            body_text = ""
+            body_html = ""
+
+            if email_message.is_multipart():
+                for part in email_message.walk():
+                    content_type = part.get_content_type()
+                    content_disposition = str(part.get('Content-Disposition', ''))
+
+                    if content_type == "text/plain" and "attachment" not in content_disposition:
+                        body_text = part.get_payload(decode=True).decode('utf-8', errors='ignore')
+                    elif content_type == "text/html" and "attachment" not in content_disposition:
+                        body_html = part.get_payload(decode=True).decode('utf-8', errors='ignore')
+            else:
+                if email_message.get_content_type() == "text/plain":
+                    body_text = email_message.get_payload(decode=True).decode('utf-8', errors='ignore')
+                elif email_message.get_content_type() == "text/html":
+                    body_html = email_message.get_payload(decode=True).decode('utf-8', errors='ignore')
+
+            # Create snippet
+            snippet = (body_text or body_html)[:200] if (body_text or body_html) else ""
+
+            return EmailMessage(
+                message_id=message_id_header or f"imap_uid_{uid}",
+                thread_id=message_id_header or f"thread_uid_{uid}",
+                subject=subject,
+                sender_email=self._extract_email_address(from_addr),
+                sender_name=self._extract_display_name(from_addr),
+                recipients=[{"email": to_addr, "name": ""}] if to_addr else [],
+                received_at=received_at or datetime.utcnow(),
+                sent_at=received_at,
+                body_text=body_text,
+                body_html=body_html,
+                folder_path=folder,
+                labels=[folder],
+                has_attachments=self._has_attachments(email_message),
+                # RFC 3501 IMAP standard flags
+                is_read=is_read,        # \Seen
+                is_flagged=is_flagged,  # \Flagged
+                is_deleted=is_deleted,  # \Deleted
+                is_draft=is_draft,      # \Draft
+                is_answered=is_answered,  # \Answered
+                snippet=snippet,
+                imap_uid=uid,  # Include UID in response
+            )
+
+        except Exception as e:
+            self.logger.error(f"Failed to fetch email UID {uid}: {e}")
+            return None
+
+    def fetch_flags_by_uids(self, folder: str, uids: List[int]) -> Dict[int, Dict[str, bool]]:
+        """
+        Fetch only flags for multiple UIDs (efficient for flag updates).
+
+        Args:
+            folder: Folder name
+            uids: List of UIDs
+
+        Returns:
+            Dict mapping UID to flags: {uid: {'is_read': bool, 'is_flagged': bool}}
+        """
+        try:
+            if not uids:
+                return {}
+
+            # Select folder (quote for RFC 3501 compliance)
+            quoted_folder = self._quote_folder_name(folder)
+            status, _ = self._connection.select(quoted_folder)
+            if status != 'OK':
+                raise SyncError(f"Failed to select folder {folder}")
+
+            # Fetch flags for multiple UIDs
+            uid_set = ','.join(str(uid) for uid in uids)
+            status, data = self._connection.uid('FETCH', uid_set, '(FLAGS)')
+
+            if status != 'OK':
+                raise SyncError(f"UID FETCH FLAGS failed: {data}")
+
+            # Parse response
+            result = {}
+            for item in data:
+                if isinstance(item, tuple) and len(item) >= 2:
+                    # Parse UID and FLAGS from response
+                    # Example: b'1234 (UID 1234 FLAGS (\\Seen \\Flagged))'
+                    response_str = item[0].decode() if isinstance(item[0], bytes) else item[0]
+
+                    import re
+                    uid_match = re.search(r'UID (\d+)', response_str)
+                    flags_match = re.search(r'FLAGS \(([^)]*)\)', response_str)
+
+                    if uid_match:
+                        uid = int(uid_match.group(1))
+                        flags_str = flags_match.group(1) if flags_match else ""
+
+                        result[uid] = {
+                            'is_read': '\\Seen' in flags_str,
+                            'is_flagged': '\\Flagged' in flags_str
+                        }
+
+            return result
+
+        except Exception as e:
+            self.logger.error(f"Failed to fetch flags for UIDs: {e}")
+            raise SyncError(f"Failed to fetch flags: {e}")
+
+    def list_folders(self) -> List[Dict[str, Any]]:
+        """
+        List all folders/mailboxes available on the server.
+
+        Returns:
+            List of dicts with folder information:
+            [{'name': 'INBOX', 'delimiter': '/', 'flags': ['\\HasNoChildren']}]
+        """
+        try:
+            # LIST command to get all folders
+            status, folders = self._connection.list()
+
+            if status != 'OK':
+                raise SyncError(f"Failed to list folders: {folders}")
+
+            result = []
+            for folder_data in folders:
+                if not folder_data:
+                    continue
+
+                # Parse folder list response
+                # Example: b'(\\HasNoChildren) "/" "INBOX"'
+                folder_str = folder_data.decode() if isinstance(folder_data, bytes) else folder_data
+
+                import re
+                # Match: (flags) "delimiter" "name"
+                match = re.match(r'\(([^)]*)\)\s+"([^"]*)"\s+"?([^"]*)"?', folder_str)
+                if match:
+                    flags_str = match.group(1)
+                    delimiter = match.group(2)
+                    name = match.group(3)
+
+                    flags = [f.strip() for f in flags_str.split()] if flags_str else []
+
+                    # Check if folder is selectable (not \Noselect)
+                    selectable = '\\Noselect' not in flags
+                    has_children = '\\HasChildren' in flags
+
+                    result.append({
+                        'name': name,
+                        'delimiter': delimiter,
+                        'flags': flags,
+                        'selectable': selectable,
+                        'has_children': has_children
+                    })
+
+            return result
+
+        except Exception as e:
+            self.logger.error(f"Failed to list folders: {e}")
+            raise SyncError(f"Failed to list folders: {e}")
+
+    def check_capabilities(self) -> Dict[str, bool]:
+        """
+        Check server capabilities (CONDSTORE, QRESYNC, IDLE, etc.).
+
+        Returns:
+            Dict of capabilities: {'CONDSTORE': True, 'QRESYNC': False, 'IDLE': True}
+        """
+        try:
+            # CAPABILITY command
+            status, capabilities = self._connection.capability()
+
+            if status != 'OK':
+                raise SyncError(f"Failed to check capabilities: {capabilities}")
+
+            # Parse capabilities
+            cap_bytes = capabilities[0] if capabilities else b''
+            cap_str = cap_bytes.decode() if isinstance(cap_bytes, bytes) else cap_bytes
+            cap_list = cap_str.upper().split()
+
+            return {
+                'CONDSTORE': 'CONDSTORE' in cap_list,
+                'QRESYNC': 'QRESYNC' in cap_list,
+                'IDLE': 'IDLE' in cap_list,
+                'UIDPLUS': 'UIDPLUS' in cap_list,
+                'MOVE': 'MOVE' in cap_list,
+                'COMPRESS': 'COMPRESS=DEFLATE' in cap_list,
+            }
+
+        except Exception as e:
+            self.logger.error(f"Failed to check capabilities: {e}")
+            return {
+                'CONDSTORE': False,
+                'QRESYNC': False,
+                'IDLE': False,
+                'UIDPLUS': False,
+                'MOVE': False,
+                'COMPRESS': False,
             }

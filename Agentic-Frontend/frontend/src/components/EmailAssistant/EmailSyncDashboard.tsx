@@ -98,6 +98,13 @@ interface SyncStatus {
   most_recent_sync?: string;
 }
 
+interface EmbeddingStats {
+  total_emails: number;
+  emails_with_embeddings: number;
+  emails_without_embeddings: number;
+  embedding_coverage_percent: number;
+}
+
 interface SyncedEmail {
   email_id: string;
   subject: string;
@@ -172,7 +179,11 @@ const EmailSyncDashboard: React.FC = () => {
     queryFn: async () => {
       return await apiClient.getEmailSyncStatus();
     },
-    refetchInterval: 30000 // Refresh every 30 seconds
+    refetchInterval: (data) => {
+      // Faster refresh during active sync, slower when idle
+      const isRunning = data?.overall_status === 'running' || data?.overall_status === 'syncing';
+      return isRunning ? 5000 : 30000; // 5s when syncing, 30s when idle
+    }
   });
 
   // Fetch email accounts
@@ -181,6 +192,23 @@ const EmailSyncDashboard: React.FC = () => {
     queryFn: async () => {
       return await apiClient.getEmailAccounts();
     }
+  });
+
+  // Fetch real-time email and embedding counts
+  const { data: realtimeCounts, isLoading: loadingRealtimeCounts } = useQuery({
+    queryKey: ['realtime-counts'],
+    queryFn: async () => {
+      return await apiClient.getRealtimeCounts();
+    },
+    refetchInterval: (data) => {
+      // Faster refresh if sync is running or embeddings are generating
+      const hasPendingWork = data && (
+        (data.total_emails > 0 && data.total_with_embeddings < data.total_emails) ||
+        syncStatus?.overall_status === 'running'
+      );
+      return hasPendingWork ? 5000 : 30000; // 5s when active, 30s when idle
+    },
+    retry: 2
   });
 
   // Fetch sync defaults
@@ -216,16 +244,14 @@ const EmailSyncDashboard: React.FC = () => {
     }
   });
 
-  // Trigger sync mutation
+  // Trigger sync mutation - V2 UID-based sync (no more syncType parameter)
   const triggerSyncMutation = useMutation({
-    mutationFn: async ({ accountIds, syncType = 'incremental' }: {
+    mutationFn: async ({ accountIds }: {
       accountIds?: string[];
-      syncType?: string;
     }) => {
       return await apiClient.triggerEmailSync({
         account_ids: accountIds,
-        sync_type: syncType,
-        force_sync: true  // Manual sync from UI should always force sync
+        force_full_sync: false  // V2 UID-based sync handles incremental automatically
       });
     },
     onSuccess: () => {
@@ -427,17 +453,75 @@ const EmailSyncDashboard: React.FC = () => {
         <Grid item xs={12} md={3}>
           <Card>
             <CardContent>
-              <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
+              <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, mb: 1 }}>
                 <Avatar sx={{ bgcolor: 'success.main' }}>
                   <Storage />
                 </Avatar>
-                <Box>
-                  <Typography variant="h6">{syncStatus?.total_emails_synced || 0}</Typography>
+                <Box sx={{ flex: 1 }}>
+                  <Typography variant="h6">
+                    {realtimeCounts?.total_emails ?? syncStatus?.total_emails_realtime ?? 0}
+                  </Typography>
                   <Typography variant="body2" color="text.secondary">
-                    Emails Synced
+                    Total Emails
                   </Typography>
                 </Box>
               </Box>
+              {loadingRealtimeCounts ? (
+                <Box sx={{ mt: 1, display: 'flex', alignItems: 'center', gap: 1 }}>
+                  <CircularProgress size={16} />
+                  <Typography variant="caption" color="text.secondary">
+                    Loading...
+                  </Typography>
+                </Box>
+              ) : realtimeCounts ? (
+                <>
+                  <Divider sx={{ my: 1 }} />
+                  <Box sx={{ mt: 1 }}>
+                    <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 0.5 }}>
+                      <Typography variant="caption" color="text.secondary">
+                        Embeddings
+                      </Typography>
+                      <Typography variant="caption" fontWeight="bold">
+                        {realtimeCounts.total_with_embeddings} / {realtimeCounts.total_emails}
+                      </Typography>
+                    </Box>
+                    {realtimeCounts.total_emails > 0 && (
+                      <>
+                        <LinearProgress
+                          variant="determinate"
+                          value={realtimeCounts.overall_embedding_coverage}
+                          sx={{
+                            height: 6,
+                            borderRadius: 3,
+                            backgroundColor: 'grey.200',
+                            '& .MuiLinearProgress-bar': {
+                              backgroundColor: realtimeCounts.overall_embedding_coverage === 100 ? 'success.main' : 'warning.main'
+                            }
+                          }}
+                        />
+                        <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mt: 0.5 }}>
+                          <Typography variant="caption" color="text.secondary">
+                            {realtimeCounts.overall_embedding_coverage}% complete
+                          </Typography>
+                          {realtimeCounts.total_without_embeddings > 0 && (
+                            <Chip
+                              label={`${realtimeCounts.total_without_embeddings} ${realtimeCounts.total_with_embeddings > 0 ? 'generating' : 'pending'}`}
+                              size="small"
+                              color={realtimeCounts.total_with_embeddings > 0 ? 'info' : 'warning'}
+                              sx={{ height: 18, fontSize: '0.65rem' }}
+                            />
+                          )}
+                        </Box>
+                      </>
+                    )}
+                    {realtimeCounts.total_emails === 0 && (
+                      <Typography variant="caption" color="text.secondary">
+                        No emails synced yet
+                      </Typography>
+                    )}
+                  </Box>
+                </>
+              ) : null}
             </CardContent>
           </Card>
         </Grid>
@@ -449,13 +533,31 @@ const EmailSyncDashboard: React.FC = () => {
                 <Avatar sx={{ bgcolor: getStatusColor(syncStatus?.overall_status || 'default') }}>
                   {getStatusIcon(syncStatus?.overall_status || 'pending')}
                 </Avatar>
-                <Box>
+                <Box sx={{ flex: 1 }}>
                   <Typography variant="h6" sx={{ textTransform: 'capitalize' }}>
                     {syncStatus?.overall_status || 'Unknown'}
                   </Typography>
                   <Typography variant="body2" color="text.secondary">
                     Overall Status
                   </Typography>
+                  {syncStatus?.overall_status === 'running' && syncStatus?.accounts && (
+                    <Box sx={{ mt: 1 }}>
+                      {syncStatus.accounts.filter(acc => acc.sync_status === 'running').map(acc => (
+                        acc.sync_progress_percent && (
+                          <Box key={acc.account_id} sx={{ mb: 0.5 }}>
+                            <Typography variant="caption" color="text.secondary">
+                              {acc.realtime_email_count || 0} emails (~{acc.sync_progress_percent}%)
+                            </Typography>
+                            <LinearProgress
+                              variant="determinate"
+                              value={acc.sync_progress_percent}
+                              sx={{ height: 4, borderRadius: 2 }}
+                            />
+                          </Box>
+                        )
+                      ))}
+                    </Box>
+                  )}
                 </Box>
               </Box>
             </CardContent>
@@ -466,15 +568,18 @@ const EmailSyncDashboard: React.FC = () => {
           <Card>
             <CardContent>
               <Box sx={{ display: 'flex', alignItems: 'center', gap: 2 }}>
-                <Avatar sx={{ bgcolor: 'info.main' }}>
-                  <Timeline />
+                <Avatar sx={{ bgcolor: syncStatus?.overall_status === 'running' ? 'success.main' : 'info.main' }}>
+                  {syncStatus?.overall_status === 'running' ? <Sync className="spin" /> : <Timeline />}
                 </Avatar>
                 <Box>
                   <Typography variant="body1">
-                    {syncStatus?.most_recent_sync ? formatLastSync(syncStatus.most_recent_sync) : 'Never'}
+                    {syncStatus?.overall_status === 'running'
+                      ? 'Syncing now...'
+                      : (syncStatus?.most_recent_sync ? formatLastSync(syncStatus.most_recent_sync) : 'Never')
+                    }
                   </Typography>
                   <Typography variant="body2" color="text.secondary">
-                    Last Sync
+                    {syncStatus?.overall_status === 'running' ? 'In Progress' : 'Last Sync'}
                   </Typography>
                 </Box>
               </Box>

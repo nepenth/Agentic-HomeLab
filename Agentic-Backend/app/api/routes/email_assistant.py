@@ -212,24 +212,22 @@ async def create_chat_session(
 ):
     """Create a new chat session."""
     try:
-        # Create a new session by sending an initial message
-        initial_response = await email_assistant_service.process_message(
-            message="Hello, I'd like to start a new conversation.",
-            user_id=current_user.id,
-            session_id=None,  # This will create a new session
-            model_name=request.model_name,
-            db=db
-        )
+        # Create a session directly instead of sending an initial message
+        # This is more efficient and matches what the frontend expects
+        from uuid import uuid4
 
-        # Get the session information (would need to be returned by the service)
-        # For now, return a mock response
+        # Create session ID - not persisting to DB for now
+        session_id = str(uuid4())
+
+        # Return the session information
+        now = datetime.now()
         session_response = SessionResponse(
-            id="new-session-id",
-            title=request.title or "New Email Assistant Chat",
-            created_at=datetime.now().isoformat(),
-            last_activity=datetime.now().isoformat(),
-            selected_model=request.model_name or "llama2",
-            message_count=1,
+            id=session_id,
+            title=request.title or "New Chat",
+            created_at=now.isoformat(),
+            last_activity=now.isoformat(),
+            selected_model=request.model_name or "qwen3:30b-a3b-thinking-2507-q8_0",
+            message_count=0,
             is_active=True
         )
 
@@ -281,7 +279,7 @@ async def get_chat_sessions(
 
 @router.get("/sessions/{session_id}/messages")
 async def get_session_messages(
-    session_id: UUID,
+    session_id: str,
     current_user: User = Depends(get_current_user),
     limit: int = Query(default=50, le=100),
     offset: int = Query(default=0),
@@ -289,32 +287,14 @@ async def get_session_messages(
 ):
     """Get messages from a specific chat session."""
     try:
-        # This would query the database for messages
-        # For now, return a mock response
-        messages = [
-            {
-                "id": "msg_1",
-                "message_type": "user",
-                "content": "Show me my pending tasks",
-                "created_at": "2024-01-15T10:30:00Z",
-                "sequence_number": 1
-            },
-            {
-                "id": "msg_2",
-                "message_type": "assistant",
-                "content": "Here are your 3 pending tasks...",
-                "created_at": "2024-01-15T10:30:05Z",
-                "sequence_number": 2,
-                "model_used": "llama2",
-                "rich_content": {"tasks": []},
-                "suggested_actions": ["Complete tasks", "Create new task"]
-            }
-        ]
+        # For now, return empty messages for new sessions
+        # In the future, this would query the database for persisted messages
+        messages = []
 
         return {
-            "session_id": str(session_id),
+            "session_id": session_id,
             "messages": messages,
-            "total_count": len(messages),
+            "total_count": 0,
             "has_more": False
         }
 
