@@ -69,18 +69,19 @@ export const checkAuthStatus = createAsyncThunk(
         throw new Error('No token found');
       }
 
-      // Verify token by making a request to a protected endpoint
-      await apiClient.getHealth();
-      
+      // Fetch actual user data from the backend
+      const response = await apiClient.get('/api/v1/auth/me');
+      const userData = response.data;
+
       // If successful, connect WebSocket
       webSocketService.connect('logs', token);
-      
-      // For now, create a basic user object from stored data
-      // In a real app, you'd fetch user data from an endpoint
+
       return {
         user: {
-          id: 'current-user',
-          username: 'User',
+          id: userData.id,
+          username: userData.username,
+          email: userData.email,
+          is_superuser: userData.is_superuser,
           isAuthenticated: true,
         },
       };

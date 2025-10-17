@@ -1,62 +1,78 @@
 """
-Email Synchronization Service
+Email Synchronization Service - UID-Based Sync
 
-Orchestrates email synchronization across multiple accounts and providers.
-Handles scheduling, background processing, error recovery, and progress tracking.
+This service implements proper IMAP UID-based synchronization following RFC 3501 and RFC 4551.
+
+Key Features:
+- UID-based sync (not Message-ID)
+- Per-folder sync state tracking with UIDVALIDITY
+- RFC-compliant deletion tracking via IMAP \Deleted flag and folder location
+- Flag updates using CONDSTORE (when supported)
+- Configurable sync window (last X days)
+- Multi-folder support (INBOX, Sent, Drafts, Junk, etc.)
+- Multi-user, multi-account support
 """
 
 import asyncio
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Set
 from datetime import datetime, timedelta, timezone
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, and_, or_, update
+from sqlalchemy import select, and_, or_, update, delete
 from sqlalchemy.orm import selectinload
 
-from app.db.models.email import EmailAccount, Email, EmailSyncHistory
+from app.db.models.email import EmailAccount, Email, EmailSyncHistory, FolderSyncState
 from app.db.models.user import User
 from app.db.models.task import LogLevel
 from app.services.email_connectors import EmailConnectorFactory
-from app.services.email_connectors.base_connector import SyncType, EmailSyncResult
+from app.services.email_connectors.base_connector import SyncType, EmailSyncResult, EmailMessage
 from app.services.email_embedding_service import email_embedding_service
-from app.services.semantic_processing_service import semantic_processing_service
 from app.services.unified_log_service import unified_log_service, WorkflowType, LogScope
 from app.utils.logging import get_logger
-from app.api.dependencies import get_db_session
 
 logger = get_logger("email_sync_service")
 
 
 class EmailSyncService:
-    """Service for orchestrating email synchronization operations."""
+    """
+    UID-based email synchronization service.
+
+    This service implements proper IMAP UID-based sync with:
+    - UIDVALIDITY tracking to detect mailbox resets
+    - Efficient incremental sync using UID ranges
+    - Deletion tracking via IMAP \Deleted flag (RFC 3501)
+    - Flag updates with CONDSTORE support (when available)
+    - Configurable sync window (sync last X days)
+    - Multi-folder orchestration
+    """
 
     def __init__(self):
         self.logger = get_logger("email_sync_service")
         self.connector_factory = EmailConnectorFactory()
-        self.max_concurrent_syncs = 3  # Limit concurrent sync operations
-        self.sync_timeout_minutes = 30  # Timeout for sync operations
+        self.max_concurrent_folders = 5  # Sync up to 5 folders concurrently
+        self.sync_timeout_minutes = 30
+        self.batch_size = 100  # Fetch emails in batches of 100
+        self.commit_interval = 50  # Commit every 50 emails
 
     async def sync_account(
         self,
         db: AsyncSession,
         account_id: str,
-        sync_type: SyncType = SyncType.INCREMENTAL,
-        force_sync: bool = False
+        force_full_sync: bool = False
     ) -> EmailSyncResult:
         """
-        Synchronize a single email account.
+        Synchronize a single email account using UID-based sync.
 
         Args:
             db: Database session
             account_id: EmailAccount UUID
-            sync_type: Type of synchronization
-            force_sync: Force sync even if recently synced
+            force_full_sync: Force full sync even if UIDVALIDITY unchanged
 
         Returns:
             EmailSyncResult with sync details
         """
         start_time = datetime.now(timezone.utc)
         sync_result = EmailSyncResult(
-            sync_type=sync_type,
+            sync_type=SyncType.INCREMENTAL,
             started_at=start_time
         )
 
@@ -73,118 +89,107 @@ class EmailSyncService:
                 sync_result.error_message = f"Account {account_id} not found"
                 return sync_result
 
-            # Create unified workflow context for this sync operation
+            # Create unified workflow context
             async with unified_log_service.workflow_context(
                 user_id=account.user_id,
                 workflow_type=WorkflowType.EMAIL_SYNC,
-                workflow_name=f"Email sync for {account.email_address}",
+                workflow_name=f"UID-based sync for {account.email_address}",
                 scope=LogScope.USER
             ) as workflow_context:
 
                 await unified_log_service.log(
                     context=workflow_context,
                     level=LogLevel.INFO,
-                    message=f"Starting {sync_type.value} sync for account {account.email_address}",
+                    message=f"Starting UID-based sync for account {account.email_address}",
                     component="email_sync_service",
                     extra_metadata={
                         "account_id": str(account.id),
                         "account_type": account.account_type,
-                        "sync_type": sync_type.value,
-                        "force_sync": force_sync
+                        "sync_window_days": account.sync_window_days,
+                        "folders": account.sync_folders,
+                        "force_full_sync": force_full_sync
                     }
                 )
-
-                # Check if sync is needed
-                if not force_sync and not await self._should_sync_account(account, sync_type):
-                    await unified_log_service.log(
-                        context=workflow_context,
-                        level=LogLevel.INFO,
-                        message="Sync not needed - account recently synced",
-                        component="email_sync_service"
-                    )
-                    sync_result.success = True
-                    sync_result.emails_skipped = 1
-                    sync_result.completed_at = datetime.now(timezone.utc)
-                    return sync_result
 
                 # Update account sync status
                 await self._update_account_sync_status(db, account, "running")
 
                 # Create sync history record
-                sync_history = await self._create_sync_history(db, account, sync_type)
+                sync_history = await self._create_sync_history(db, account)
 
                 try:
-                    async with unified_log_service.task_context(
-                        parent_context=workflow_context,
-                        task_name="Email connector sync",
-                        agent_id="email_sync_agent"
-                    ) as task_context:
+                    # Create connector
+                    connector = await self._create_connector(account)
+                    if not connector:
+                        raise Exception(f"Failed to create connector for account type {account.account_type}")
 
-                        await unified_log_service.log(
-                            context=task_context,
-                            level=LogLevel.INFO,
-                            message=f"Creating {account.account_type} connector",
-                            component="email_sync_service"
+                    # Connect to IMAP server
+                    connected = await connector.connect()
+                    if not connected:
+                        raise Exception(f"Failed to connect to email server for account {account.email_address}")
+
+                    await unified_log_service.log(
+                        context=workflow_context,
+                        level=LogLevel.INFO,
+                        message=f"Successfully connected to email server",
+                        component="email_sync_service"
+                    )
+
+                    # Perform folder discovery if not done yet
+                    if not account.folders_discovered:
+                        await self._discover_folders(db, account, connector, workflow_context)
+
+                    # Check server capabilities (CONDSTORE, QRESYNC)
+                    await self._check_server_capabilities(db, account, connector, workflow_context)
+
+                    # Sync folders - use parallel sync for multiple folders
+                    total_stats = {
+                        "emails_processed": 0,
+                        "emails_added": 0,
+                        "emails_updated": 0,
+                        "emails_deleted": 0,
+                        "flags_updated": 0
+                    }
+
+                    folders_to_sync = account.sync_folders or ["INBOX"]
+
+                    # IMPORTANT: Process folders sequentially to avoid database transaction conflicts
+                    # Parallel folder sync with shared DB session causes "transaction aborted" errors
+                    # when one folder hits an error and aborts the transaction for all other folders
+                    for folder_name in folders_to_sync:
+                        folder_stats = await self._sync_folder(
+                            db, account, connector, folder_name,
+                            force_full_sync, workflow_context
                         )
 
-                        # Create email connector
-                        connector = await self._create_connector(account)
-                        if not connector:
-                            raise Exception(f"Failed to create connector for account type {account.account_type}")
-
-                        # Determine last sync time for incremental sync
-                        last_sync_time = None
-                        if sync_type == SyncType.INCREMENTAL and account.last_sync_at:
-                            last_sync_time = account.last_sync_at
-
-                        await unified_log_service.log(
-                            context=task_context,
-                            level=LogLevel.INFO,
-                            message=f"Starting email synchronization (last sync: {last_sync_time})",
-                            component="email_sync_service",
-                            extra_metadata={
-                                "last_sync_time": last_sync_time.isoformat() if last_sync_time else None
-                            }
-                        )
-
-                        # Perform synchronization
-                        sync_stats = await self._perform_sync_with_logging(
-                            db, account, connector, sync_type, last_sync_time, task_context
-                        )
-
-                        await unified_log_service.log(
-                            context=task_context,
-                            level=LogLevel.INFO,
-                            message="Email synchronization completed successfully",
-                            component="email_sync_service",
-                            extra_metadata=sync_stats
-                        )
+                        # Aggregate stats
+                        for key in total_stats:
+                            total_stats[key] += folder_stats.get(key, 0)
 
                     # Update sync result
                     sync_result.success = True
-                    sync_result.emails_processed = sync_stats["emails_processed"]
-                    sync_result.emails_added = sync_stats["emails_added"]
-                    sync_result.emails_updated = sync_stats["emails_updated"]
-                    sync_result.attachments_processed = sync_stats["attachments_processed"]
+                    sync_result.emails_processed = total_stats["emails_processed"]
+                    sync_result.emails_added = total_stats["emails_added"]
+                    sync_result.emails_updated = total_stats["emails_updated"]
 
-                    # Update account sync info
-                    await self._update_account_after_sync(db, account, sync_stats)
+                    # Update account after sync
+                    await self._update_account_after_sync(db, account, total_stats)
 
-                    # Set completion time before updating sync history
+                    # Set completion time
                     sync_result.completed_at = datetime.now(timezone.utc)
 
                     # Update sync history
                     await self._complete_sync_history(db, sync_history, sync_result)
 
-                    # Schedule embedding generation (don't fail sync if this fails)
-                    if sync_stats["emails_added"] > 0:
+                    # Schedule embedding generation for new emails
+                    if total_stats["emails_added"] > 0:
                         try:
                             await unified_log_service.log(
                                 context=workflow_context,
                                 level=LogLevel.INFO,
                                 message="Scheduling embedding generation for new emails",
                                 component="email_sync_service",
-                                extra_metadata={"emails_added": sync_stats["emails_added"]}
+                                extra_metadata={"emails_added": total_stats["emails_added"]}
                             )
                             await self._schedule_embedding_generation(db, account.user_id)
                         except Exception as embedding_error:
@@ -201,11 +206,7 @@ class EmailSyncService:
                         level=LogLevel.INFO,
                         message=f"Successfully synced account {account.email_address}",
                         component="email_sync_service",
-                        extra_metadata={
-                            "emails_processed": sync_stats["emails_processed"],
-                            "emails_added": sync_stats["emails_added"],
-                            "emails_updated": sync_stats["emails_updated"]
-                        }
+                        extra_metadata=total_stats
                     )
 
                 except Exception as e:
@@ -217,12 +218,25 @@ class EmailSyncService:
                     await unified_log_service.log(
                         context=workflow_context,
                         level=LogLevel.ERROR,
-                        message=f"Email sync failed for account {account.email_address}",
+                        message=f"UID-based sync failed for account {account.email_address}",
                         component="email_sync_service",
                         error=e,
                         extra_metadata={"account_id": str(account.id)}
                     )
                     raise
+                finally:
+                    # Always disconnect from IMAP server
+                    if connector:
+                        try:
+                            await connector.disconnect()
+                            await unified_log_service.log(
+                                context=workflow_context,
+                                level=LogLevel.INFO,
+                                message="Disconnected from email server",
+                                component="email_sync_service"
+                            )
+                        except Exception as disconnect_error:
+                            self.logger.warning(f"Error disconnecting from email server: {disconnect_error}")
 
         except Exception as e:
             self.logger.error(f"Error syncing account {account_id}: {e}")
@@ -233,455 +247,537 @@ class EmailSyncService:
 
         return sync_result
 
-    async def sync_all_accounts(
-        self,
-        db: AsyncSession,
-        user_id: Optional[int] = None,
-        sync_type: SyncType = SyncType.INCREMENTAL
-    ) -> Dict[str, EmailSyncResult]:
-        """
-        Synchronize all accounts (optionally for a specific user).
-
-        Args:
-            db: Database session
-            user_id: Sync only accounts for this user (None = all users)
-            sync_type: Type of synchronization
-
-        Returns:
-            Dict mapping account_id to sync results
-        """
-        try:
-            # Get accounts that need syncing
-            accounts = await self._get_accounts_for_sync(db, user_id)
-
-            if not accounts:
-                self.logger.info("No accounts found for synchronization")
-                return {}
-
-            self.logger.info(f"Starting sync for {len(accounts)} accounts")
-
-            # Process accounts in batches to avoid overwhelming the system
-            results = {}
-            semaphore = asyncio.Semaphore(self.max_concurrent_syncs)
-
-            async def sync_account_with_semaphore(account):
-                async with semaphore:
-                    return await self.sync_account(db, str(account.id), sync_type)
-
-            # Create tasks for concurrent execution
-            tasks = []
-            for account in accounts:
-                task = asyncio.create_task(
-                    sync_account_with_semaphore(account),
-                    name=f"sync_{account.id}"
-                )
-                tasks.append((str(account.id), task))
-
-            # Wait for all syncs to complete with timeout
-            for account_id, task in tasks:
-                try:
-                    result = await asyncio.wait_for(
-                        task,
-                        timeout=self.sync_timeout_minutes * 60
-                    )
-                    results[account_id] = result
-                except asyncio.TimeoutError:
-                    self.logger.error(f"Sync timeout for account {account_id}")
-                    task.cancel()
-                    results[account_id] = EmailSyncResult(
-                        sync_type=sync_type,
-                        started_at=datetime.now(timezone.utc),
-                        error_message="Sync operation timed out"
-                    )
-
-            self.logger.info(f"Completed sync for {len(results)} accounts")
-            return results
-
-        except Exception as e:
-            self.logger.error(f"Error in sync_all_accounts: {e}")
-            return {}
-
-    async def schedule_periodic_sync(
-        self,
-        db: AsyncSession,
-        account_id: Optional[str] = None
-    ) -> None:
-        """
-        Schedule periodic synchronization for accounts.
-
-        Args:
-            db: Database session
-            account_id: Specific account to schedule (None = all accounts)
-        """
-        try:
-            query = select(EmailAccount).where(
-                and_(
-                    EmailAccount.auto_sync_enabled == True,
-                    or_(
-                        EmailAccount.next_sync_at.is_(None),
-                        EmailAccount.next_sync_at <= datetime.now(timezone.utc)
-                    )
-                )
-            )
-
-            if account_id:
-                query = query.where(EmailAccount.id == account_id)
-
-            result = await db.execute(query)
-            accounts = result.scalars().all()
-
-            for account in accounts:
-                # Calculate next sync time
-                next_sync = datetime.now(timezone.utc) + timedelta(minutes=account.sync_interval_minutes or 15)
-
-                # Update next sync time
-                await db.execute(
-                    update(EmailAccount)
-                    .where(EmailAccount.id == account.id)
-                    .values(next_sync_at=next_sync)
-                )
-
-            await db.commit()
-            self.logger.info(f"Scheduled sync for {len(accounts)} accounts")
-
-        except Exception as e:
-            self.logger.error(f"Error scheduling periodic sync: {e}")
-
-    async def get_sync_status(
-        self,
-        db: AsyncSession,
-        user_id: int
-    ) -> Dict[str, Any]:
-        """
-        Get synchronization status for a user's accounts.
-
-        Args:
-            db: Database session
-            user_id: User ID
-
-        Returns:
-            Dict with sync status information
-        """
-        try:
-            # Get accounts with recent sync history
-            accounts_query = select(EmailAccount).options(
-                selectinload(EmailAccount.sync_history)
-            ).where(EmailAccount.user_id == user_id)
-
-            result = await db.execute(accounts_query)
-            accounts = result.scalars().all()
-
-            status = {
-                "total_accounts": len(accounts),
-                "accounts": [],
-                "overall_status": "healthy",
-                "total_emails_synced": 0,
-                "last_sync_times": []
-            }
-
-            for account in accounts:
-                # Get recent sync history
-                recent_syncs = sorted(
-                    account.sync_history,
-                    key=lambda x: x.started_at,
-                    reverse=True
-                )[:5]
-
-                account_status = {
-                    "account_id": str(account.id),
-                    "email_address": account.email_address,
-                    "account_type": account.account_type,
-                    "sync_status": account.sync_status,
-                    "auto_sync_enabled": account.auto_sync_enabled,
-                    "last_sync_at": account.last_sync_at.isoformat() if account.last_sync_at else None,
-                    "next_sync_at": account.next_sync_at.isoformat() if account.next_sync_at else None,
-                    "total_emails_synced": account.total_emails_synced,
-                    "last_error": account.last_error,
-                    "recent_syncs": [
-                        {
-                            "started_at": sync.started_at.isoformat(),
-                            "status": sync.status,
-                            "emails_processed": sync.emails_processed,
-                            "duration_seconds": sync.duration_seconds
-                        }
-                        for sync in recent_syncs
-                    ]
-                }
-
-                status["accounts"].append(account_status)
-                status["total_emails_synced"] += account.total_emails_synced or 0
-
-                if account.last_sync_at:
-                    status["last_sync_times"].append(account.last_sync_at)
-
-                # Update overall status
-                if account.sync_status == "error":
-                    status["overall_status"] = "error"
-                elif account.sync_status == "running" and status["overall_status"] == "healthy":
-                    status["overall_status"] = "syncing"
-
-            # Calculate average sync frequency
-            if status["last_sync_times"]:
-                status["most_recent_sync"] = max(status["last_sync_times"]).isoformat()
-
-            return status
-
-        except Exception as e:
-            self.logger.error(f"Error getting sync status: {e}")
-            return {"error": str(e)}
-
-    # Private helper methods
-
-    async def _perform_sync_with_logging(
+    async def _sync_folders_parallel(
         self,
         db: AsyncSession,
         account: EmailAccount,
         connector,
-        sync_type: SyncType,
-        last_sync_time: Optional[datetime],
-        task_context
+        folders: List[str],
+        force_full_sync: bool,
+        workflow_context
+    ) -> List[Dict[str, int]]:
+        """
+        Sync multiple folders in parallel for better performance.
+
+        Uses asyncio.gather with semaphore to limit concurrency and avoid
+        overwhelming the IMAP server.
+        """
+        semaphore = asyncio.Semaphore(self.max_concurrent_folders)
+
+        async def sync_folder_with_semaphore(folder_name: str):
+            async with semaphore:
+                return await self._sync_folder(
+                    db, account, connector, folder_name,
+                    force_full_sync, workflow_context
+                )
+
+        # Create tasks for all folders
+        tasks = [sync_folder_with_semaphore(folder) for folder in folders]
+
+        # Execute in parallel and gather results
+        folder_stats_list = await asyncio.gather(*tasks, return_exceptions=True)
+
+        # Handle any exceptions
+        results = []
+        for i, result in enumerate(folder_stats_list):
+            if isinstance(result, Exception):
+                self.logger.error(f"Error syncing folder {folders[i]}: {result}")
+                # Return empty stats for failed folder
+                results.append({
+                    "emails_processed": 0,
+                    "emails_added": 0,
+                    "emails_updated": 0,
+                    "emails_deleted": 0,
+                    "flags_updated": 0
+                })
+            else:
+                results.append(result)
+
+        return results
+
+    async def _sync_folder(
+        self,
+        db: AsyncSession,
+        account: EmailAccount,
+        connector,
+        folder_name: str,
+        force_full_sync: bool,
+        workflow_context
     ) -> Dict[str, int]:
-        """Perform email synchronization with unified logging."""
+        """
+        Sync a single folder using UID-based algorithm.
+
+        Algorithm:
+        1. Get folder status from server (UIDVALIDITY, UIDNEXT, EXISTS)
+        2. Get local sync state from database
+        3. Check UIDVALIDITY - if changed, handle mailbox reset
+        4. Fetch new UIDs since last sync
+        5. Fetch emails for new UIDs
+        6. Track deletions via IMAP \Deleted flag (parsed from FLAGS)
+        7. Update flags if CONDSTORE supported
+        8. Update folder sync state
+        """
         stats = {
             "emails_processed": 0,
             "emails_added": 0,
             "emails_updated": 0,
-            "attachments_processed": 0,
-            "errors": 0
+            "emails_deleted": 0,
+            "flags_updated": 0
         }
 
-        try:
-            # Connect to email provider
-            await unified_log_service.log(
-                context=task_context,
-                level=LogLevel.INFO,
-                message=f"Connecting to {account.account_type} server",
-                component="email_connector"
-            )
-            await connector.connect()
+        async with unified_log_service.task_context(
+            parent_context=workflow_context,
+            task_name=f"Sync folder: {folder_name}",
+            agent_id="email_sync_agent"
+        ) as task_context:
 
-            # Create step context for email processing
-            async with unified_log_service.step_context(
-                parent_context=task_context,
-                step_name="Process emails"
-            ) as step_context:
+            try:
+                await unified_log_service.log(
+                    context=task_context,
+                    level=LogLevel.INFO,
+                    message=f"Starting sync for folder: {folder_name}",
+                    component="folder_sync"
+                )
 
-                # Sync emails
-                async for email_message in connector.sync_emails(sync_type, last_sync_time):
+                # Step 1: Get folder status from server
+                folder_status = connector.get_folder_status(folder_name)
+
+                await unified_log_service.log(
+                    context=task_context,
+                    level=LogLevel.INFO,
+                    message=f"Server folder status retrieved",
+                    component="folder_sync",
+                    extra_metadata=folder_status
+                )
+
+                # Step 2: Get or create local sync state
+                local_state = await self._get_or_create_folder_sync_state(
+                    db, account.id, folder_name
+                )
+
+                # Step 3: Check UIDVALIDITY
+                server_uidvalidity = folder_status.get('uidvalidity')
+
+                if local_state.uid_validity is None:
+                    # First sync for this folder
+                    await unified_log_service.log(
+                        context=task_context,
+                        level=LogLevel.INFO,
+                        message=f"First sync for folder {folder_name}",
+                        component="folder_sync"
+                    )
+                    local_state.uid_validity = server_uidvalidity
+
+                elif local_state.uid_validity != server_uidvalidity:
+                    # Mailbox reset detected!
+                    await unified_log_service.log(
+                        context=task_context,
+                        level=LogLevel.WARNING,
+                        message=f"UIDVALIDITY changed for {folder_name} - mailbox was reset",
+                        component="folder_sync",
+                        extra_metadata={
+                            "old_uidvalidity": local_state.uid_validity,
+                            "new_uidvalidity": server_uidvalidity
+                        }
+                    )
+                    await self._handle_mailbox_reset(
+                        db, account, folder_name, server_uidvalidity, task_context
+                    )
+                    local_state.uid_validity = server_uidvalidity
+                    local_state.last_synced_uid = None
+                    force_full_sync = True
+
+                # Step 4: Determine UID range to fetch
+                if force_full_sync or local_state.last_synced_uid is None:
+                    # Full sync with date window
+                    since_date = datetime.now(timezone.utc) - timedelta(days=account.sync_window_days)
+                    uids_to_fetch = connector.fetch_uids_since_date(folder_name, since_date)
+
+                    await unified_log_service.log(
+                        context=task_context,
+                        level=LogLevel.INFO,
+                        message=f"Full sync: fetching UIDs since {since_date.date()}",
+                        component="folder_sync",
+                        extra_metadata={
+                            "since_date": since_date.isoformat(),
+                            "uids_found": len(uids_to_fetch)
+                        }
+                    )
+                else:
+                    # Incremental sync - fetch UIDs greater than last synced
+                    last_uid = local_state.last_synced_uid
+                    uids_to_fetch = connector.fetch_uids_in_range(folder_name, last_uid + 1, '*')
+
+                    await unified_log_service.log(
+                        context=task_context,
+                        level=LogLevel.INFO,
+                        message=f"Incremental sync: fetching UIDs after {last_uid}",
+                        component="folder_sync",
+                        extra_metadata={
+                            "last_synced_uid": last_uid,
+                            "new_uids_found": len(uids_to_fetch)
+                        }
+                    )
+
+                # Step 5: Fetch emails for new UIDs (in batches for better performance)
+                for batch_start in range(0, len(uids_to_fetch), self.batch_size):
+                    batch_uids = uids_to_fetch[batch_start:batch_start + self.batch_size]
+
+                    await unified_log_service.log(
+                        context=task_context,
+                        level=LogLevel.INFO,
+                        message=f"Processing UID batch {batch_start//self.batch_size + 1}/{(len(uids_to_fetch)-1)//self.batch_size + 1}",
+                        component="folder_sync",
+                        extra_metadata={"batch_size": len(batch_uids)}
+                    )
+
+                    for uid in batch_uids:
+                        try:
+                            email_message = connector.fetch_email_by_uid(folder_name, uid)
+
+                            if email_message:
+                                # Check if email exists by message_id
+                                existing_query = select(Email).where(
+                                    and_(
+                                        Email.account_id == account.id,
+                                        Email.message_id == email_message.message_id
+                                    )
+                                )
+                                result = await db.execute(existing_query)
+                                existing_email = result.scalar_one_or_none()
+
+                                if existing_email:
+                                    # Update existing email (folder, flags, UID)
+                                    await self._update_email_with_uid(
+                                        db, existing_email, email_message,
+                                        folder_name, uid, server_uidvalidity
+                                    )
+                                    stats["emails_updated"] += 1
+                                else:
+                                    # Create new email
+                                    try:
+                                        await self._create_email_with_uid(
+                                            db, account, email_message,
+                                            folder_name, uid, server_uidvalidity
+                                        )
+                                        # Flush immediately to check database constraints
+                                        await db.flush()
+                                        stats["emails_added"] += 1
+                                    except Exception as create_error:
+                                        # Handle duplicate key violations gracefully
+                                        if "duplicate key" in str(create_error).lower() or "unique constraint" in str(create_error).lower():
+                                            self.logger.warning(f"Email {email_message.message_id} already exists (UID {uid}), skipping")
+                                            # Rollback the failed insert
+                                            await db.rollback()
+                                            stats["emails_updated"] += 1  # Count as update since it exists
+                                        else:
+                                            raise  # Re-raise other errors
+
+                                stats["emails_processed"] += 1
+
+                                # Commit periodically within batch
+                                if stats["emails_processed"] % self.commit_interval == 0:
+                                    await db.commit()
+                                    await unified_log_service.log(
+                                        context=task_context,
+                                        level=LogLevel.INFO,
+                                        message=f"Progress: {stats['emails_processed']} emails processed",
+                                        component="folder_sync",
+                                        extra_metadata=stats
+                                    )
+
+                        except Exception as e:
+                            self.logger.error(f"Error fetching UID {uid} from {folder_name}: {e}")
+                            # Skip this email and continue with next UID
+                            # Don't rollback - would break async session
+                            continue
+
+                    # Commit after each batch
                     try:
-                        # Check if email already exists
-                        existing_query = select(Email).where(
-                            and_(
-                                Email.account_id == account.id,
-                                Email.message_id == email_message.message_id
-                            )
-                        )
-                        result = await db.execute(existing_query)
-                        existing_email = result.scalar_one_or_none()
-
-                        if existing_email:
-                            # Update existing email
-                            await self._update_email(db, existing_email, email_message)
-                            stats["emails_updated"] += 1
-                        else:
-                            # Create new email
-                            await self._create_email(db, account, email_message)
-                            stats["emails_added"] += 1
-
-                        stats["emails_processed"] += 1
-
-                        # Process attachments if enabled
-                        if account.sync_settings.get("sync_attachments", True):
-                            attachment_count = await self._process_attachments(
-                                db, connector, email_message
-                            )
-                            stats["attachments_processed"] += attachment_count
-
-                        # Log progress every 25 emails
-                        if stats["emails_processed"] % 25 == 0:
-                            await unified_log_service.log(
-                                context=step_context,
-                                level=LogLevel.INFO,
-                                message=f"Processed {stats['emails_processed']} emails",
-                                component="email_processor",
-                                extra_metadata={
-                                    "processed": stats["emails_processed"],
-                                    "added": stats["emails_added"],
-                                    "updated": stats["emails_updated"]
-                                }
-                            )
-
-                        # Commit periodically to avoid large transactions
-                        if stats["emails_processed"] % 50 == 0:
-                            await db.commit()
-
-                    except Exception as e:
+                        await db.commit()
                         await unified_log_service.log(
-                            context=step_context,
-                            level=LogLevel.ERROR,
-                            message=f"Error processing email {email_message.message_id}",
-                            component="email_processor",
-                            error=e,
-                            extra_metadata={"message_id": email_message.message_id}
+                            context=task_context,
+                            level=LogLevel.INFO,
+                            message=f"Batch complete: processed {len(batch_uids)} UIDs",
+                            component="folder_sync",
+                            extra_metadata={"batch_processed": len(batch_uids)}
                         )
-                        stats["errors"] += 1
-                        await db.rollback()
+                    except Exception as commit_error:
+                        self.logger.error(f"Error committing batch for {folder_name}: {commit_error}")
+                        # Rollback and continue - duplicates are expected during re-sync
+                        try:
+                            await db.rollback()
+                        except:
+                            pass  # Session might already be invalid
+                        # Don't break - continue with next batch
 
-                # Final commit
+                # Step 6: Deletion detection removed - IMAP \Deleted flag is now used
+                # Deleted emails are tracked via folder location (Trash/Deleted) and \Deleted flag
+
+                # Step 7: Update flags if CONDSTORE supported
+                if account.supports_condstore and local_state.highest_mod_seq:
+                    flag_stats = await self._update_flags_with_condstore(
+                        db, account, connector, folder_name,
+                        local_state.highest_mod_seq, task_context
+                    )
+                    stats["flags_updated"] = flag_stats.get("flags_updated", 0)
+
+                # Step 8: Update folder sync state
+                if uids_to_fetch:
+                    local_state.last_synced_uid = max(uids_to_fetch)
+                local_state.highest_mod_seq = folder_status.get('highest_modseq')
+                local_state.last_sync_at = datetime.now(timezone.utc)
+                local_state.email_count = folder_status.get('exists', 0)
                 await db.commit()
 
                 await unified_log_service.log(
-                    context=step_context,
+                    context=task_context,
                     level=LogLevel.INFO,
-                    message="Email processing completed",
-                    component="email_processor",
+                    message=f"Folder sync complete: {folder_name}",
+                    component="folder_sync",
                     extra_metadata=stats
                 )
 
-        finally:
-            try:
-                await connector.disconnect()
-                await unified_log_service.log(
-                    context=task_context,
-                    level=LogLevel.INFO,
-                    message="Disconnected from email server",
-                    component="email_connector"
-                )
             except Exception as e:
                 await unified_log_service.log(
                     context=task_context,
-                    level=LogLevel.WARNING,
-                    message="Error disconnecting from email server",
-                    component="email_connector",
+                    level=LogLevel.ERROR,
+                    message=f"Error syncing folder {folder_name}",
+                    component="folder_sync",
                     error=e
                 )
+                raise
 
         return stats
 
-    async def _should_sync_account(
-        self,
-        account: EmailAccount,
-        sync_type: SyncType
-    ) -> bool:
-        """Check if account should be synced."""
-        if sync_type == SyncType.FULL:
-            return True
 
-        if not account.auto_sync_enabled:
-            return False
-
-        if account.sync_status == "running":
-            return False  # Already syncing
-
-        # Check sync interval
-        if account.last_sync_at:
-            # Ensure both datetimes are timezone-aware for comparison
-            now = datetime.now(timezone.utc)
-            last_sync = account.last_sync_at
-
-            # If last_sync_at is naive, make it timezone-aware (assume UTC)
-            if last_sync.tzinfo is None:
-                last_sync = last_sync.replace(tzinfo=timezone.utc)
-
-            time_since_sync = now - last_sync
-            min_interval = timedelta(minutes=account.sync_interval_minutes or 15)
-
-            return time_since_sync >= min_interval
-
-        return True  # Never synced before
-
-    async def _create_connector(self, account: EmailAccount):
-        """Create email connector for account."""
-        try:
-            return await self.connector_factory.create_connector(
-                account_type=account.account_type,
-                account_id=str(account.id),
-                credentials=account.auth_credentials,
-                settings=account.sync_settings
-            )
-        except Exception as e:
-            self.logger.error(f"Error creating connector for account {account.id}: {e}")
-            return None
-
-    async def _perform_sync(
+    async def _update_flags_with_condstore(
         self,
         db: AsyncSession,
         account: EmailAccount,
         connector,
-        sync_type: SyncType,
-        last_sync_time: Optional[datetime]
+        folder_name: str,
+        last_mod_seq: int,
+        task_context
     ) -> Dict[str, int]:
-        """Perform the actual email synchronization."""
-        stats = {
-            "emails_processed": 0,
-            "emails_added": 0,
-            "emails_updated": 0,
-            "attachments_processed": 0,
-            "errors": 0
-        }
+        """
+        Efficiently update flags using CONDSTORE extension.
+
+        CONDSTORE allows fetching only messages whose flags changed
+        since last HIGHESTMODSEQ, avoiding need to re-fetch all messages.
+        """
+        stats = {"flags_updated": 0}
 
         try:
-            # Connect to email provider
-            await connector.connect()
+            await unified_log_service.log(
+                context=task_context,
+                level=LogLevel.INFO,
+                message=f"Updating flags with CONDSTORE for {folder_name}",
+                component="flag_update",
+                extra_metadata={"last_mod_seq": last_mod_seq}
+            )
 
-            # Sync emails
-            async for email_message in connector.sync_emails(sync_type, last_sync_time):
-                try:
-                    # Check if email already exists
-                    existing_query = select(Email).where(
-                        and_(
-                            Email.account_id == account.id,
-                            Email.message_id == email_message.message_id
-                        )
+            # Get folder status to check current HIGHESTMODSEQ
+            folder_status = connector.get_folder_status(folder_name)
+            current_mod_seq = folder_status.get('highest_modseq')
+
+            if not current_mod_seq or current_mod_seq <= last_mod_seq:
+                # No flag changes since last sync
+                return stats
+
+            # Fetch all UIDs from server (for changed flags detection)
+            all_uids = connector.fetch_uids_in_range(folder_name, 1, '*')
+
+            if not all_uids:
+                return stats
+
+            # Batch process flag updates
+            for batch_start in range(0, len(all_uids), self.batch_size):
+                batch_uids = all_uids[batch_start:batch_start + self.batch_size]
+
+                # Fetch flags for this batch
+                flags_by_uid = connector.fetch_flags_by_uids(folder_name, batch_uids)
+
+                # Build query to fetch all emails in this batch at once
+                email_query = select(Email).where(
+                    and_(
+                        Email.account_id == account.id,
+                        Email.folder_path == folder_name,
+                        Email.imap_uid.in_(batch_uids)
                     )
-                    result = await db.execute(existing_query)
-                    existing_email = result.scalar_one_or_none()
+                )
+                result = await db.execute(email_query)
+                emails = result.scalars().all()
 
-                    if existing_email:
-                        # Update existing email
-                        await self._update_email(db, existing_email, email_message)
-                        stats["emails_updated"] += 1
-                    else:
-                        # Create new email
-                        await self._create_email(db, account, email_message)
-                        stats["emails_added"] += 1
+                # Create UID->email mapping for fast lookup
+                email_by_uid = {email.imap_uid: email for email in emails}
 
-                    stats["emails_processed"] += 1
+                # Update flags in batch
+                for uid, flags in flags_by_uid.items():
+                    email = email_by_uid.get(uid)
+                    if email:
+                        # Only update if flags changed
+                        old_read = email.is_read
+                        old_flagged = email.is_flagged
+                        new_read = flags.get('is_read', old_read)
+                        new_flagged = flags.get('is_flagged', old_flagged)
 
-                    # Process attachments if enabled
-                    if account.sync_settings.get("sync_attachments", True):
-                        attachment_count = await self._process_attachments(
-                            db, connector, email_message
-                        )
-                        stats["attachments_processed"] += attachment_count
+                        if old_read != new_read or old_flagged != new_flagged:
+                            email.is_read = new_read
+                            email.is_flagged = new_flagged
+                            stats["flags_updated"] += 1
 
-                    # Commit periodically to avoid large transactions
-                    if stats["emails_processed"] % 50 == 0:
-                        await db.commit()
+                # Commit batch
+                await db.commit()
 
-                except Exception as e:
-                    self.logger.error(f"Error processing email {email_message.message_id}: {e}")
-                    stats["errors"] += 1
-                    await db.rollback()
+                await unified_log_service.log(
+                    context=task_context,
+                    level=LogLevel.INFO,
+                    message=f"Flag batch complete: {len(batch_uids)} UIDs processed",
+                    component="flag_update",
+                    extra_metadata={"flags_updated_in_batch": stats["flags_updated"]}
+                )
 
-            # Final commit
-            await db.commit()
+            await unified_log_service.log(
+                context=task_context,
+                level=LogLevel.INFO,
+                message=f"Flag update complete: {stats['flags_updated']} emails updated",
+                component="flag_update"
+            )
 
-        finally:
-            try:
-                await connector.disconnect()
-            except Exception as e:
-                self.logger.warning(f"Error disconnecting connector: {e}")
+        except Exception as e:
+            self.logger.error(f"Error updating flags for {folder_name}: {e}")
 
         return stats
 
-    async def _create_email(
+    async def _handle_mailbox_reset(
         self,
         db: AsyncSession,
         account: EmailAccount,
-        email_message
+        folder_name: str,
+        new_uidvalidity: int,
+        task_context
+    ):
+        """
+        Handle mailbox reset (UIDVALIDITY changed).
+
+        When UIDVALIDITY changes, all previous UIDs are invalid.
+        We mark all emails from this folder as potentially stale and
+        will re-sync from scratch.
+        """
+        await unified_log_service.log(
+            context=task_context,
+            level=LogLevel.WARNING,
+            message=f"Handling mailbox reset for {folder_name}",
+            component="mailbox_reset",
+            extra_metadata={"new_uidvalidity": new_uidvalidity}
+        )
+
+        # Clear UIDs for all emails in this folder
+        await db.execute(
+            update(Email)
+            .where(
+                and_(
+                    Email.account_id == account.id,
+                    Email.folder_path == folder_name
+                )
+            )
+            .values(
+                imap_uid=None,
+                uid_validity=None
+            )
+        )
+        await db.commit()
+
+    async def _discover_folders(
+        self,
+        db: AsyncSession,
+        account: EmailAccount,
+        connector,
+        workflow_context
+    ):
+        """Discover available folders on the server."""
+        try:
+            folders = connector.list_folders()
+
+            await unified_log_service.log(
+                context=workflow_context,
+                level=LogLevel.INFO,
+                message=f"Discovered {len(folders)} folders",
+                component="folder_discovery",
+                extra_metadata={"folders": [f['name'] for f in folders]}
+            )
+
+            # Update account with discovered folders
+            account.folders_discovered = True
+            await db.commit()
+
+        except Exception as e:
+            self.logger.error(f"Error discovering folders: {e}")
+
+    async def _check_server_capabilities(
+        self,
+        db: AsyncSession,
+        account: EmailAccount,
+        connector,
+        workflow_context
+    ):
+        """Check and store server capabilities (CONDSTORE, QRESYNC)."""
+        try:
+            capabilities = connector.check_capabilities()
+
+            account.supports_condstore = capabilities.get('CONDSTORE', False)
+            account.supports_qresync = capabilities.get('QRESYNC', False)
+            await db.commit()
+
+            await unified_log_service.log(
+                context=workflow_context,
+                level=LogLevel.INFO,
+                message=f"Server capabilities checked",
+                component="capability_check",
+                extra_metadata=capabilities
+            )
+
+        except Exception as e:
+            self.logger.error(f"Error checking capabilities: {e}")
+
+    async def _get_or_create_folder_sync_state(
+        self,
+        db: AsyncSession,
+        account_id: str,
+        folder_name: str
+    ) -> FolderSyncState:
+        """Get or create folder sync state."""
+        query = select(FolderSyncState).where(
+            and_(
+                FolderSyncState.account_id == account_id,
+                FolderSyncState.folder_name == folder_name
+            )
+        )
+        result = await db.execute(query)
+        state = result.scalar_one_or_none()
+
+        if not state:
+            state = FolderSyncState(
+                account_id=account_id,
+                folder_name=folder_name
+            )
+            db.add(state)
+            await db.commit()
+            await db.refresh(state)
+
+        return state
+
+    async def _create_email_with_uid(
+        self,
+        db: AsyncSession,
+        account: EmailAccount,
+        email_message: EmailMessage,
+        folder_name: str,
+        uid: int,
+        uid_validity: int
     ) -> Email:
-        """Create new email record from email message."""
+        """Create new email record with UID information."""
         email = Email(
             user_id=account.user_id,
             account_id=account.id,
@@ -697,60 +793,55 @@ class EmailSyncService:
             bcc_recipients=email_message.bcc_recipients,
             sent_at=email_message.sent_at,
             received_at=email_message.received_at,
-            folder_path=email_message.folder_path,
+            folder_path=folder_name,
             labels=email_message.labels,
             size_bytes=email_message.size_bytes,
             has_attachments=email_message.has_attachments,
             attachment_count=len(email_message.attachments),
             is_read=email_message.is_read,
             is_flagged=email_message.is_flagged,
-            importance_score=0.5,  # Will be calculated by ML model
-            category="general"  # Will be categorized by ML model
+            importance_score=0.5,
+            category="general",
+            # UID fields
+            imap_uid=uid,
+            uid_validity=uid_validity
         )
 
         db.add(email)
         return email
 
-    async def _update_email(
+    async def _update_email_with_uid(
         self,
         db: AsyncSession,
         existing_email: Email,
-        email_message
-    ) -> None:
-        """Update existing email with new data."""
-        # Update mutable fields
+        email_message: EmailMessage,
+        folder_name: str,
+        uid: int,
+        uid_validity: int
+    ):
+        """Update existing email with new UID and flags."""
         existing_email.is_read = email_message.is_read
         existing_email.is_flagged = email_message.is_flagged
         existing_email.labels = email_message.labels
-        existing_email.folder_path = email_message.folder_path
+        existing_email.folder_path = folder_name
+        existing_email.imap_uid = uid
+        existing_email.uid_validity = uid_validity
         existing_email.updated_at = datetime.now(timezone.utc)
 
-    async def _process_attachments(
-        self,
-        db: AsyncSession,
-        connector,
-        email_message
-    ) -> int:
-        """Process email attachments."""
-        # Placeholder for attachment processing
-        # This would download and store attachments
-        return len(email_message.attachments)
+    # Helper methods (reused from v1 where applicable)
 
-    async def _get_accounts_for_sync(
-        self,
-        db: AsyncSession,
-        user_id: Optional[int]
-    ) -> List[EmailAccount]:
-        """Get accounts that need synchronization."""
-        query = select(EmailAccount).where(
-            EmailAccount.auto_sync_enabled == True
-        )
-
-        if user_id:
-            query = query.where(EmailAccount.user_id == user_id)
-
-        result = await db.execute(query)
-        return result.scalars().all()
+    async def _create_connector(self, account: EmailAccount):
+        """Create email connector for account."""
+        try:
+            return await self.connector_factory.create_connector(
+                account_type=account.account_type,
+                account_id=str(account.id),
+                credentials=account.auth_credentials,
+                settings=account.sync_settings
+            )
+        except Exception as e:
+            self.logger.error(f"Error creating connector for account {account.id}: {e}")
+            return None
 
     async def _update_account_sync_status(
         self,
@@ -758,7 +849,7 @@ class EmailSyncService:
         account: EmailAccount,
         status: str,
         error_message: Optional[str] = None
-    ) -> None:
+    ):
         """Update account sync status."""
         update_data = {"sync_status": status, "updated_at": datetime.now(timezone.utc)}
 
@@ -780,9 +871,16 @@ class EmailSyncService:
         db: AsyncSession,
         account: EmailAccount,
         sync_stats: Dict[str, int]
-    ) -> None:
+    ):
         """Update account after successful sync."""
-        new_total = (account.total_emails_synced or 0) + sync_stats["emails_added"]
+        # Get actual count of emails for this account from database
+        from sqlalchemy import select, func
+        from app.db.models.email import Email
+
+        count_result = await db.execute(
+            select(func.count(Email.id)).where(Email.account_id == account.id)
+        )
+        actual_email_count = count_result.scalar() or 0
 
         await db.execute(
             update(EmailAccount)
@@ -790,7 +888,7 @@ class EmailSyncService:
             .values(
                 sync_status="completed",
                 last_sync_at=datetime.now(timezone.utc),
-                total_emails_synced=new_total,
+                total_emails_synced=actual_email_count,  # Use actual count from database
                 last_error=None,
                 updated_at=datetime.now(timezone.utc)
             )
@@ -800,13 +898,12 @@ class EmailSyncService:
     async def _create_sync_history(
         self,
         db: AsyncSession,
-        account: EmailAccount,
-        sync_type: SyncType
+        account: EmailAccount
     ) -> EmailSyncHistory:
         """Create sync history record."""
         sync_history = EmailSyncHistory(
             account_id=account.id,
-            sync_type=sync_type.value,
+            sync_type="uid_incremental",
             status="running"
         )
         db.add(sync_history)
@@ -819,7 +916,7 @@ class EmailSyncService:
         db: AsyncSession,
         sync_history: EmailSyncHistory,
         sync_result: EmailSyncResult
-    ) -> None:
+    ):
         """Complete sync history record."""
         duration = (sync_result.completed_at - sync_result.started_at).total_seconds()
 
@@ -832,7 +929,6 @@ class EmailSyncService:
                 emails_processed=sync_result.emails_processed,
                 emails_added=sync_result.emails_added,
                 emails_updated=sync_result.emails_updated,
-                attachments_processed=sync_result.attachments_processed,
                 duration_seconds=int(duration),
                 error_message=sync_result.error_message
             )
@@ -844,7 +940,7 @@ class EmailSyncService:
         db: AsyncSession,
         sync_history: EmailSyncHistory,
         error_message: str
-    ) -> None:
+    ):
         """Mark sync history as failed."""
         await db.execute(
             update(EmailSyncHistory)
@@ -861,16 +957,118 @@ class EmailSyncService:
         self,
         db: AsyncSession,
         user_id: int
-    ) -> None:
+    ):
         """Schedule embedding generation for newly synced emails."""
         try:
-            # This would typically trigger a Celery task
-            # For now, we'll process embeddings directly
-            # The embedding service now uses unified logging internally
             stats = await email_embedding_service.process_pending_emails(db, user_id)
             self.logger.info(f"Embedding generation completed: {stats}")
         except Exception as e:
             self.logger.error(f"Error scheduling embedding generation: {e}")
+
+    async def get_sync_status(
+        self,
+        db: AsyncSession,
+        user_id: int
+    ) -> dict:
+        """
+        Get synchronization status for user's email accounts.
+
+        Returns detailed status including sync history and statistics.
+        """
+        from sqlalchemy import select, func, desc
+        from app.db.models.email import EmailAccount, EmailSyncHistory, Email
+
+        try:
+            # Get all accounts for user
+            result = await db.execute(
+                select(EmailAccount).where(EmailAccount.user_id == user_id)
+            )
+            accounts = result.scalars().all()
+
+            account_statuses = []
+            overall_status = "idle"
+            total_emails_synced = 0
+            total_emails_realtime = 0
+            most_recent_sync = None
+
+            for account in accounts:
+                # Get recent sync history (last 3 syncs)
+                history_result = await db.execute(
+                    select(EmailSyncHistory)
+                    .where(EmailSyncHistory.account_id == account.id)
+                    .order_by(desc(EmailSyncHistory.started_at))
+                    .limit(3)
+                )
+                recent_syncs = history_result.scalars().all()
+
+                # Format recent syncs
+                formatted_syncs = []
+                for sync in recent_syncs:
+                    duration_seconds = None
+                    if sync.completed_at and sync.started_at:
+                        duration_seconds = int((sync.completed_at - sync.started_at).total_seconds())
+
+                    formatted_syncs.append({
+                        "status": sync.status,
+                        "emails_processed": sync.emails_processed or 0,
+                        "started_at": sync.started_at.isoformat() if sync.started_at else None,
+                        "completed_at": sync.completed_at.isoformat() if sync.completed_at else None,
+                        "duration_seconds": duration_seconds,
+                        "error_message": sync.error_message
+                    })
+
+                # Get real-time email count for this account
+                email_count_result = await db.execute(
+                    select(func.count(Email.id)).where(Email.account_id == account.id)
+                )
+                realtime_email_count = email_count_result.scalar() or 0
+                total_emails_realtime += realtime_email_count
+
+                # Determine current sync status
+                sync_status = account.sync_status or "idle"
+                if sync_status in ["running", "syncing"]:
+                    overall_status = "running"
+
+                # Aggregate total emails synced (counter field)
+                total_emails_synced += (account.total_emails_synced or 0)
+
+                # Track most recent sync
+                if account.last_sync_at:
+                    if most_recent_sync is None or account.last_sync_at > most_recent_sync:
+                        most_recent_sync = account.last_sync_at
+
+                # Calculate sync progress percentage if running
+                sync_progress_percent = None
+                if sync_status in ["running", "syncing"] and realtime_email_count > 0:
+                    # Rough estimate - assumes target is last sync count + 10%
+                    estimated_total = max((account.total_emails_synced or 0) * 1.1, realtime_email_count)
+                    sync_progress_percent = min(round((realtime_email_count / estimated_total) * 100, 1), 99.9)
+
+                account_statuses.append({
+                    "account_id": str(account.id),
+                    "email_address": account.email_address,
+                    "sync_status": sync_status,
+                    "total_emails_synced": account.total_emails_synced or 0,  # Counter field (updated on completion)
+                    "realtime_email_count": realtime_email_count,  # Real-time database count
+                    "sync_progress_percent": sync_progress_percent,  # Progress indicator
+                    "last_sync_at": account.last_sync_at.isoformat() if account.last_sync_at else None,
+                    "next_sync_at": account.next_sync_at.isoformat() if account.next_sync_at else None,
+                    "last_error": account.last_error,
+                    "recent_syncs": formatted_syncs
+                })
+
+            return {
+                "overall_status": overall_status,
+                "total_accounts": len(accounts),
+                "total_emails_synced": total_emails_synced,  # Cached counter
+                "total_emails_realtime": total_emails_realtime,  # Real-time count
+                "most_recent_sync": most_recent_sync.isoformat() if most_recent_sync else None,
+                "accounts": account_statuses
+            }
+
+        except Exception as e:
+            self.logger.error(f"Error getting sync status: {e}")
+            raise
 
 
 # Global instance

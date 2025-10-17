@@ -41,6 +41,8 @@ import UserManagement from './pages/UserManagement';
 // Workflow modules
 import EmailAssistant from './pages/EmailAssistant';
 import DocumentAnalyzer from './modules/document-analyzer/DocumentAnalyzer';
+// V2 Email Assistant
+import { EmailAssistantV2 } from './components/EmailAssistant/EmailAssistantV2';
 
 // Knowledge Base
 import KnowledgeBase from './pages/KnowledgeBase';

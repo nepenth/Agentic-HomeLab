@@ -54,6 +54,7 @@ class EmailMessage:
     bcc_recipients: List[Dict[str, str]] = field(default_factory=list)
     body_text: Optional[str] = None
     body_html: Optional[str] = None
+    snippet: Optional[str] = None  # Short preview of email body (for UI display)
     sent_at: Optional[datetime] = None
     received_at: Optional[datetime] = None
     folder_path: Optional[str] = None
@@ -61,11 +62,21 @@ class EmailMessage:
     has_attachments: bool = False
     attachments: List[Dict[str, Any]] = field(default_factory=list)
     importance_level: Optional[str] = None  # high, normal, low
-    is_read: bool = False
-    is_flagged: bool = False
+
+    # IMAP RFC 3501 standard flags
+    is_read: bool = False      # \Seen - Message has been read
+    is_flagged: bool = False   # \Flagged - Message is flagged for urgent/special attention
+    is_deleted: bool = False   # \Deleted - Message is marked for deletion
+    is_draft: bool = False     # \Draft - Message is a draft
+    is_answered: bool = False  # \Answered - Message has been answered
+
     size_bytes: Optional[int] = None
     raw_headers: Dict[str, str] = field(default_factory=dict)
     provider_data: Dict[str, Any] = field(default_factory=dict)  # Provider-specific data
+
+    # UID-based sync fields (Phase 2)
+    imap_uid: Optional[int] = None  # IMAP UID (unique within folder)
+    uid_validity: Optional[int] = None  # UIDVALIDITY (changes when mailbox reset)
 
 
 @dataclass

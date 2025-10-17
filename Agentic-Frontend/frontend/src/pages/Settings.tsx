@@ -29,7 +29,9 @@ import { useAuth } from '../hooks/useAuth';
 import { useSelector, useDispatch } from 'react-redux';
 import type { RootState } from '../store';
 import { setTheme } from '../store/slices/uiSlice';
+import { updateUser } from '../store/slices/authSlice';
 import ChangePasswordDialog from '../components/ChangePasswordDialog';
+import apiClient from '../services/api';
 
 const Settings: React.FC = () => {
   const { user } = useAuth();
@@ -72,24 +74,25 @@ const Settings: React.FC = () => {
 
   const handleSave = async () => {
     try {
-      // Make API call to save profile settings
-      await fetch('/api/v1/auth/profile', {
-        method: 'PUT',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          username: settings.username,
-          email: settings.email,
-        }),
+      // Make API call to save profile settings using apiClient
+      const response = await apiClient.put('/api/v1/auth/profile', {
+        username: settings.username,
+        email: settings.email,
       });
+
+      // Update Redux state with new user data
+      dispatch(updateUser({
+        username: response.data.username,
+        email: response.data.email,
+      }));
 
       setSaveMessage('Settings saved successfully!');
       setTimeout(() => setSaveMessage(''), 3000);
-    } catch (error) {
+    } catch (error: any) {
       console.error('Failed to save settings:', error);
-      setSaveMessage('Failed to save settings. Please try again.');
-      setTimeout(() => setSaveMessage(''), 3000);
+      const errorMessage = error.response?.data?.detail || error.message || 'Failed to save settings. Please try again.';
+      setSaveMessage(errorMessage);
+      setTimeout(() => setSaveMessage(''), 5000);
     }
   };
 
@@ -114,7 +117,11 @@ const Settings: React.FC = () => {
       </Box>
 
       {saveMessage && (
-        <Alert severity="success" sx={{ mb: 3 }} onClose={() => setSaveMessage('')}>
+        <Alert
+          severity={saveMessage.toLowerCase().includes('failed') || saveMessage.toLowerCase().includes('error') ? 'error' : 'success'}
+          sx={{ mb: 3 }}
+          onClose={() => setSaveMessage('')}
+        >
           {saveMessage}
         </Alert>
       )}

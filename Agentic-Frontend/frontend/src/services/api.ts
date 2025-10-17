@@ -114,6 +114,32 @@ class ApiClient {
     this.loadAuthToken();
   }
 
+  // Generic HTTP methods (expose Axios methods publicly)
+  async get(url: string, config?: any) {
+    const response = await this.client.get(url, config);
+    return response;
+  }
+
+  async post(url: string, data?: any, config?: any) {
+    const response = await this.client.post(url, data, config);
+    return response;
+  }
+
+  async put(url: string, data?: any, config?: any) {
+    const response = await this.client.put(url, data, config);
+    return response;
+  }
+
+  async patch(url: string, data?: any, config?: any) {
+    const response = await this.client.patch(url, data, config);
+    return response;
+  }
+
+  async delete(url: string, config?: any) {
+    const response = await this.client.delete(url, config);
+    return response;
+  }
+
   // Health endpoints
   async getHealth() {
     const response = await this.client.get('/api/v1/health');
@@ -2390,17 +2416,21 @@ class ApiClient {
 
   async triggerEmailSync(syncData: {
     account_ids?: string[];
-    sync_type?: string;
-    force_sync?: boolean;
+    force_full_sync?: boolean;
     sync_days_back?: number;
     max_emails_limit?: number;
   }) {
-    const response = await this.client.post('/api/v1/email-sync/sync', syncData);
+    const response = await this.client.post('/api/v1/email-sync/v2/sync', syncData);
     return response.data;
   }
 
   async getEmailSyncStatus() {
     const response = await this.client.get('/api/v1/email-sync/sync/status');
+    return response.data;
+  }
+
+  async getRealtimeCounts() {
+    const response = await this.client.get('/api/v1/email-sync/sync/realtime-counts');
     return response.data;
   }
 
@@ -2413,6 +2443,11 @@ class ApiClient {
     return response.data;
   }
 
+  async getAccountEmbeddingStats(accountId: string) {
+    const response = await this.client.get(`/api/v1/email-sync/accounts/${accountId}/embedding-stats`);
+    return response.data;
+  }
+
   // Synced Email Retrieval
   async getSyncedEmails(params?: {
     limit?: number;
@@ -2421,8 +2456,45 @@ class ApiClient {
     category?: string;
     sender?: string;
     days_back?: number;
+    folder_path?: string;
+    is_read?: boolean;
+    is_important?: boolean;
+    is_flagged?: boolean;
+    is_draft?: boolean;
+    is_deleted?: boolean;
+    is_answered?: boolean;
+    has_attachments?: boolean;
+    sort_by?: string;
+    sort_order?: string;
   }) {
     const response = await this.client.get('/api/v1/email-sync/emails', { params });
+    return response.data;
+  }
+
+  // Folder Management
+  async getAccountFolders(accountId: string) {
+    const response = await this.client.get(`/api/v1/email-sync/v2/accounts/${accountId}/folders`);
+    return response.data;
+  }
+
+  async getAccountSyncConfig(accountId: string) {
+    const response = await this.client.get(`/api/v1/email-sync/v2/accounts/${accountId}/sync-config`);
+    return response.data;
+  }
+
+  async getFolderSyncStatus(accountId: string) {
+    const response = await this.client.get(`/api/v1/email-sync/v2/accounts/${accountId}/folder-status`);
+    return response.data;
+  }
+
+  async updateAccountSyncConfig(accountId: string, config: {
+    sync_window: {
+      value: number;
+      unit: string;
+    };
+    sync_folders: string[];
+  }) {
+    const response = await this.client.put(`/api/v1/email-sync/v2/accounts/${accountId}/sync-config`, config);
     return response.data;
   }
 

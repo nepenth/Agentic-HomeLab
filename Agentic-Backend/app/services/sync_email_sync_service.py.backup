@@ -267,8 +267,9 @@ class SyncEmailSyncService:
                 try:
                     stats["emails_processed"] += 1
 
-                    # Fetch email
-                    status, msg_data = connection.fetch(email_id, '(RFC822)')
+                    # Fetch email (use BODY.PEEK[] to avoid marking as read)
+                    # RFC822 automatically sets \Seen flag, BODY.PEEK[] is read-only
+                    status, msg_data = connection.fetch(email_id, '(BODY.PEEK[])')
                     if status != 'OK':
                         self.logger.warning(f"Failed to fetch email {email_id}")
                         continue
@@ -478,6 +479,66 @@ class SyncEmailSyncService:
         except Exception as e:
             self.logger.error(f"Failed to generate embedding: {e}")
             raise
+
+    def cleanup_old_deleted_emails(self, db: Session, days_threshold: int = 60) -> Dict[str, int]:
+        """
+        Permanently delete emails that were marked as deleted more than X days ago.
+
+        This implements the 60-day soft-delete retention policy:
+        1. Find all emails where deleted_at is not null AND older than threshold
+        2. Delete associated embeddings and attachments (CASCADE will handle this)
+        3. Permanently delete the email records
+
+        Args:
+            db: Synchronous database session
+            days_threshold: Number of days to retain deleted emails (default: 60)
+
+        Returns:
+            Dict with counts of emails and attachments deleted
+        """
+        from app.db.models.email import EmailAttachment
+
+        self.logger.info(f"Starting cleanup of emails deleted more than {days_threshold} days ago")
+
+        # Calculate the cutoff date
+        cutoff_date = datetime.now(timezone.utc) - timedelta(days=days_threshold)
+
+        # Count emails to be deleted
+        emails_to_delete = db.query(Email).filter(
+            Email.deleted_at.isnot(None),
+            Email.deleted_at < cutoff_date
+        ).all()
+
+        emails_count = len(emails_to_delete)
+        attachments_count = 0
+
+        if emails_count == 0:
+            self.logger.info("No emails found for cleanup")
+            return {"emails_deleted": 0, "attachments_deleted": 0}
+
+        # Count attachments that will be cascade deleted
+        email_ids = [email.id for email in emails_to_delete]
+        attachments_count = db.query(EmailAttachment).filter(
+            EmailAttachment.email_id.in_(email_ids)
+        ).count()
+
+        # Delete the emails (CASCADE will handle embeddings and attachments)
+        db.query(Email).filter(
+            Email.deleted_at.isnot(None),
+            Email.deleted_at < cutoff_date
+        ).delete(synchronize_session=False)
+
+        db.commit()
+
+        self.logger.info(
+            f"Cleanup completed: {emails_count} emails and {attachments_count} attachments "
+            f"permanently deleted (deleted_at < {cutoff_date.isoformat()})"
+        )
+
+        return {
+            "emails_deleted": emails_count,
+            "attachments_deleted": attachments_count
+        }
 
 
 # Global instance
