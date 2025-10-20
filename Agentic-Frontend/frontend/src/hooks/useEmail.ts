@@ -45,6 +45,14 @@ export const useEmail = () => {
     }
   }, [accountsData, dispatch]);
 
+  // Auto-select first account if none selected
+  React.useEffect(() => {
+    if (accounts && accounts.length > 0 && !selectedAccount) {
+      console.log('[useEmail] Auto-selecting first account:', accounts[0]);
+      dispatch(setSelectedAccount(accounts[0]));
+    }
+  }, [accounts, selectedAccount, dispatch]);
+
   // Fetch emails with filters
   const { data: emailsData, isLoading: emailsLoading, refetch: refetchEmails } = useQuery({
     queryKey: ['emails', filters, sort, selectedAccount?.account_id],

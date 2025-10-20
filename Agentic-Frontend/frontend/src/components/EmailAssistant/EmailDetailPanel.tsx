@@ -79,6 +79,22 @@ export const EmailDetailPanel: React.FC<EmailDetailPanelProps> = ({
 }) => {
   const theme = useTheme();
 
+  // Sanitize HTML to remove external resources that cause mixed content errors
+  const sanitizeEmailHtml = (html: string): string => {
+    if (!html) return '';
+
+    // Remove external stylesheets and scripts
+    let sanitized = html
+      .replace(/<link[^>]*>/gi, '') // Remove all <link> tags
+      .replace(/<script[^>]*>.*?<\/script>/gi, '') // Remove all <script> tags
+      .replace(/<style[^>]*>.*?<\/style>/gi, ''); // Remove inline styles that might have @import
+
+    // Remove tracking pixels and external images (optional - can be made configurable)
+    // For now, we'll keep images but set them to not load external resources via CSP in the Box
+
+    return sanitized;
+  };
+
   const formatRecipients = (recipients: Array<{ email: string; name?: string }>) => {
     return recipients.map((r, i) => (
       <span key={i}>
@@ -219,7 +235,7 @@ export const EmailDetailPanel: React.FC<EmailDetailPanelProps> = ({
                 sx={{ height: 22 }}
               />
             )}
-            {email.category && (
+            {email.category && email.category.toLowerCase() !== 'general' && (
               <Chip label={email.category} size="small" variant="outlined" sx={{ height: 22 }} />
             )}
           </Box>
@@ -338,7 +354,7 @@ export const EmailDetailPanel: React.FC<EmailDetailPanelProps> = ({
       <Box sx={{ flex: 1, overflow: 'auto', p: 3 }}>
         {email.body_html ? (
           <Box
-            dangerouslySetInnerHTML={{ __html: email.body_html }}
+            dangerouslySetInnerHTML={{ __html: sanitizeEmailHtml(email.body_html) }}
             sx={{
               '& img': { maxWidth: '100%', height: 'auto' },
               '& a': { color: theme.palette.primary.main, textDecoration: 'underline' },

@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta
+from datetime import timedelta
 from typing import Optional
 from jose import JWTError, jwt
 from passlib.context import CryptContext
@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from app.config import settings
 from app.db.models.user import User
+from app.utils.datetime_utils import utc_now, add_minutes
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
@@ -21,13 +22,22 @@ def get_password_hash(password: str) -> str:
 
 
 def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -> str:
-    """Create a JWT access token."""
+    """
+    Create a JWT access token with timezone-aware expiration.
+
+    Args:
+        data: Data to encode in the token (typically {"sub": username}).
+        expires_delta: Optional custom expiration time. If None, uses configured default.
+
+    Returns:
+        str: Encoded JWT token.
+    """
     to_encode = data.copy()
     if expires_delta:
-        expire = datetime.utcnow() + expires_delta
+        expire = utc_now() + expires_delta
     else:
-        expire = datetime.utcnow() + timedelta(minutes=settings.access_token_expire_minutes)
-    
+        expire = add_minutes(utc_now(), settings.access_token_expire_minutes)
+
     to_encode.update({"exp": expire})
     encoded_jwt = jwt.encode(to_encode, settings.secret_key, algorithm=settings.jwt_algorithm)
     return encoded_jwt
