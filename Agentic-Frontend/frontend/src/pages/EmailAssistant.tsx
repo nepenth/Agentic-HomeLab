@@ -1,6 +1,6 @@
 import React from 'react';
 import { Box } from '@mui/material';
-import { EmailAssistantV2 } from '../components/EmailAssistant/EmailAssistantV2';
+import { EmailAssistantComponent } from '../components/EmailAssistant/EmailAssistantComponent';
 
 /**
  * Email Assistant Page
@@ -30,7 +30,7 @@ const EmailAssistant: React.FC = () => {
         flexDirection: 'column',
       }}
     >
-      <EmailAssistantV2 />
+      <EmailAssistantComponent />
     </Box>
   );
 };

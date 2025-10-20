@@ -16,7 +16,7 @@ import {
   Settings as SettingsIcon,
 } from '@mui/icons-material';
 import { OverviewTab } from './tabs/OverviewTab';
-import { InboxTasksTabV2 } from './tabs/InboxTasksTabV2';
+import { InboxTasksTab } from './tabs/InboxTasksTab';
 import { AssistantTab } from './tabs/AssistantTab';
 import { SettingsTab } from './tabs/SettingsTab';
 import { useEmail } from '../../hooks/useEmail';
@@ -42,7 +42,7 @@ const TabPanel: React.FC<TabPanelProps> = ({ children, value, index }) => {
   );
 };
 
-export const EmailAssistantV2: React.FC = () => {
+export const EmailAssistantComponent: React.FC = () => {
   const theme = useTheme();
   const [currentTab, setCurrentTab] = useState(0);
   const [inboxFilters, setInboxFilters] = useState<any>(null);
@@ -166,7 +166,7 @@ export const EmailAssistantV2: React.FC = () => {
             <OverviewTab onNavigate={handleNavigate} />
           </TabPanel>
           <TabPanel value={currentTab} index={1}>
-            <InboxTasksTabV2 filters={inboxFilters} onFiltersChange={setInboxFilters} />
+            <InboxTasksTab filters={inboxFilters} onFiltersChange={setInboxFilters} />
           </TabPanel>
           <TabPanel value={currentTab} index={2}>
             <AssistantTab onNavigateToEmail={handleNavigateToEmail} />
@@ -180,4 +180,4 @@ export const EmailAssistantV2: React.FC = () => {
   );
 };
 
-export default EmailAssistantV2;
+export default EmailAssistantComponent;

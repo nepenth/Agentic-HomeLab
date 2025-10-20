@@ -15,6 +15,7 @@ import aiohttp
 import json
 from urllib.parse import urlencode
 
+from app.utils.datetime_utils import utc_now, add_seconds, to_utc
 from .base_connector import (
     BaseEmailConnector,
     EmailMessage,
@@ -57,7 +58,7 @@ class GmailConnector(BaseEmailConnector):
         self.client_secret = creds.get("client_secret")
 
         if creds.get("expires_at"):
-            self.token_expires_at = datetime.fromisoformat(creds["expires_at"])
+            self.token_expires_at = to_utc(datetime.fromisoformat(creds["expires_at"]))
 
     async def connect(self) -> bool:
         """Establish connection to Gmail API."""
@@ -456,7 +457,7 @@ class GmailConnector(BaseEmailConnector):
 
         if self.token_expires_at:
             # Refresh if token expires within 5 minutes
-            return datetime.utcnow() >= (self.token_expires_at - timedelta(minutes=5))
+            return utc_now() >= (self.token_expires_at - timedelta(minutes=5))
 
         return False
 
@@ -485,7 +486,7 @@ class GmailConnector(BaseEmailConnector):
 
                 if "expires_in" in token_data:
                     expires_in = int(token_data["expires_in"])
-                    self.token_expires_at = datetime.utcnow() + timedelta(seconds=expires_in)
+                    self.token_expires_at = add_seconds(utc_now(), expires_in)
 
                 self.logger.info("Successfully refreshed Gmail access token")
 

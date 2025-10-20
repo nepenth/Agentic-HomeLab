@@ -265,7 +265,7 @@ export const EmailListPanel: React.FC<EmailListPanelProps> = ({
                       sx={{ height: 20, fontSize: '0.625rem', '& .MuiChip-icon': { ml: 0.5 } }}
                     />
                   )}
-                  {email.category && (
+                  {email.category && email.category.toLowerCase() !== 'general' && (
                     <Chip
                       label={email.category}
                       size="small"
