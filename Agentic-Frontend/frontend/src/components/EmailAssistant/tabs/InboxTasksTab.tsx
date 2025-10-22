@@ -202,27 +202,35 @@ export const InboxTasksTab: React.FC<InboxTasksTabProps> = ({
   };
 
   // Resize handlers
-  const handleFolderResizeStart = (e: React.MouseEvent) => {
+  const handleFolderResizeStart = React.useCallback((e: React.MouseEvent) => {
     e.preventDefault();
+    e.stopPropagation();
     setIsDraggingFolder(true);
-  };
+  }, []);
 
-  const handleListResizeStart = (e: React.MouseEvent) => {
+  const handleListResizeStart = React.useCallback((e: React.MouseEvent) => {
     e.preventDefault();
+    e.stopPropagation();
     setIsDraggingList(true);
-  };
+  }, []);
 
   React.useEffect(() => {
+    if (!isDraggingFolder && !isDraggingList) return;
+
     const handleMouseMove = (e: MouseEvent) => {
+      e.preventDefault();
+
       if (isDraggingFolder) {
-        const newWidth = e.clientX;
-        if (newWidth >= 200 && newWidth <= 400) {
+        // Calculate new width based on mouse position
+        const newWidth = e.clientX - 24; // Subtract padding
+        if (newWidth >= 200 && newWidth <= 500) {
           setFolderWidth(newWidth);
         }
       }
       if (isDraggingList) {
-        const newWidth = e.clientX - folderWidth;
-        if (newWidth >= 300 && newWidth <= 600) {
+        // Calculate new width for email list
+        const newWidth = e.clientX - folderWidth - 28; // Subtract folder width and handles
+        if (newWidth >= 300 && newWidth <= 700) {
           setEmailListWidth(newWidth);
         }
       }
@@ -233,12 +241,10 @@ export const InboxTasksTab: React.FC<InboxTasksTabProps> = ({
       setIsDraggingList(false);
     };
 
-    if (isDraggingFolder || isDraggingList) {
-      document.addEventListener('mousemove', handleMouseMove);
-      document.addEventListener('mouseup', handleMouseUp);
-      document.body.style.cursor = 'col-resize';
-      document.body.style.userSelect = 'none';
-    }
+    document.addEventListener('mousemove', handleMouseMove);
+    document.addEventListener('mouseup', handleMouseUp);
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
 
     return () => {
       document.removeEventListener('mousemove', handleMouseMove);

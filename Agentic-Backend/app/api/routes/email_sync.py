@@ -611,7 +611,7 @@ async def get_synced_emails(
     search: Optional[str] = None,
     category: Optional[str] = None,
     sender: Optional[str] = None,
-    days_back: int = 30,
+    days_back: Optional[int] = None,
     folder_path: Optional[str] = None,
     is_read: Optional[bool] = None,
     is_important: Optional[bool] = None,
@@ -630,6 +630,9 @@ async def get_synced_emails(
 
     Returns a paginated list of synced emails with optional filtering
     by search terms, category, sender, and date range.
+
+    By default, returns ALL synced emails without date filtering.
+    Use days_back parameter to limit results to recent emails.
     """
     try:
         from sqlalchemy import select, and_, desc, func
@@ -644,7 +647,8 @@ async def get_synced_emails(
         ).where(Email.user_id == current_user.id)
 
         # Apply filters
-        if days_back > 0:
+        # Only apply date filter if explicitly requested
+        if days_back is not None and days_back > 0:
             cutoff_date = datetime.now() - timedelta(days=days_back)
             query = query.where(Email.received_at >= cutoff_date)
 
@@ -1215,10 +1219,16 @@ async def get_account_embedding_stats(
                 "count": row.count
             })
 
+        # Resolve embedding model (null means use system default)
+        from app.config import settings
+        effective_embedding_model = account.embedding_model or settings.default_embedding_model
+
         return {
             "account_id": str(account_id),
             "email_address": account.email_address,
-            "current_embedding_model": account.embedding_model,
+            "current_embedding_model": effective_embedding_model,
+            "account_embedding_model": account.embedding_model,  # The actual DB value (null if using default)
+            "using_system_default": account.embedding_model is None,
             "total_emails": total_emails,
             "emails_with_embeddings": emails_with_embeddings,
             "emails_without_embeddings": total_emails - emails_with_embeddings,
@@ -1243,6 +1253,85 @@ class RegenerateEmbeddingsRequest(BaseModel):
     email_ids: Optional[List[UUID]] = Field(None, description="Specific emails to regenerate (null = all)")
     embedding_types: Optional[List[str]] = Field(None, description="Specific embedding types to regenerate")
     delete_existing: bool = Field(True, description="Delete existing embeddings before regenerating")
+
+
+@router.post("/accounts/{account_id}/generate-missing-embeddings")
+async def generate_missing_embeddings_endpoint(
+    account_id: UUID,
+    background_tasks: BackgroundTasks,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db_session)
+):
+    """
+    Generate embeddings ONLY for emails that don't have embeddings yet.
+
+    This is useful for catching up on missed embeddings without regenerating
+    all existing embeddings.
+    """
+    try:
+        from app.db.models.email import EmailAccount, Email
+        from sqlalchemy import select, func
+
+        # Verify account belongs to user
+        result = await db.execute(
+            select(EmailAccount).where(EmailAccount.id == account_id)
+        )
+        account = result.scalar_one_or_none()
+
+        if not account:
+            raise HTTPException(
+                status_code=status_codes.HTTP_404_NOT_FOUND,
+                detail="Email account not found"
+            )
+
+        if account.user_id != current_user.id:
+            raise HTTPException(
+                status_code=status_codes.HTTP_403_FORBIDDEN,
+                detail="Not authorized to access this account"
+            )
+
+        # Count emails without embeddings for this account
+        pending_count_result = await db.execute(
+            select(func.count(Email.id)).where(
+                Email.account_id == account_id,
+                (Email.embeddings_generated == False) | (Email.embeddings_generated.is_(None))
+            )
+        )
+        pending_count = pending_count_result.scalar() or 0
+
+        if pending_count == 0:
+            return {
+                "message": "No pending embeddings to generate",
+                "account_id": str(account_id),
+                "pending_count": 0
+            }
+
+        # Schedule embedding generation in background for this account's user
+        background_tasks.add_task(
+            email_embedding_service.process_pending_emails,
+            db, account.user_id, False  # force_regenerate=False
+        )
+
+        logger.info(
+            f"Scheduled missing embeddings generation for account {account_id} "
+            f"({pending_count} pending emails)"
+        )
+
+        return {
+            "message": "Missing embeddings generation scheduled successfully",
+            "account_id": str(account_id),
+            "pending_count": pending_count,
+            "initiated_at": datetime.now().isoformat()
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to schedule missing embeddings generation: {e}")
+        raise HTTPException(
+            status_code=status_codes.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to schedule missing embeddings generation"
+        )
 
 
 @router.post("/accounts/{account_id}/regenerate-embeddings")
@@ -1314,7 +1403,7 @@ async def regenerate_account_embeddings_endpoint(
     except Exception as e:
         logger.error(f"Failed to schedule embedding regeneration: {e}")
         raise HTTPException(
-            status_code=status_codes.HTTP_500_INTERNAL_SERVER_ERROR,
+            status_codes.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to schedule embedding regeneration"
         )
 
@@ -1328,10 +1417,12 @@ async def get_embedding_models_comparison(
     Get comparison of embedding models used across all user's accounts.
 
     Useful for understanding which models are in use and making migration decisions.
+    Includes embedding coverage statistics.
     """
     try:
         from app.db.models.email import EmailAccount, Email, EmailEmbedding
         from sqlalchemy import select, func
+        from app.config import settings
 
         # Get user's accounts
         accounts_result = await db.execute(
@@ -1361,11 +1452,30 @@ async def get_embedding_models_comparison(
             )
             total_emails = total_emails_result.scalar() or 0
 
+            # Get emails with embeddings count
+            emails_with_embeddings_result = await db.execute(
+                select(func.count(Email.id)).where(
+                    Email.account_id == account.id,
+                    Email.embeddings_generated == True
+                )
+            )
+            emails_with_embeddings = emails_with_embeddings_result.scalar() or 0
+
+            # Calculate coverage
+            embedding_coverage = round((emails_with_embeddings / total_emails * 100), 2) if total_emails > 0 else 0
+
+            # Get effective embedding model
+            effective_model = account.embedding_model or settings.default_embedding_model
+
             account_summaries.append({
                 "account_id": str(account.id),
                 "email_address": account.email_address,
                 "configured_model": account.embedding_model,
+                "effective_model": effective_model,
                 "total_emails": total_emails,
+                "emails_with_embeddings": emails_with_embeddings,
+                "emails_without_embeddings": total_emails - emails_with_embeddings,
+                "embedding_coverage_percent": embedding_coverage,
                 "models_in_use": model_stats
             })
 
@@ -1493,6 +1603,56 @@ async def get_dashboard_metrics(
         )
         tasks_completed_today = tasks_completed_today_result.scalar() or 0
 
+        # Get embedding statistics
+        emails_with_embeddings_result = await db.execute(
+            select(func.count(Email.id))
+            .join(EmailAccount, Email.account_id == EmailAccount.id)
+            .where(
+                and_(
+                    EmailAccount.user_id == current_user.id,
+                    Email.embeddings_generated == True
+                )
+            )
+        )
+        emails_with_embeddings = emails_with_embeddings_result.scalar() or 0
+        emails_without_embeddings = total_emails - emails_with_embeddings
+        embedding_coverage = round((emails_with_embeddings / total_emails * 100), 2) if total_emails > 0 else 0
+
+        # Check if embedding generation is currently running
+        # We use a simple heuristic: check if there are any emails that were recently updated
+        # with embeddings_generated status change
+        from datetime import timedelta
+
+        # Check for emails that had embeddings generated in last 2 minutes
+        two_minutes_ago = datetime.utcnow() - timedelta(minutes=2)
+        recent_embedding_activity = await db.execute(
+            select(Email.id)
+            .join(EmailAccount, Email.account_id == EmailAccount.id)
+            .where(
+                and_(
+                    EmailAccount.user_id == current_user.id,
+                    Email.embeddings_generated == True,
+                    Email.updated_at >= two_minutes_ago
+                )
+            )
+            .limit(1)
+        )
+        has_recent_activity = recent_embedding_activity.scalar_one_or_none() is not None
+
+        # Determine embedding generation status
+        embedding_status = "idle"
+        embedding_status_message = None
+
+        if has_recent_activity and emails_without_embeddings > 0:
+            embedding_status = "generating"
+            embedding_status_message = f"Generating embeddings ({emails_without_embeddings} remaining)"
+        elif emails_without_embeddings > 0:
+            embedding_status = "pending"
+            embedding_status_message = f"{emails_without_embeddings} emails need embeddings"
+        else:
+            embedding_status = "complete"
+            embedding_status_message = "All emails have embeddings"
+
         return {
             "total_emails": total_emails,
             "unread_emails": unread_emails,
@@ -1506,6 +1666,15 @@ async def get_dashboard_metrics(
                 "running_syncs": running_syncs,
                 "last_sync": last_sync.isoformat() if last_sync else None,
                 "next_sync": next_sync.isoformat() if next_sync else None
+            },
+            "embedding_stats": {
+                "total_emails": total_emails,
+                "emails_with_embeddings": emails_with_embeddings,
+                "emails_without_embeddings": emails_without_embeddings,
+                "coverage_percent": embedding_coverage,
+                "status": embedding_status,
+                "status_message": embedding_status_message,
+                "is_generating": embedding_status == "generating"
             }
         }
     except Exception as e:
@@ -2078,7 +2247,7 @@ async def get_folder_sync_status(
     """
     try:
         from app.db.models.email import EmailAccount, FolderSyncState
-        from sqlalchemy import select
+        from sqlalchemy import select, and_, func
 
         # Verify account ownership
         result = await db.execute(
@@ -2106,13 +2275,27 @@ async def get_folder_sync_status(
 
         folder_status = []
         for state in folder_states:
+            # Get actual unread count from synced emails
+            from app.db.models.email import Email
+            unread_count_result = await db.execute(
+                select(func.count(Email.id)).where(
+                    and_(
+                        Email.account_id == account_id,
+                        Email.folder_path == state.folder_name,
+                        Email.is_read == False
+                    )
+                )
+            )
+            unread_count = unread_count_result.scalar() or 0
+
             folder_status.append({
                 "folder_name": state.folder_name,
-                "last_synced_at": state.last_sync_at.isoformat() if state.last_sync_at else None,
+                "last_synced_at": state.last_synced_at.isoformat() if state.last_sync_at else None,
                 "last_synced_uid": state.last_synced_uid,
                 "uid_validity": state.uid_validity,
                 "highest_mod_seq": state.highest_mod_seq,
                 "email_count": state.email_count,
+                "unread_count": unread_count,
                 "created_at": state.created_at.isoformat(),
                 "updated_at": state.updated_at.isoformat()
             })

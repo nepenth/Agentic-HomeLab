@@ -36,6 +36,9 @@ class Settings(BaseSettings):
 
     # Email Embedding Configuration (can be overridden per account)
     default_embedding_model: str = Field(default="snowflake-arctic-embed2:latest", env="DEFAULT_EMBEDDING_MODEL")
+    embedding_batch_size: int = Field(default=50, env="EMBEDDING_BATCH_SIZE")
+    embedding_concurrency: int = Field(default=10, env="EMBEDDING_CONCURRENCY")
+
     app_version: str = Field(default="0.1.0", env="APP_VERSION")
     debug: bool = Field(default=False, env="DEBUG")
     

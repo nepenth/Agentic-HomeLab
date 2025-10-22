@@ -38,7 +38,8 @@ def create_access_token(data: dict, expires_delta: Optional[timedelta] = None) -
     else:
         expire = add_minutes(utc_now(), settings.access_token_expire_minutes)
 
-    to_encode.update({"exp": expire})
+    # JWT expects Unix timestamp (integer seconds since epoch)
+    to_encode.update({"exp": int(expire.timestamp())})
     encoded_jwt = jwt.encode(to_encode, settings.secret_key, algorithm=settings.jwt_algorithm)
     return encoded_jwt
 

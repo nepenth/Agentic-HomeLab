@@ -322,7 +322,9 @@ class IMAPConnector(BaseEmailConnector):
             is_answered = '\\Answered' in flags_str
 
             # Extract email data
-            subject = email_message.get('Subject', 'No Subject')
+            # Decode MIME encoded-word syntax (RFC 2047) for subject
+            raw_subject = email_message.get('Subject', 'No Subject')
+            subject = self._decode_mime_header(raw_subject)
             from_addr = email_message.get('From', '')
             to_addr = email_message.get('To', '')
             date_str = email_message.get('Date', '')
@@ -408,6 +410,35 @@ class IMAPConnector(BaseEmailConnector):
             return ""
         except:
             return ""
+
+    def _decode_mime_header(self, header_value: str) -> str:
+        """
+        Decode MIME encoded-word syntax (RFC 2047) in email headers.
+
+        Examples:
+            =?utf-8?Q?See=20You=20At=20Supercon=21=20=E2=98=A0=EF=B8=8F?=
+            -> See You At Supercon! ☠️
+        """
+        try:
+            from email.header import decode_header
+
+            # decode_header returns list of (decoded_bytes, charset) tuples
+            decoded_parts = decode_header(header_value)
+
+            # Reconstruct the header from decoded parts
+            result = []
+            for decoded_bytes, charset in decoded_parts:
+                if isinstance(decoded_bytes, bytes):
+                    # Decode bytes to string using detected charset or utf-8 fallback
+                    result.append(decoded_bytes.decode(charset or 'utf-8', errors='ignore'))
+                else:
+                    # Already a string
+                    result.append(decoded_bytes)
+
+            return ''.join(result)
+        except Exception as e:
+            self.logger.warning(f"Failed to decode MIME header '{header_value}': {e}")
+            return header_value  # Return original if decoding fails
 
     def _has_attachments(self, email_message) -> bool:
         """Check if email has attachments."""
@@ -723,7 +754,8 @@ class IMAPConnector(BaseEmailConnector):
                 raise SyncError(f"Failed to select folder {folder}")
 
             # UID SEARCH for range
-            search_criteria = f'{uid_start}:{uid_end}'
+            # Note: IMAP UID SEARCH requires 'UID' keyword in the search criteria
+            search_criteria = f'UID {uid_start}:{uid_end}'
             status, data = self._connection.uid('SEARCH', None, search_criteria)
 
             if status != 'OK':
@@ -833,7 +865,9 @@ class IMAPConnector(BaseEmailConnector):
             is_answered = '\\Answered' in flags_str
 
             # Extract email data (reuse existing logic from _fetch_email)
-            subject = email_message.get('Subject', 'No Subject')
+            # Decode MIME encoded-word syntax (RFC 2047) for subject
+            raw_subject = email_message.get('Subject', 'No Subject')
+            subject = self._decode_mime_header(raw_subject)
             from_addr = email_message.get('From', '')
             to_addr = email_message.get('To', '')
             date_str = email_message.get('Date', '')
