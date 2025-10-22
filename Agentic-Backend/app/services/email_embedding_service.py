@@ -33,8 +33,11 @@ class EmailEmbeddingService:
     """Service for generating and managing email embeddings."""
 
     def __init__(self):
+        from app.config import settings
+        self.config = settings
         self.logger = get_logger("email_embedding_service")
-        self.batch_size = 50  # Process emails in batches
+        self.batch_size = settings.embedding_batch_size  # Process emails in batches
+        self.concurrency = settings.embedding_concurrency  # Number of concurrent embedding operations
         self.max_content_length = 8000  # Max chars for embedding (to fit token limits)
 
     async def process_pending_emails(
@@ -509,7 +512,11 @@ class EmailEmbeddingService:
         emails: List[Email],
         force_regenerate: bool
     ) -> Dict[str, int]:
-        """Process a batch of emails for embedding generation."""
+        """
+        Process a batch of emails for embedding generation with concurrent processing.
+
+        Uses a semaphore to limit concurrent operations to self.concurrency.
+        """
         stats = {
             "emails_processed": 0,
             "embeddings_generated": 0,
@@ -517,23 +524,47 @@ class EmailEmbeddingService:
             "errors": 0
         }
 
-        for email in emails:
-            try:
-                # Generate email embeddings
-                embeddings = await self.generate_email_embeddings(db, email, force_regenerate)
-                stats["embeddings_generated"] += len(embeddings)
+        # Create semaphore to limit concurrency
+        semaphore = asyncio.Semaphore(self.concurrency)
 
-                # Process attachments if they have extracted text
-                for attachment in email.attachments:
-                    if attachment.extracted_text and not attachment.embeddings_generated:
-                        await self._generate_attachment_embedding(db, attachment)
-                        stats["attachments_processed"] += 1
+        async def process_single_email(email: Email):
+            """Process a single email with semaphore control."""
+            async with semaphore:
+                try:
+                    # Generate email embeddings
+                    embeddings = await self.generate_email_embeddings(db, email, force_regenerate)
+                    email_stats = {
+                        "embeddings_generated": len(embeddings),
+                        "attachments_processed": 0,
+                        "errors": 0
+                    }
 
-                stats["emails_processed"] += 1
+                    # Process attachments if they have extracted text
+                    for attachment in email.attachments:
+                        if attachment.extracted_text and not attachment.embeddings_generated:
+                            await self._generate_attachment_embedding(db, attachment)
+                            email_stats["attachments_processed"] += 1
 
-            except Exception as e:
-                self.logger.error(f"Error processing email {email.id}: {e}")
+                    return email_stats
+
+                except Exception as e:
+                    self.logger.error(f"Error processing email {email.id}: {e}")
+                    return {"embeddings_generated": 0, "attachments_processed": 0, "errors": 1}
+
+        # Process all emails concurrently with limited concurrency
+        tasks = [process_single_email(email) for email in emails]
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        # Aggregate results
+        for result in results:
+            if isinstance(result, Exception):
+                self.logger.error(f"Unexpected error in concurrent processing: {result}")
                 stats["errors"] += 1
+            elif isinstance(result, dict):
+                stats["emails_processed"] += 1 if result["errors"] == 0 else 0
+                stats["embeddings_generated"] += result["embeddings_generated"]
+                stats["attachments_processed"] += result["attachments_processed"]
+                stats["errors"] += result["errors"]
 
         return stats
 

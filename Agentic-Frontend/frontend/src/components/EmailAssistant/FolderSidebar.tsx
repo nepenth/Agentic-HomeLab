@@ -152,7 +152,7 @@ export const FolderSidebar: React.FC<FolderSidebarProps> = ({
         name: folderName,
         path: folderName,
         emailCount: statusInfo?.email_count || 0,
-        unreadCount: 0, // TODO: Add unread count from backend
+        unreadCount: statusInfo?.unread_count || 0,
         children: [],
         isExpanded: expandedFolders.has(folderName)
       };
@@ -255,9 +255,10 @@ export const FolderSidebar: React.FC<FolderSidebarProps> = ({
               }}
             />
 
-            {folder.emailCount > 0 && (
+            {/* Show unread count if there are unread emails */}
+            {folder.unreadCount !== undefined && folder.unreadCount > 0 && (
               <Badge
-                badgeContent={folder.emailCount}
+                badgeContent={folder.unreadCount}
                 color={isSelected ? 'primary' : 'default'}
                 sx={{
                   '& .MuiBadge-badge': {
@@ -265,8 +266,8 @@ export const FolderSidebar: React.FC<FolderSidebarProps> = ({
                     height: 18,
                     minWidth: 18,
                     fontWeight: 600,
-                    backgroundColor: isSelected ? theme.palette.primary.main : theme.palette.grey[400],
-                    color: isSelected ? 'white' : theme.palette.text.primary
+                    backgroundColor: isSelected ? theme.palette.primary.main : theme.palette.primary.light,
+                    color: 'white'
                   }
                 }}
               />

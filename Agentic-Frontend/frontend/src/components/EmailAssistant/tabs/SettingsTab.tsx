@@ -66,6 +66,14 @@ export const SettingsTab: React.FC = () => {
   // Add email account wizard state (V2)
   const [showAddAccountWizard, setShowAddAccountWizard] = useState(false);
 
+  // Edit account state
+  const [editingAccount, setEditingAccount] = useState<any>(null);
+  const [editFormData, setEditFormData] = useState({
+    sync_window_days: 90,
+    auto_sync_enabled: true,
+    sync_interval_minutes: 15,
+  });
+
   // Management function loading states
   const [clearingWorkflows, setClearingWorkflows] = useState(false);
   const [purgingEmails, setPurgingEmails] = useState(false);
@@ -104,6 +112,33 @@ export const SettingsTab: React.FC = () => {
     // Refresh accounts list
     await refreshAccounts();
     enqueueSnackbar('Email account added successfully! Sync will begin shortly.', { variant: 'success' });
+  };
+
+  // Handle edit account
+  const handleEditAccount = (account: any) => {
+    setEditingAccount(account);
+    setEditFormData({
+      sync_window_days: account.sync_window_days || 90,
+      auto_sync_enabled: account.auto_sync_enabled !== undefined ? account.auto_sync_enabled : true,
+      sync_interval_minutes: account.sync_interval_minutes || 15,
+    });
+  };
+
+  const handleCloseEditDialog = () => {
+    setEditingAccount(null);
+  };
+
+  const handleSaveAccountSettings = async () => {
+    if (!editingAccount) return;
+
+    try {
+      await updateAccount(editingAccount.account_id, editFormData);
+      enqueueSnackbar('Account settings updated successfully', { variant: 'success' });
+      setEditingAccount(null);
+      await refreshAccounts();
+    } catch (error: any) {
+      enqueueSnackbar(error?.message || 'Failed to update account settings', { variant: 'error' });
+    }
   };
 
   // Management Functions
@@ -176,7 +211,12 @@ export const SettingsTab: React.FC = () => {
                   key={account.account_id}
                   secondaryAction={
                     <Box>
-                      <IconButton edge="end" aria-label="edit" sx={{ mr: 1 }}>
+                      <IconButton
+                        edge="end"
+                        aria-label="edit"
+                        sx={{ mr: 1 }}
+                        onClick={() => handleEditAccount(account)}
+                      >
                         <EditIcon />
                       </IconButton>
                       <IconButton
@@ -815,6 +855,73 @@ export const SettingsTab: React.FC = () => {
         onClose={() => setShowAddAccountWizard(false)}
         onAccountAdded={handleAccountAdded}
       />
+
+      {/* Edit Account Settings Dialog */}
+      <Dialog
+        open={!!editingAccount}
+        onClose={handleCloseEditDialog}
+        maxWidth="sm"
+        fullWidth
+      >
+        <DialogTitle>Edit Email Account Settings</DialogTitle>
+        <DialogContent>
+          {editingAccount && (
+            <Box sx={{ pt: 2 }}>
+              <Typography variant="body2" sx={{ mb: 3, color: theme.palette.text.secondary }}>
+                Editing settings for <strong>{editingAccount.email_address}</strong>
+              </Typography>
+
+              <Stack spacing={3}>
+                <TextField
+                  label="Sync Window (Days)"
+                  type="number"
+                  fullWidth
+                  value={editFormData.sync_window_days}
+                  onChange={(e) =>
+                    setEditFormData({ ...editFormData, sync_window_days: parseInt(e.target.value) || 90 })
+                  }
+                  helperText="How many days back to sync emails (applies to initial sync only)"
+                  inputProps={{ min: 1, max: 3650 }}
+                />
+
+                <TextField
+                  label="Sync Interval (Minutes)"
+                  type="number"
+                  fullWidth
+                  value={editFormData.sync_interval_minutes}
+                  onChange={(e) =>
+                    setEditFormData({ ...editFormData, sync_interval_minutes: parseInt(e.target.value) || 15 })
+                  }
+                  helperText="How often to check for new emails"
+                  inputProps={{ min: 5, max: 1440 }}
+                />
+
+                <FormControlLabel
+                  control={
+                    <Switch
+                      checked={editFormData.auto_sync_enabled}
+                      onChange={(e) =>
+                        setEditFormData({ ...editFormData, auto_sync_enabled: e.target.checked })
+                      }
+                    />
+                  }
+                  label="Auto-sync enabled"
+                />
+
+                <Alert severity="info">
+                  Changing sync window will trigger a full resync on the next sync cycle.
+                </Alert>
+              </Stack>
+            </Box>
+          )}
+        </DialogContent>
+        <DialogActions>
+          <Button onClick={handleCloseEditDialog}>Cancel</Button>
+          <Button onClick={handleSaveAccountSettings} variant="contained">
+            Save Changes
+          </Button>
+        </DialogActions>
+      </Dialog>
     </Box>
   );
 };

@@ -48,8 +48,12 @@ services:
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
       - OLLAMA_BASE_URL=http://whyland-ai.nakedsun.xyz:11434
       - SECRET_KEY=your-secret-key-change-in-production
+      - ACCESS_TOKEN_EXPIRE_MINUTES=120
       - LOG_LEVEL=INFO
       - DEBUG=true
+      # Embedding Generation Performance
+      - EMBEDDING_BATCH_SIZE=${EMBEDDING_BATCH_SIZE:-50}
+      - EMBEDDING_CONCURRENCY=${EMBEDDING_CONCURRENCY:-10}
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility
     depends_on:
@@ -83,7 +87,11 @@ services:
       - CELERY_RESULT_BACKEND=redis://redis:6379/0
       - OLLAMA_BASE_URL=http://whyland-ai.nakedsun.xyz:11434
       - SECRET_KEY=your-secret-key-change-in-production
+      - ACCESS_TOKEN_EXPIRE_MINUTES=120
       - LOG_LEVEL=INFO
+      # Embedding Generation Performance
+      - EMBEDDING_BATCH_SIZE=${EMBEDDING_BATCH_SIZE:-50}
+      - EMBEDDING_CONCURRENCY=${EMBEDDING_CONCURRENCY:-10}
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility
     depends_on:

@@ -109,7 +109,7 @@ export const EmailAssistantComponent: React.FC = () => {
           mb: 2,
         }}
       >
-        <Container maxWidth="xl" sx={{ px: 0 }}>
+        <Box sx={{ px: 3 }}>
           <Tabs
             value={currentTab}
             onChange={handleTabChange}
@@ -156,12 +156,12 @@ export const EmailAssistantComponent: React.FC = () => {
               aria-controls="email-assistant-tabpanel-3"
             />
           </Tabs>
-        </Container>
+        </Box>
       </Paper>
 
       {/* Tab Content */}
-      <Box sx={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column', minHeight: 0, pb: 2 }}>
-        <Container maxWidth="xl" sx={{ flex: 1, display: 'flex', flexDirection: 'column', px: 0, overflow: 'hidden', minHeight: 0 }}>
+      <Box sx={{ flex: 1, overflow: 'hidden', display: 'flex', flexDirection: 'column', minHeight: 0, pb: 2, px: 3 }}>
+        <Box sx={{ flex: 1, display: 'flex', flexDirection: 'column', overflow: 'hidden', minHeight: 0 }}>
           <TabPanel value={currentTab} index={0}>
             <OverviewTab onNavigate={handleNavigate} />
           </TabPanel>
@@ -174,7 +174,7 @@ export const EmailAssistantComponent: React.FC = () => {
           <TabPanel value={currentTab} index={3}>
             <SettingsTab />
           </TabPanel>
-        </Container>
+        </Box>
       </Box>
     </Box>
   );

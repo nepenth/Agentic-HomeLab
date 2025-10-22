@@ -181,25 +181,28 @@ class EmailSyncService:
                     # Update sync history
                     await self._complete_sync_history(db, sync_history, sync_result)
 
-                    # Schedule embedding generation for new emails
-                    if total_stats["emails_added"] > 0:
-                        try:
-                            await unified_log_service.log(
-                                context=workflow_context,
-                                level=LogLevel.INFO,
-                                message="Scheduling embedding generation for new emails",
-                                component="email_sync_service",
-                                extra_metadata={"emails_added": total_stats["emails_added"]}
-                            )
-                            await self._schedule_embedding_generation(db, account.user_id)
-                        except Exception as embedding_error:
-                            await unified_log_service.log(
-                                context=workflow_context,
-                                level=LogLevel.WARNING,
-                                message="Embedding generation failed but sync succeeded",
-                                component="email_sync_service",
-                                error=embedding_error
-                            )
+                    # Always schedule embedding generation after sync to process any pending emails
+                    # This handles both new emails from this sync AND any existing emails without embeddings
+                    try:
+                        await unified_log_service.log(
+                            context=workflow_context,
+                            level=LogLevel.INFO,
+                            message="Scheduling embedding generation for emails without embeddings",
+                            component="email_sync_service",
+                            extra_metadata={
+                                "emails_added": total_stats["emails_added"],
+                                "note": "Processing all pending emails, not just newly added"
+                            }
+                        )
+                        await self._schedule_embedding_generation(db, account.user_id)
+                    except Exception as embedding_error:
+                        await unified_log_service.log(
+                            context=workflow_context,
+                            level=LogLevel.WARNING,
+                            message="Embedding generation failed but sync succeeded",
+                            component="email_sync_service",
+                            error=embedding_error
+                        )
 
                     await unified_log_service.log(
                         context=workflow_context,
@@ -390,7 +393,10 @@ class EmailSyncService:
                 # Step 4: Determine UID range to fetch
                 if force_full_sync or local_state.last_synced_uid is None:
                     # Full sync with date window
-                    since_date = datetime.now(timezone.utc) - timedelta(days=account.sync_window_days)
+                    # Use account creation date as reference (not current date) to avoid rolling window behavior
+                    # This matches standard IMAP client behavior (e.g., Thunderbird)
+                    # When user sets "sync 90 days back", it means 90 days before account setup, not a rolling window
+                    since_date = account.created_at - timedelta(days=account.sync_window_days)
                     uids_to_fetch = connector.fetch_uids_since_date(folder_name, since_date)
 
                     await unified_log_service.log(
@@ -808,6 +814,25 @@ class EmailSyncService:
         )
 
         db.add(email)
+        await db.flush()  # Flush to get the email ID
+
+        # Auto-generate embeddings for new emails (async, non-blocking)
+        try:
+            # Determine which embedding model to use
+            embedding_model = account.embedding_model or self.config.default_embedding_model
+
+            # Generate embeddings for the new email
+            await email_embedding_service.generate_email_embeddings(
+                db=db,
+                email=email,
+                force_regenerate=False,
+                account_embedding_model=embedding_model
+            )
+            self.logger.debug(f"Generated embeddings for new email {email.message_id}")
+        except Exception as e:
+            # Don't fail the sync if embedding generation fails
+            self.logger.warning(f"Failed to generate embeddings for email {email.message_id}: {e}")
+
         return email
 
     async def _update_email_with_uid(

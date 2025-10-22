@@ -82,6 +82,22 @@ export const EmbeddingManagement: React.FC<EmbeddingManagementProps> = ({ accoun
     }
   });
 
+  // Generate missing embeddings mutation
+  const generateMissingMutation = useMutation({
+    mutationFn: async (accountId: string) => {
+      const response = await apiClient.post(
+        `/api/v1/email-sync/accounts/${accountId}/generate-missing-embeddings`
+      );
+      return response.data;
+    },
+    onSuccess: () => {
+      refetchComparison();
+      if (accountId) {
+        refetchAccountStats();
+      }
+    }
+  });
+
   // Regenerate embeddings mutation
   const regenerateMutation = useMutation({
     mutationFn: async (data: {
@@ -230,16 +246,36 @@ export const EmbeddingManagement: React.FC<EmbeddingManagementProps> = ({ accoun
               </Grid>
 
               {/* Actions */}
-              <Grid item xs={12}>
+              <Grid item xs={12} md={6}>
                 <Button
                   variant="contained"
+                  color="primary"
+                  startIcon={generateMissingMutation.isPending ? <CircularProgress size={16} /> : <CloudSync />}
+                  onClick={() => generateMissingMutation.mutate(accountId)}
+                  disabled={accountStats.emails_without_embeddings === 0 || generateMissingMutation.isPending}
+                  fullWidth
+                >
+                  {generateMissingMutation.isPending ? 'Generating...' : 'Generate Missing Embeddings'}
+                </Button>
+                {accountStats.emails_without_embeddings > 0 && (
+                  <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 0.5, textAlign: 'center' }}>
+                    {accountStats.emails_without_embeddings} emails pending
+                  </Typography>
+                )}
+              </Grid>
+              <Grid item xs={12} md={6}>
+                <Button
+                  variant="outlined"
                   startIcon={<CloudSync />}
                   onClick={() => handleOpenRegenerateDialog(accountId)}
                   disabled={accountStats.total_emails === 0}
                   fullWidth
                 >
-                  Regenerate Embeddings
+                  Regenerate All Embeddings
                 </Button>
+                <Typography variant="caption" color="text.secondary" display="block" sx={{ mt: 0.5, textAlign: 'center' }}>
+                  Change model or rebuild all
+                </Typography>
               </Grid>
             </Grid>
           </CardContent>
@@ -299,7 +335,8 @@ export const EmbeddingManagement: React.FC<EmbeddingManagementProps> = ({ accoun
                     <TableRow>
                       <TableCell>Email Account</TableCell>
                       <TableCell>Configured Model</TableCell>
-                      <TableCell>Total Emails</TableCell>
+                      <TableCell align="right">Total Emails</TableCell>
+                      <TableCell align="right">Embedding Coverage</TableCell>
                       <TableCell>Models in Use</TableCell>
                       <TableCell align="right">Actions</TableCell>
                     </TableRow>
@@ -315,7 +352,35 @@ export const EmbeddingManagement: React.FC<EmbeddingManagementProps> = ({ accoun
                             color={account.configured_model ? 'primary' : 'default'}
                           />
                         </TableCell>
-                        <TableCell>{account.total_emails}</TableCell>
+                        <TableCell align="right">{account.total_emails || 0}</TableCell>
+                        <TableCell align="right">
+                          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, justifyContent: 'flex-end' }}>
+                            <Box sx={{ width: 60 }}>
+                              <LinearProgress
+                                variant="determinate"
+                                value={account.embedding_coverage_percent || 0}
+                                sx={{
+                                  height: 6,
+                                  borderRadius: 1,
+                                  backgroundColor: 'action.hover',
+                                  '& .MuiLinearProgress-bar': {
+                                    backgroundColor:
+                                      account.embedding_coverage_percent >= 90 ? 'success.main' :
+                                      account.embedding_coverage_percent >= 50 ? 'warning.main' : 'error.main'
+                                  }
+                                }}
+                              />
+                            </Box>
+                            <Typography variant="body2" sx={{ minWidth: 45 }}>
+                              {account.embedding_coverage_percent || 0}%
+                            </Typography>
+                          </Box>
+                          {account.emails_without_embeddings > 0 && (
+                            <Typography variant="caption" color="warning.main" display="block">
+                              {account.emails_without_embeddings} pending
+                            </Typography>
+                          )}
+                        </TableCell>
                         <TableCell>
                           <Box sx={{ display: 'flex', gap: 0.5, flexWrap: 'wrap' }}>
                             {Object.entries(account.models_in_use || {}).map(([model, count]) => (
@@ -329,15 +394,29 @@ export const EmbeddingManagement: React.FC<EmbeddingManagementProps> = ({ accoun
                           </Box>
                         </TableCell>
                         <TableCell align="right">
-                          <Tooltip title="Regenerate embeddings">
-                            <IconButton
-                              size="small"
-                              onClick={() => handleOpenRegenerateDialog(account.account_id)}
-                              disabled={account.total_emails === 0}
-                            >
-                              <CloudSync />
-                            </IconButton>
-                          </Tooltip>
+                          <Box sx={{ display: 'flex', gap: 0.5, justifyContent: 'flex-end' }}>
+                            <Tooltip title="Generate missing embeddings">
+                              <span>
+                                <IconButton
+                                  size="small"
+                                  color="primary"
+                                  onClick={() => generateMissingMutation.mutate(account.account_id)}
+                                  disabled={account.emails_without_embeddings === 0 || generateMissingMutation.isPending}
+                                >
+                                  <Assessment />
+                                </IconButton>
+                              </span>
+                            </Tooltip>
+                            <Tooltip title="Regenerate all embeddings">
+                              <IconButton
+                                size="small"
+                                onClick={() => handleOpenRegenerateDialog(account.account_id)}
+                                disabled={account.total_emails === 0}
+                              >
+                                <CloudSync />
+                              </IconButton>
+                            </Tooltip>
+                          </Box>
                         </TableCell>
                       </TableRow>
                     ))}

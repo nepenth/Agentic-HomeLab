@@ -10,6 +10,7 @@ import {
   ListItem,
   Chip,
   LinearProgress,
+  CircularProgress,
   useTheme,
   alpha,
   Card,
@@ -35,6 +36,7 @@ import { ActivityFeedItem } from '../../common/ActivityFeedItem';
 import { getDashboardMetrics, getRecentActivity, getAIInsights } from '../../../services/emailApi';
 import { QuickChat } from './QuickChat';
 import { SyncControl } from '../SyncControl';
+import apiClient from '../../../services/api';
 
 interface OverviewTabProps {
   onNavigate?: (tab: string, options?: any) => void;
@@ -45,7 +47,7 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({ onNavigate }) => {
   const { accounts, syncEmails, isSyncing } = useEmail();
   const { tasks } = useTasks();
 
-  // Fetch dashboard metrics
+  // Fetch dashboard metrics (includes embedding stats)
   const { data: metrics, isLoading: metricsLoading } = useQuery({
     queryKey: ['dashboard-metrics'],
     queryFn: getDashboardMetrics,
@@ -234,6 +236,96 @@ export const OverviewTab: React.FC<OverviewTabProps> = ({ onNavigate }) => {
                 loading={metricsLoading}
                 onClick={() => onNavigate?.('inbox', { filter: 'all', view: 'emails' })}
               />
+            </Grid>
+            <Grid item xs={6} md={4}>
+              <Paper
+                sx={{
+                  p: 2,
+                  height: '100%',
+                  cursor: 'pointer',
+                  transition: 'all 0.2s',
+                  border: `1px solid ${theme.palette.divider}`,
+                  '&:hover': {
+                    boxShadow: 3,
+                    borderColor: theme.palette.info.main,
+                  },
+                }}
+                onClick={() => onNavigate?.('settings')}
+              >
+                <Box sx={{ display: 'flex', alignItems: 'center', mb: 1, justifyContent: 'space-between' }}>
+                  <Box sx={{ display: 'flex', alignItems: 'center' }}>
+                    <SearchIcon sx={{ color: theme.palette.info.main, mr: 1 }} />
+                    <Typography variant="caption" sx={{ fontWeight: 600, textTransform: 'uppercase', color: 'text.secondary' }}>
+                      Embeddings
+                    </Typography>
+                  </Box>
+                  {/* Status indicator */}
+                  {metrics?.embedding_stats?.is_generating && (
+                    <CircularProgress size={14} thickness={5} sx={{ color: theme.palette.success.main }} />
+                  )}
+                </Box>
+                {metricsLoading ? (
+                  <CircularProgress size={20} />
+                ) : metrics?.embedding_stats ? (
+                  <>
+                    <Box sx={{ display: 'flex', alignItems: 'baseline', mb: 1 }}>
+                      <Typography variant="h4" sx={{ fontWeight: 700, color: theme.palette.info.main }}>
+                        {metrics.embedding_stats.coverage_percent}%
+                      </Typography>
+                      <Typography variant="caption" sx={{ ml: 1, color: 'text.secondary' }}>
+                        coverage
+                      </Typography>
+                    </Box>
+                    <Typography variant="caption" sx={{ display: 'block', color: 'text.secondary', mb: 0.5 }}>
+                      {metrics.embedding_stats.emails_with_embeddings} / {metrics.embedding_stats.total_emails} emails
+                    </Typography>
+
+                    {/* Status chip with dynamic color and message */}
+                    {metrics.embedding_stats.status_message && (
+                      <Chip
+                        label={metrics.embedding_stats.status_message}
+                        size="small"
+                        icon={metrics.embedding_stats.is_generating ? <CircularProgress size={12} sx={{ color: 'inherit !important' }} /> : undefined}
+                        color={
+                          metrics.embedding_stats.status === 'generating' ? 'success' :
+                          metrics.embedding_stats.status === 'pending' ? 'warning' :
+                          'default'
+                        }
+                        sx={{
+                          height: 20,
+                          fontSize: '0.65rem',
+                          mt: 0.5,
+                          '& .MuiChip-icon': {
+                            marginLeft: '4px'
+                          }
+                        }}
+                      />
+                    )}
+
+                    {/* Progress bar for active generation */}
+                    {metrics.embedding_stats.is_generating && (
+                      <Box sx={{ mt: 1 }}>
+                        <LinearProgress
+                          variant="determinate"
+                          value={metrics.embedding_stats.coverage_percent}
+                          sx={{
+                            height: 4,
+                            borderRadius: 2,
+                            backgroundColor: alpha(theme.palette.success.main, 0.1),
+                            '& .MuiLinearProgress-bar': {
+                              backgroundColor: theme.palette.success.main
+                            }
+                          }}
+                        />
+                      </Box>
+                    )}
+                  </>
+                ) : (
+                  <Typography variant="body2" color="text.secondary">
+                    Loading...
+                  </Typography>
+                )}
+              </Paper>
             </Grid>
             <Grid item xs={6} md={4}>
               <StatCard
