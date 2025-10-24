@@ -217,36 +217,53 @@ export const InboxTasksTab: React.FC<InboxTasksTabProps> = ({
   React.useEffect(() => {
     if (!isDraggingFolder && !isDraggingList) return;
 
-    const handleMouseMove = (e: MouseEvent) => {
-      e.preventDefault();
+    let animationFrameId: number | null = null;
+    let lastMouseX = 0;
 
-      if (isDraggingFolder) {
-        // Calculate new width based on mouse position
-        const newWidth = e.clientX - 24; // Subtract padding
-        if (newWidth >= 200 && newWidth <= 500) {
-          setFolderWidth(newWidth);
-        }
-      }
-      if (isDraggingList) {
-        // Calculate new width for email list
-        const newWidth = e.clientX - folderWidth - 28; // Subtract folder width and handles
-        if (newWidth >= 300 && newWidth <= 700) {
-          setEmailListWidth(newWidth);
-        }
+    const handleMouseMove = (e: MouseEvent) => {
+      lastMouseX = e.clientX;
+
+      // Use requestAnimationFrame for smooth 60fps updates
+      if (animationFrameId === null) {
+        animationFrameId = requestAnimationFrame(() => {
+          const containerRect = document.querySelector('[data-inbox-container]')?.getBoundingClientRect();
+          const containerLeft = containerRect?.left || 0;
+
+          if (isDraggingFolder) {
+            const newWidth = lastMouseX - containerLeft;
+            if (newWidth >= 200 && newWidth <= 500) {
+              setFolderWidth(newWidth);
+            }
+          }
+          if (isDraggingList) {
+            const newWidth = lastMouseX - containerLeft - folderWidth - 4;
+            if (newWidth >= 300 && newWidth <= 700) {
+              setEmailListWidth(newWidth);
+            }
+          }
+
+          animationFrameId = null;
+        });
       }
     };
 
     const handleMouseUp = () => {
+      if (animationFrameId !== null) {
+        cancelAnimationFrame(animationFrameId);
+      }
       setIsDraggingFolder(false);
       setIsDraggingList(false);
     };
 
-    document.addEventListener('mousemove', handleMouseMove);
+    document.addEventListener('mousemove', handleMouseMove, { passive: true });
     document.addEventListener('mouseup', handleMouseUp);
     document.body.style.cursor = 'col-resize';
     document.body.style.userSelect = 'none';
 
     return () => {
+      if (animationFrameId !== null) {
+        cancelAnimationFrame(animationFrameId);
+      }
       document.removeEventListener('mousemove', handleMouseMove);
       document.removeEventListener('mouseup', handleMouseUp);
       document.body.style.cursor = '';
@@ -276,7 +293,7 @@ export const InboxTasksTab: React.FC<InboxTasksTabProps> = ({
       />
 
       {/* Main Content - 3 Column Layout */}
-      <Box sx={{ flex: 1, display: 'flex', overflow: 'hidden', minHeight: 0 }}>
+      <Box sx={{ flex: 1, display: 'flex', overflow: 'hidden', minHeight: 0 }} data-inbox-container>
         {/* Folder Sidebar */}
         <Box
           sx={{
@@ -284,7 +301,8 @@ export const InboxTasksTab: React.FC<InboxTasksTabProps> = ({
             flexShrink: 0,
             overflow: 'hidden',
             backgroundColor: theme.palette.background.paper,
-            position: 'relative'
+            position: 'relative',
+            transition: isDraggingFolder ? 'none' : 'width 0.1s ease-out'
           }}
         >
           {accountsLoading ? (
@@ -336,7 +354,8 @@ export const InboxTasksTab: React.FC<InboxTasksTabProps> = ({
             overflow: 'hidden',
             display: 'flex',
             flexDirection: 'column',
-            position: 'relative'
+            position: 'relative',
+            transition: isDraggingList ? 'none' : 'width 0.1s ease-out'
           }}
         >
           <EmailListPanel

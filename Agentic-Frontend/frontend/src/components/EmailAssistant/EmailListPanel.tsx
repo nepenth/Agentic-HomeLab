@@ -25,6 +25,7 @@ import {
   Circle as CircleIcon
 } from '@mui/icons-material';
 import { formatDistanceToNow } from 'date-fns';
+import { decodeMimeHeader } from '../../utils/emailUtils';
 
 interface Email {
   email_id: string;
@@ -210,7 +211,7 @@ export const EmailListPanel: React.FC<EmailListPanelProps> = ({
                     mb: 0.5
                   }}
                 >
-                  {email.subject || '(No subject)'}
+                  {decodeMimeHeader(email.subject) || '(No subject)'}
                 </Typography>
 
                 {/* Preview */}

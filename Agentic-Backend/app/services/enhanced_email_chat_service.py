@@ -11,6 +11,7 @@ import json
 import hashlib
 from typing import List, Dict, Any, Optional, Tuple
 from datetime import datetime, timedelta
+from email.header import decode_header
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, and_, or_, desc, text
 from sqlalchemy.orm import selectinload
@@ -20,6 +21,7 @@ from functools import lru_cache
 from app.db.models.email import Email, EmailEmbedding, EmailTask, EmailAccount
 from app.db.models.user import User
 from app.db.models.task import LogLevel
+from app.db.models.chat_session import UserChatPreferences
 from app.services.email_embedding_service import email_embedding_service
 from app.services.semantic_processing_service import semantic_processing_service
 from app.services.ollama_client import ollama_client
@@ -40,6 +42,31 @@ class EnhancedEmailChatService:
         self._query_cache = {}  # In-memory cache for frequent queries
         self.cache_ttl = 1800  # 30 minutes cache TTL
 
+    @staticmethod
+    def _decode_email_subject(subject: Optional[str]) -> str:
+        """Decode MIME-encoded email subject (RFC 2047)."""
+        if not subject:
+            return "No subject"
+
+        try:
+            # Decode MIME-encoded headers like =?UTF-8?Q?...?=
+            decoded_parts = decode_header(subject)
+            decoded_subject = ""
+
+            for part, encoding in decoded_parts:
+                if isinstance(part, bytes):
+                    # Decode bytes using specified encoding or UTF-8 fallback
+                    decoded_subject += part.decode(encoding or 'utf-8', errors='replace')
+                else:
+                    # Already a string
+                    decoded_subject += part
+
+            return decoded_subject.strip() or "No subject"
+        except Exception as e:
+            # If decoding fails, return original subject
+            logger.warning(f"Failed to decode email subject: {e}")
+            return subject
+
     async def chat_with_email_context(
         self,
         db: AsyncSession,
@@ -48,7 +75,8 @@ class EnhancedEmailChatService:
         model_name: Optional[str] = None,
         include_email_search: bool = True,
         max_days_back: int = 1095,  # Default to 3 years instead of 30 days
-        conversation_history: Optional[List[Dict[str, str]]] = None
+        conversation_history: Optional[List[Dict[str, str]]] = None,
+        timeout_ms: Optional[int] = None  # User's response timeout preference
     ) -> Dict[str, Any]:
         """
         Process chat message with email context integration.
@@ -61,6 +89,7 @@ class EnhancedEmailChatService:
             include_email_search: Whether to search emails for context
             max_days_back: Maximum days to look back for emails
             conversation_history: Previous conversation messages
+            timeout_ms: Response timeout in milliseconds (from user preferences)
 
         Returns:
             Dict with response and email references
@@ -101,6 +130,25 @@ class EnhancedEmailChatService:
                 }
 
                 start_time = datetime.now()
+
+                # Use passed timeout or load from user preferences
+                user_timeout_ms = timeout_ms
+                if user_timeout_ms:
+                    self.logger.debug(f"Using passed timeout from route: {user_timeout_ms}ms")
+                else:
+                    # Fallback: Load user chat preferences for timeout configuration
+                    try:
+                        prefs_query = select(UserChatPreferences).where(UserChatPreferences.user_id == user_id)
+                        prefs_result = await db.execute(prefs_query)
+                        user_prefs = prefs_result.scalar_one_or_none()
+
+                        if user_prefs and user_prefs.response_timeout:
+                            user_timeout_ms = user_prefs.response_timeout
+                            self.logger.debug(f"Using user-configured timeout: {user_timeout_ms}ms")
+                        else:
+                            self.logger.debug("No user preferences found, using default timeout")
+                    except Exception as e:
+                        self.logger.warning(f"Failed to load user preferences, using default timeout: {e}")
 
                 # Search for relevant emails if requested
                 relevant_emails = []
@@ -154,12 +202,12 @@ class EnhancedEmailChatService:
                         except Exception as e:
                             self.logger.debug(f"Failed to parse cached LLM response: {e}")
                             llm_response = await self._generate_llm_response(
-                                system_prompt, user_prompt, conversation_history, model_name
+                                system_prompt, user_prompt, conversation_history, model_name, user_timeout_ms
                             )
                     else:
-                        # Generate LLM response
+                        # Generate LLM response with user-configured timeout
                         llm_response = await self._generate_llm_response(
-                            system_prompt, user_prompt, conversation_history, model_name
+                            system_prompt, user_prompt, conversation_history, model_name, user_timeout_ms
                         )
                         # Cache the LLM response
                         try:
@@ -344,7 +392,7 @@ class EnhancedEmailChatService:
                 "thread_emails": len(context["thread_emails"]),
                 "has_attachments": email.has_attachments,
                 "metadata": {
-                    "subject": email.subject,
+                    "subject": self._decode_email_subject(email.subject),
                     "sender": email.sender_email,
                     "sent_at": email.sent_at.isoformat() if email.sent_at else None,
                     "importance_score": email.importance_score,
@@ -568,7 +616,7 @@ class EnhancedEmailChatService:
 
             email_summary = f"""
 Email {i} (Similarity: {similarity:.2f}):
-- Subject: {email.subject or 'No subject'}
+- Subject: {self._decode_email_subject(email.subject)}
 - From: {email.sender_email} ({email.sender_name or 'Unknown'})
 - Date: {email.sent_at.strftime('%Y-%m-%d %H:%M') if email.sent_at else 'Unknown'}
 - Category: {email.category or 'General'}
@@ -620,7 +668,7 @@ When referencing emails, include the email number and key details like sender an
                 similarity = getattr(email, '_similarity_score', 0.0)
 
                 # Basic email metadata
-                subject = email.subject or "No subject"
+                subject = self._decode_email_subject(email.subject)
                 sender = f"{email.sender_name or email.sender_email}" if email.sender_email else "Unknown"
                 date_str = email.sent_at.strftime("%Y-%m-%d") if email.sent_at else "Unknown date"
 
@@ -644,14 +692,73 @@ When referencing emails, include the email number and key details like sender an
 
         return f"User Query: {message}{email_refs}"
 
+    def _get_response_schema(self) -> Dict[str, Any]:
+        """Get JSON schema for structured email assistant responses."""
+        return {
+            "type": "object",
+            "required": ["summary", "findings"],
+            "properties": {
+                "summary": {
+                    "type": "string",
+                    "description": "Brief 1-2 sentence answer to the user's question"
+                },
+                "findings": {
+                    "type": "array",
+                    "description": "List of specific items found (tracking numbers, emails, etc.)",
+                    "items": {
+                        "type": "object",
+                        "required": ["title", "value"],
+                        "properties": {
+                            "title": {
+                                "type": "string",
+                                "description": "Label for this finding (e.g., 'Tracking Number', 'Email Subject')"
+                            },
+                            "value": {
+                                "type": "string",
+                                "description": "The actual value or content"
+                            },
+                            "source": {
+                                "type": "string",
+                                "description": "Source reference (e.g., '[Email 7]')"
+                            },
+                            "metadata": {
+                                "type": "object",
+                                "description": "Additional structured data (dates, status, etc.)"
+                            }
+                        }
+                    }
+                },
+                "details": {
+                    "type": "string",
+                    "description": "Additional context, explanations, or elaboration"
+                },
+                "notes": {
+                    "type": "array",
+                    "description": "Important caveats, limitations, or additional information",
+                    "items": {
+                        "type": "string"
+                    }
+                },
+                "email_references": {
+                    "type": "array",
+                    "description": "List of email reference numbers mentioned (e.g., [1], [2], [7])",
+                    "items": {
+                        "type": "integer"
+                    }
+                }
+            }
+        }
+
     async def _generate_llm_response(
         self,
         system_prompt: str,
         user_prompt: str,
         conversation_history: Optional[List[Dict[str, str]]],
-        model_name: Optional[str]
+        model_name: Optional[str],
+        timeout_ms: Optional[int] = None,  # User-configured timeout from preferences
+        use_structured_output: bool = True  # Enable structured JSON output
     ) -> str:
-        """Generate LLM response with conversation context."""
+        """Generate LLM response with conversation context and optional structured output."""
         try:
             # Build conversation context
             messages = [{"role": "system", "content": system_prompt}]
@@ -661,25 +768,196 @@ When referencing emails, include the email number and key details like sender an
                 for msg in conversation_history[-10:]:  # Last 10 messages
                     messages.append(msg)
 
-            messages.append({"role": "user", "content": user_prompt})
+            # If using structured output, add schema to prompt
+            enhanced_user_prompt = user_prompt
+            if use_structured_output:
+                schema = self._get_response_schema()
+                schema_instruction = f"""
 
-            # Generate response
-            ollama_response = await ollama_client.chat(
-                messages=messages,
-                model=model_name or ollama_client.default_model
-            )
+IMPORTANT: Respond with valid JSON matching this exact schema:
+{json.dumps(schema, indent=2)}
+
+Structure your response as JSON with these fields:
+- summary: Brief 1-2 sentence answer
+- findings: Array of objects with title, value, source, and optional metadata
+- details: Additional explanation (optional)
+- notes: Array of important caveats or limitations (optional)
+- email_references: Array of email numbers you referenced (optional)
+
+Example for tracking numbers:
+{{
+  "summary": "I found one FedEx tracking number in your emails from the last 7 days.",
+  "findings": [
+    {{
+      "title": "FedEx Tracking Number",
+      "value": "394308187510",
+      "source": "[Email 7, Email 8]",
+      "metadata": {{
+        "status": "Delivered",
+        "delivery_date": "2025-10-20",
+        "carrier": "FedEx"
+      }}
+    }}
+  ],
+  "notes": [
+    "5 UPS emails did not contain visible tracking numbers in their preview text",
+    "One Amazon email contained a return reference ID, not a delivery tracking number"
+  ],
+  "email_references": [7, 8]
+}}
+"""
+                enhanced_user_prompt = user_prompt + schema_instruction
+
+            messages.append({"role": "user", "content": enhanced_user_prompt})
+
+            # Generate response with structured output if enabled
+            ollama_kwargs = {
+                "messages": messages,
+                "model": model_name or ollama_client.default_model,
+                "timeout_ms": timeout_ms
+            }
+
+            if use_structured_output:
+                ollama_kwargs["format"] = self._get_response_schema()
+                ollama_kwargs["options"] = {"temperature": 0}  # Deterministic for structured output
+
+            ollama_response = await ollama_client.chat(**ollama_kwargs)
 
             # Extract the actual message content from the Ollama response
             if isinstance(ollama_response, dict) and "message" in ollama_response:
-                return ollama_response["message"].get("content", str(ollama_response))
+                raw_content = ollama_response["message"].get("content", str(ollama_response))
+                self.logger.debug(f"Raw LLM response preview (first 500 chars): {raw_content[:500]}")
+                return raw_content
             elif isinstance(ollama_response, str):
+                self.logger.debug(f"Raw LLM response preview (first 500 chars): {ollama_response[:500]}")
                 return ollama_response
             else:
                 return str(ollama_response)
 
         except Exception as e:
             self.logger.error(f"Error generating LLM response: {e}", exc_info=True)
+            # Return structured error if using structured output
+            if use_structured_output:
+                return json.dumps({
+                    "summary": "I apologize, but I'm having trouble processing your request right now.",
+                    "findings": [],
+                    "notes": ["An error occurred while processing your request. Please try again."]
+                })
             return "I apologize, but I'm having trouble processing your request right now."
+
+    async def _parse_structured_response(
+        self,
+        db: AsyncSession,
+        user_id: int,
+        structured_data: Dict[str, Any],
+        relevant_emails: List[Email]
+    ) -> Dict[str, Any]:
+        """Parse structured JSON response from LLM."""
+        try:
+            import re
+
+            # Extract email references from the email_references field or findings
+            email_references = []
+            email_ref_nums = structured_data.get("email_references", [])
+
+            # Also extract from findings' source field
+            for finding in structured_data.get("findings", []):
+                if "source" in finding:
+                    # Parse references like "[Email 7]", "[Email 7, Email 8]"
+                    refs = re.findall(r'\[?(?:Email )?(\d+)\]?', finding["source"])
+                    email_ref_nums.extend([int(r) for r in refs])
+
+            # Remove duplicates and build email reference objects
+            for ref_num in set(email_ref_nums):
+                email_index = ref_num - 1  # Convert to 0-based index
+                if 0 <= email_index < len(relevant_emails):
+                    email = relevant_emails[email_index]
+                    email_references.append({
+                        "email_id": str(email.id),
+                        "subject": self._decode_email_subject(email.subject),
+                        "sender": email.sender_email,
+                        "sent_at": email.sent_at.isoformat() if email.sent_at else None,
+                        "similarity_score": getattr(email, '_similarity_score', 0.0)
+                    })
+
+            # Convert structured data to rich text for display
+            formatted_response = self._format_structured_response(structured_data)
+
+            # Generate suggested actions
+            suggested_actions = await self._generate_suggested_actions(
+                formatted_response, relevant_emails
+            )
+
+            return {
+                "response": formatted_response,
+                "structured_data": structured_data,  # Include raw structured data
+                "thinking_content": [],  # No thinking in structured mode
+                "email_references": email_references,
+                "task_suggestions": [],  # Could extract from suggested_actions if needed
+                "tasks_created": [],
+                "suggested_actions": suggested_actions,
+                "metadata": {
+                    "emails_referenced": len(email_references),
+                    "tasks_suggested": 0,
+                    "is_structured": True
+                }
+            }
+        except Exception as e:
+            self.logger.error(f"Error parsing structured response: {e}")
+            # Fallback to simple response
+            return {
+                "response": json.dumps(structured_data, indent=2),
+                "email_references": [],
+                "tasks_created": [],
+                "suggested_actions": []
+            }
+
+    def _format_structured_response(self, data: Dict[str, Any]) -> str:
+        """Convert structured JSON data to formatted markdown for display."""
+        lines = []
+
+        # Summary
+        if "summary" in data:
+            lines.append(data["summary"])
+            lines.append("")
+
+        # Findings
+        if data.get("findings"):
+            lines.append("## Findings")
+            lines.append("")
+            for finding in data["findings"]:
+                title = finding.get("title", "Item")
+                value = finding.get("value", "")
+                source = finding.get("source", "")
+                metadata = finding.get("metadata", {})
+
+                lines.append(f"### {title}")
+                lines.append(f"**Value:** {value}")
+
+                if source:
+                    lines.append(f"**Source:** {source}")
+
+                if metadata:
+                    for key, val in metadata.items():
+                        formatted_key = key.replace("_", " ").title()
+                        lines.append(f"**{formatted_key}:** {val}")
+
+                lines.append("")
+
+        # Details
+        if data.get("details"):
+            lines.append("## Details")
+            lines.append(data["details"])
+            lines.append("")
+
+        # Notes
+        if data.get("notes"):
+            lines.append("## Notes")
+            for note in data["notes"]:
+                lines.append(f"- {note}")
+            lines.append("")
+
+        return "\n".join(lines).strip()
 
     async def _parse_llm_response(
         self,
@@ -690,7 +968,25 @@ When referencing emails, include the email number and key details like sender an
     ) -> Dict[str, Any]:
         """Parse LLM response for email references, task creation, and thinking content."""
         try:
-            # Process thinking content
+            # Check if response is structured JSON
+            structured_data = None
+            try:
+                # Attempt to parse as JSON
+                parsed_json = json.loads(response.strip())
+                if isinstance(parsed_json, dict) and "summary" in parsed_json:
+                    structured_data = parsed_json
+                    self.logger.info("Detected structured JSON response")
+            except json.JSONDecodeError:
+                # Not JSON, treat as plain text
+                pass
+
+            # If we have structured data, process it differently
+            if structured_data:
+                return await self._parse_structured_response(
+                    db, user_id, structured_data, relevant_emails
+                )
+
+            # Process thinking content (for non-structured responses)
             thinking_content = []
             clean_response = response
 
@@ -738,7 +1034,7 @@ When referencing emails, include the email number and key details like sender an
                     email = relevant_emails[email_index]
                     email_references.append({
                         "email_id": str(email.id),
-                        "subject": email.subject,
+                        "subject": self._decode_email_subject(email.subject),
                         "sender": email.sender_email,
                         "sent_at": email.sent_at.isoformat() if email.sent_at else None,
                         "similarity_score": getattr(email, '_similarity_score', 0.0)
@@ -829,7 +1125,7 @@ When referencing emails, include the email number and key details like sender an
 Based on this email and task description, provide enhanced task details:
 
 EMAIL:
-Subject: {email.subject}
+Subject: {self._decode_email_subject(email.subject)}
 From: {email.sender_email}
 Date: {email.sent_at}
 Body: {(email.body_text or '')[:500]}...
@@ -888,7 +1184,7 @@ Response format: {{"title": "...", "description": "...", ...}}
 {prompts.get(summary_type, prompts["standard"])}
 
 EMAIL:
-Subject: {email.subject}
+Subject: {self._decode_email_subject(email.subject)}
 From: {email.sender_email} ({email.sender_name or 'Unknown'})
 Date: {email.sent_at}
 Body: {email.body_text or 'No text content'}

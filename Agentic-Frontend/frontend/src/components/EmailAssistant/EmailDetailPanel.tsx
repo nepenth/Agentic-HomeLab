@@ -28,6 +28,7 @@ import {
   TaskAlt as TaskIcon,
   GetApp as DownloadIcon
 } from '@mui/icons-material';
+import { decodeMimeHeader } from '../../utils/emailUtils';
 
 interface EmailDetail {
   id: string;
@@ -203,7 +204,7 @@ export const EmailDetailPanel: React.FC<EmailDetailPanelProps> = ({
         <Box sx={{ mb: 2 }}>
           <Box sx={{ display: 'flex', alignItems: 'start', gap: 1, mb: 1 }}>
             <Typography variant="h6" sx={{ fontWeight: 600, flex: 1 }}>
-              {email.subject || '(No subject)'}
+              {decodeMimeHeader(email.subject) || '(No subject)'}
             </Typography>
           </Box>
 

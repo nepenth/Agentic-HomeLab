@@ -15,6 +15,7 @@ class Settings(BaseSettings):
     # Ollama
     ollama_base_url: str = Field(..., env="OLLAMA_BASE_URL")
     ollama_default_model: str = Field(default="llama2", env="OLLAMA_DEFAULT_MODEL")
+    chat_session_naming_model: str = Field(default="phi3:3.8b", env="CHAT_SESSION_NAMING_MODEL")
     
     # Logging
     log_level: str = Field(default="INFO", env="LOG_LEVEL")

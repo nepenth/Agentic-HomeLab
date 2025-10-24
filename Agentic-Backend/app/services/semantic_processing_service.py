@@ -210,6 +210,17 @@ class SemanticProcessingService:
         Returns:
             List of embedding values
         """
+        # Truncate text to fit within embedding model context length
+        # Smallest model (embeddinggemma) has 2048 token context
+        # Using ~3.5 chars per token: 2048 tokens ≈ 7000 chars
+        # Use 6000 chars for safety margin to account for tokenization overhead
+        MAX_CHARS = 6000
+        if len(text) > MAX_CHARS:
+            truncated_text = text[:MAX_CHARS]
+            self.logger.warning(f"Truncated text from {len(text)} to {MAX_CHARS} characters for embedding")
+        else:
+            truncated_text = text
+
         # Get list of models to try
         models_to_try = []
         if model_name:
@@ -230,8 +241,8 @@ class SemanticProcessingService:
             try:
                 self.logger.debug(f"Trying to generate embedding with model: {model}")
 
-                # Use Ollama embeddings API
-                response = await ollama_client.embeddings(prompt=text, model=model)
+                # Use Ollama embeddings API with truncated text
+                response = await ollama_client.embeddings(prompt=truncated_text, model=model)
 
                 if response and 'embedding' in response:
                     embedding = response['embedding']

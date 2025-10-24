@@ -13,6 +13,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import StreamingResponse
 from starlette import status as status_codes
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql import func
 from typing import Optional, Dict, Any, List
 from pydantic import BaseModel, Field
 from datetime import datetime
@@ -79,6 +80,13 @@ class UserPreferencesResponse(BaseModel):
     enable_auto_suggestions: bool
     enable_streaming: bool
     theme: str
+    auto_save_conversations: bool
+    max_conversation_history: int
+    show_thinking: bool
+    connection_timeout: int
+    response_timeout: int
+    max_retries: int
+    auto_reconnect: bool
     quick_actions: List[Dict[str, Any]]
     frequent_models: List[str]
 
@@ -210,31 +218,42 @@ async def create_chat_session(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db_session)
 ):
-    """Create a new chat session."""
+    """Create a new chat session and persist to database."""
     try:
-        # Create a session directly instead of sending an initial message
-        # This is more efficient and matches what the frontend expects
+        from app.db.models.chat_session import ChatSession
         from uuid import uuid4
 
-        # Create session ID - not persisting to DB for now
-        session_id = str(uuid4())
-
-        # Return the session information
-        now = datetime.now()
-        session_response = SessionResponse(
-            id=session_id,
+        # Create and persist session to database
+        session = ChatSession(
+            id=uuid4(),
+            user_id=current_user.id,
             title=request.title or "New Chat",
-            created_at=now.isoformat(),
-            last_activity=now.isoformat(),
             selected_model=request.model_name or "qwen3:30b-a3b-thinking-2507-q8_0",
             message_count=0,
             is_active=True
         )
 
+        db.add(session)
+        await db.commit()
+        await db.refresh(session)
+
+        # Return the session information
+        session_response = SessionResponse(
+            id=str(session.id),
+            title=session.title,
+            created_at=session.created_at.isoformat(),
+            last_activity=session.last_activity.isoformat(),
+            selected_model=session.selected_model,
+            message_count=session.message_count,
+            is_active=session.is_active
+        )
+
+        logger.info(f"Created chat session {session.id} for user {current_user.id}")
         return session_response
 
     except Exception as e:
         logger.error(f"Session creation failed: {e}")
+        await db.rollback()
         raise HTTPException(
             status_code=status_codes.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to create chat session"
@@ -287,17 +306,40 @@ async def get_session_messages(
 ):
     """Get messages from a specific chat session."""
     try:
-        # For now, return empty messages for new sessions
-        # In the future, this would query the database for persisted messages
-        messages = []
+        from app.db.models.chat_session import ChatSession, ChatMessage
+        from sqlalchemy import select
+
+        # Verify session exists and belongs to user
+        session_stmt = select(ChatSession).where(
+            ChatSession.id == session_id,
+            ChatSession.user_id == current_user.id
+        )
+        session_result = await db.execute(session_stmt)
+        session = session_result.scalar_one_or_none()
+
+        if not session:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Chat session {session_id} not found"
+            )
+
+        # Get messages
+        messages_stmt = select(ChatMessage).where(
+            ChatMessage.session_id == session_id
+        ).order_by(ChatMessage.sequence_number).limit(limit).offset(offset)
+
+        messages_result = await db.execute(messages_stmt)
+        messages = messages_result.scalars().all()
 
         return {
             "session_id": session_id,
-            "messages": messages,
-            "total_count": 0,
-            "has_more": False
+            "messages": [msg.to_dict() for msg in messages],
+            "total_count": session.message_count,
+            "has_more": (offset + limit) < session.message_count
         }
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Get session messages failed: {e}")
         raise HTTPException(
@@ -314,18 +356,80 @@ async def delete_chat_session(
 ):
     """Delete a chat session and all its messages."""
     try:
-        # This would delete the session from the database
-        # For now, return success
+        from app.db.models.chat_session import ChatSession
+        from sqlalchemy import select, delete
+
+        # Verify session exists and belongs to user
+        session_stmt = select(ChatSession).where(
+            ChatSession.id == session_id,
+            ChatSession.user_id == current_user.id
+        )
+        session_result = await db.execute(session_stmt)
+        session = session_result.scalar_one_or_none()
+
+        if not session:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Chat session {session_id} not found"
+            )
+
+        # Delete the session (messages will cascade delete)
+        await db.delete(session)
+        await db.commit()
+
+        logger.info(f"Deleted chat session {session_id} for user {current_user.id}")
         return {
-            "message": f"Chat session {session_id} deleted successfully",
+            "message": f"Chat session deleted successfully",
             "session_id": str(session_id)
         }
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Delete session failed: {e}")
+        await db.rollback()
         raise HTTPException(
             status_code=status_codes.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to delete chat session"
+        )
+
+
+@router.delete("/sessions")
+async def purge_all_chat_sessions(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db_session)
+):
+    """Delete all chat sessions for the current user."""
+    try:
+        from app.db.models.chat_session import ChatSession
+        from sqlalchemy import select, delete
+
+        # Count sessions before deleting
+        count_stmt = select(func.count()).select_from(ChatSession).where(
+            ChatSession.user_id == current_user.id
+        )
+        count_result = await db.execute(count_stmt)
+        session_count = count_result.scalar()
+
+        # Delete all user's sessions (messages will cascade delete)
+        delete_stmt = delete(ChatSession).where(
+            ChatSession.user_id == current_user.id
+        )
+        await db.execute(delete_stmt)
+        await db.commit()
+
+        logger.info(f"Purged {session_count} chat sessions for user {current_user.id}")
+        return {
+            "message": f"All chat sessions purged successfully",
+            "sessions_deleted": session_count
+        }
+
+    except Exception as e:
+        logger.error(f"Purge sessions failed: {e}")
+        await db.rollback()
+        raise HTTPException(
+            status_code=status_codes.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to purge chat sessions"
         )
 
 
@@ -430,30 +534,44 @@ async def execute_quick_action(
 
 @router.get("/models")
 async def get_available_models():
-    """Get list of available Ollama models for the assistant."""
+    """Get list of available Ollama models for the assistant (excludes embedding models)."""
     try:
-        # This would call the existing Ollama service
         from app.services.ollama_client import ollama_client
+        from app.config import settings
 
         models_response = await ollama_client.list_models()
-        model_names = [model["name"] for model in models_response.get("models", [])]
+        all_models = models_response.get("models", [])
+
+        # Filter out embedding models - they typically have "embed" in the name
+        # or are smaller models designed specifically for embeddings
+        embedding_keywords = ["embed", "embedding", "nomic", "mxbai", "snowflake-arctic-embed"]
+
+        chat_models = []
+        for model in all_models:
+            model_name = model["name"].lower()
+            # Exclude if it contains embedding keywords
+            if not any(keyword in model_name for keyword in embedding_keywords):
+                chat_models.append(model["name"])
+
+        # Get default model from settings
+        default_model = settings.ollama_default_model
+
+        logger.info(f"Found {len(chat_models)} chat models (filtered from {len(all_models)} total)")
 
         return {
-            "models": model_names,
-            "default_model": "llama2",
-            "recommended_models": [
-                "llama2",
-                "mistral",
-                "codellama"
-            ]
+            "models": sorted(chat_models),  # Sort alphabetically
+            "default_model": default_model,
+            "total_models": len(all_models),
+            "chat_models": len(chat_models),
+            "filtered_out": len(all_models) - len(chat_models)
         }
 
     except Exception as e:
         logger.error(f"Get models failed: {e}")
+        from app.config import settings
         return {
-            "models": ["llama2"],
-            "default_model": "llama2",
-            "recommended_models": ["llama2"],
+            "models": [settings.ollama_default_model],
+            "default_model": settings.ollama_default_model,
             "error": "Failed to fetch models from Ollama"
         }
 

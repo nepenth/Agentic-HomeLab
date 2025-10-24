@@ -42,8 +42,9 @@ import {
 import { useAssistant } from '../../../hooks/useAssistant';
 import ModelSelector from '../ModelSelector';
 import { formatDistanceToNow } from 'date-fns';
-import ReactMarkdown from 'react-markdown';
 import { ConnectionStatusIndicator, useConnectionQuality } from '../ConnectionStatus';
+import MarkdownMessage from '../MarkdownMessage';
+import { ReasoningChain, ReasoningStep } from '../ReasoningChain';
 
 interface AssistantTabProps {
   onNavigateToEmail?: (emailId: string) => void;
@@ -73,6 +74,12 @@ export const AssistantTab: React.FC<AssistantTabProps> = ({ onNavigateToEmail })
   const [sessionMenuAnchor, setSessionMenuAnchor] = useState<null | HTMLElement>(null);
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
   const [expandedThinking, setExpandedThinking] = useState<Set<string>>(new Set());
+
+  // Chain-of-thought reasoning state
+  const [reasoningSteps, setReasoningSteps] = useState<Map<string, ReasoningStep[]>>(new Map());
+  const [activeReasoningMessageId, setActiveReasoningMessageId] = useState<string | null>(null);
+  const [agenticMode, setAgenticMode] = useState(false);
+
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
   const scrollToBottom = () => {
@@ -91,7 +98,21 @@ export const AssistantTab: React.FC<AssistantTabProps> = ({ onNavigateToEmail })
   }, [sessions.length, currentSession]);
 
   const handleSendMessage = async () => {
-    if (!messageInput.trim() || isStreaming) return;
+    console.log('[AGENTIC] handleSendMessage called. agenticMode:', agenticMode, 'messageInput:', messageInput.trim().substring(0, 50));
+
+    if (!messageInput.trim() || isStreaming) {
+      console.log('[AGENTIC] Aborting send - empty message or already streaming');
+      return;
+    }
+
+    // Use agentic mode if enabled
+    if (agenticMode) {
+      console.log('[AGENTIC] Using agentic mode, calling handleSendAgenticMessage');
+      await handleSendAgenticMessage();
+      return;
+    }
+
+    console.log('[AGENTIC] Using standard mode (non-agentic)');
 
     // Auto-create session if none exists
     if (!currentSession) {
@@ -117,6 +138,146 @@ export const AssistantTab: React.FC<AssistantTabProps> = ({ onNavigateToEmail })
     }
 
     setMessageInput('');
+  };
+
+  const handleSendAgenticMessage = async () => {
+    if (!messageInput.trim() || isStreaming) return;
+
+    const messageId = `msg-${Date.now()}`;
+    const userMessage = messageInput;
+
+    setMessageInput('');
+    setActiveReasoningMessageId(messageId);
+    setReasoningSteps(new Map(reasoningSteps).set(messageId, []));
+
+    console.log('[AGENTIC] Starting chain-of-thought request');
+
+    try {
+      // Get the access token with fallback logic (same as useAssistant.ts and apiClient)
+      const token = localStorage.getItem('auth_token') ||
+                   localStorage.getItem('access_token') ||
+                   sessionStorage.getItem('access_token');
+
+      console.log('[AGENTIC] Token found:', token ? 'YES' : 'NO', token ? `(length: ${token.length})` : '');
+
+      if (!token) {
+        console.error('[AGENTIC] No access token found. Please log in again.');
+        setActiveReasoningMessageId(null);
+        // TODO: Show user-facing error notification
+        return;
+      }
+
+      // Use the same API base URL as configured in the app
+      const apiBaseUrl = import.meta.env.VITE_API_BASE_URL;
+      console.log('[AGENTIC] API Base URL:', apiBaseUrl);
+
+      if (!apiBaseUrl) {
+        console.error('[AGENTIC] VITE_API_BASE_URL is not configured');
+        setActiveReasoningMessageId(null);
+        return;
+      }
+
+      const url = `${apiBaseUrl}/api/v1/email/chat/stream-agentic`;
+      console.log('[AGENTIC] Request URL:', url);
+
+      const requestBody = {
+        message: userMessage,
+        model_name: selectedModel || 'qwen3:30b-a3b-thinking-2507-q8_0',
+        max_days_back: 7,
+        session_id: currentSession?.id,
+      };
+      console.log('[AGENTIC] Request body:', requestBody);
+
+      console.log('[AGENTIC] Sending fetch request...');
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json',
+          'Accept': 'text/event-stream',
+        },
+        body: JSON.stringify(requestBody),
+      });
+
+      console.log('[AGENTIC] Response status:', response.status, response.statusText);
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error(`HTTP error! status: ${response.status}, body: ${errorText}`);
+        throw new Error(`Chain-of-thought request failed: ${response.status} ${response.statusText}`);
+      }
+
+      const reader = response.body?.getReader();
+      const decoder = new TextDecoder();
+
+      if (!reader) {
+        throw new Error('No response body reader available');
+      }
+
+      let buffer = '';
+      let receivedAnyData = false;
+
+      console.log('[AGENTIC] Starting to read SSE stream...');
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) {
+          console.log('[AGENTIC] Stream ended (done=true)');
+          break;
+        }
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+
+        for (const line of lines) {
+          if (!line.trim()) continue; // Skip empty lines
+
+          console.log('[AGENTIC] Received line:', line);
+
+          if (line.startsWith('data: ')) {
+            try {
+              const jsonStr = line.slice(6);
+              console.log('[AGENTIC] Parsing JSON:', jsonStr);
+              const data = JSON.parse(jsonStr);
+              receivedAnyData = true;
+
+              console.log('[AGENTIC] Parsed data step_type:', data.step_type);
+
+              // Backend sends step_type (not type)
+              if (data.step_type === 'complete') {
+                console.log('[AGENTIC] Stream complete');
+                setActiveReasoningMessageId(null);
+                break;
+              }
+
+              if (data.step_type === 'error') {
+                console.error('[AGENTIC] Streaming error:', data.error);
+                setActiveReasoningMessageId(null);
+                break;
+              }
+
+              // Add reasoning step
+              if (data.step_number !== undefined) {
+                console.log('[AGENTIC] Adding reasoning step:', data.step_number, data.step_type);
+                setReasoningSteps(prev => {
+                  const steps = prev.get(messageId) || [];
+                  return new Map(prev).set(messageId, [...steps, data as ReasoningStep]);
+                });
+              }
+            } catch (parseError) {
+              console.error('[AGENTIC] Failed to parse SSE data:', parseError, 'Line:', line);
+            }
+          }
+        }
+      }
+
+      console.log('[AGENTIC] Finished reading stream. Received any data:', receivedAnyData);
+
+    } catch (error) {
+      console.error('Agentic message error:', error);
+      setActiveReasoningMessageId(null);
+    }
   };
 
   const handleNewSession = async () => {
@@ -386,14 +547,24 @@ export const AssistantTab: React.FC<AssistantTabProps> = ({ onNavigateToEmail })
                               </Box>
                             )}
 
-                            <Box sx={{ '& p:last-child': { mb: 0 } }}>
-                              <ReactMarkdown>
-                                {typeof message.content === 'string'
+                            {/* Chain-of-Thought Reasoning Steps */}
+                            {message.role === 'assistant' && reasoningSteps.has(message.id) && (
+                              <Box sx={{ mb: 2 }}>
+                                <ReasoningChain
+                                  steps={reasoningSteps.get(message.id) || []}
+                                  isActive={activeReasoningMessageId === message.id}
+                                />
+                              </Box>
+                            )}
+
+                            <MarkdownMessage
+                              content={
+                                typeof message.content === 'string'
                                   ? message.content
-                                  : JSON.stringify(message.content)
-                                }
-                              </ReactMarkdown>
-                            </Box>
+                                  : JSON.stringify(message.content, null, 2)
+                              }
+                              role={message.role}
+                            />
 
                             {message.metadata?.email_references && message.metadata.email_references.length > 0 && (
                               <Box sx={{ mt: 2 }}>
@@ -640,6 +811,17 @@ export const AssistantTab: React.FC<AssistantTabProps> = ({ onNavigateToEmail })
                   }}
                   disabled={isStreaming}
                 />
+                <Tooltip title={agenticMode ? "Chain-of-Thought enabled" : "Enable Chain-of-Thought"}>
+                  <IconButton
+                    onClick={() => {
+                      console.log('[AGENTIC] Toggling chain-of-thought mode. Current:', agenticMode, 'New:', !agenticMode);
+                      setAgenticMode(!agenticMode);
+                    }}
+                    color={agenticMode ? "primary" : "default"}
+                  >
+                    <BotIcon />
+                  </IconButton>
+                </Tooltip>
                 <Tooltip title="Voice input (coming soon)">
                   <IconButton disabled>
                     <MicIcon />

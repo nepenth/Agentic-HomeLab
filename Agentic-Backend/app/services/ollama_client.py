@@ -40,9 +40,9 @@ class OllamaClient:
                 )
 
                 timeout = aiohttp.ClientTimeout(
-                    total=300,  # 5 minutes total timeout
+                    total=600,  # 10 minutes total timeout (for large models)
                     connect=10,  # 10 seconds connection timeout
-                    sock_read=60  # 60 seconds read timeout
+                    sock_read=300  # 5 minutes read timeout (for slow thinking models)
                 )
 
                 self.session = aiohttp.ClientSession(
@@ -108,9 +108,28 @@ class OllamaClient:
         raw: bool = False,
         format: Optional[str] = None,
         options: Optional[Dict[str, Any]] = None,
-        context_id: Optional[str] = None
+        context_id: Optional[str] = None,
+        timeout_ms: Optional[int] = None  # User-configurable timeout in milliseconds
     ) -> Dict[str, Any]:
-        """Generate text completion."""
+        """
+        Generate text completion with optional per-request timeout override.
+
+        Args:
+            prompt: The prompt text
+            model: Model name to use (defaults to self.default_model)
+            system: System prompt
+            template: Prompt template
+            context: Context from previous generation
+            stream: Enable streaming response
+            raw: Use raw mode (no template)
+            format: Response format (e.g., 'json')
+            options: Model-specific options
+            context_id: Context-specific session identifier
+            timeout_ms: Optional timeout in milliseconds (overrides default)
+
+        Returns:
+            Dict containing the generated response
+        """
         # Use context-specific session if provided, otherwise use global session
         if context_id:
             session = self.get_context_session(context_id)
@@ -125,14 +144,14 @@ class OllamaClient:
             raise Exception("Failed to establish Ollama connection")
 
         model = model or self.default_model
-        
+
         payload = {
             "model": model,
             "prompt": prompt,
             "stream": stream,
             "raw": raw
         }
-        
+
         # Add optional parameters
         if system:
             payload["system"] = system
@@ -144,11 +163,26 @@ class OllamaClient:
             payload["format"] = format
         if options:
             payload["options"] = options
-        
+
+        # Create per-request timeout if user specified, otherwise use session default
+        request_timeout = None
+        if timeout_ms is not None:
+            # Convert milliseconds to seconds for aiohttp
+            timeout_seconds = timeout_ms / 1000.0
+            request_timeout = aiohttp.ClientTimeout(
+                total=timeout_seconds * 2,  # Total timeout is 2x read timeout
+                sock_read=timeout_seconds
+            )
+            logger.debug(f"Using user-configured timeout: {timeout_ms}ms ({timeout_seconds}s)")
+
         try:
             logger.debug(f"Generating with model {model}: {prompt[:100]}...")
-            
-            async with session.post(f"{self.base_url}/api/generate", json=payload) as response:
+
+            async with session.post(
+                f"{self.base_url}/api/generate",
+                json=payload,
+                timeout=request_timeout  # Override session timeout if provided
+            ) as response:
                 response.raise_for_status()
                 
                 if stream:
@@ -174,9 +208,24 @@ class OllamaClient:
         stream: bool = False,
         format: Optional[str] = None,
         options: Optional[Dict[str, Any]] = None,
-        context_id: Optional[str] = None
+        context_id: Optional[str] = None,
+        timeout_ms: Optional[int] = None  # User-configurable timeout in milliseconds
     ) -> Dict[str, Any]:
-        """Chat completion."""
+        """
+        Chat completion with optional per-request timeout override.
+
+        Args:
+            messages: List of message dicts with 'role' and 'content'
+            model: Model name to use (defaults to self.default_model)
+            stream: Enable streaming response
+            format: Response format (e.g., 'json')
+            options: Model-specific options
+            context_id: Context-specific session identifier
+            timeout_ms: Optional timeout in milliseconds (overrides default)
+
+        Returns:
+            Dict containing the chat response
+        """
         # Use context-specific session if provided, otherwise use global session
         if context_id:
             session = self.get_context_session(context_id)
@@ -191,22 +240,37 @@ class OllamaClient:
             raise Exception("Failed to establish Ollama connection")
 
         model = model or self.default_model
-        
+
         payload = {
             "model": model,
             "messages": messages,
             "stream": stream
         }
-        
+
         if format:
             payload["format"] = format
         if options:
             payload["options"] = options
-        
+
+        # Create per-request timeout if user specified, otherwise use session default
+        request_timeout = None
+        if timeout_ms is not None:
+            # Convert milliseconds to seconds for aiohttp
+            timeout_seconds = timeout_ms / 1000.0
+            request_timeout = aiohttp.ClientTimeout(
+                total=timeout_seconds * 2,  # Total timeout is 2x read timeout
+                sock_read=timeout_seconds
+            )
+            logger.debug(f"Using user-configured timeout: {timeout_ms}ms ({timeout_seconds}s)")
+
         try:
             logger.debug(f"Chat with model {model}: {len(messages)} messages")
-            
-            async with session.post(f"{self.base_url}/api/chat", json=payload) as response:
+
+            async with session.post(
+                f"{self.base_url}/api/chat",
+                json=payload,
+                timeout=request_timeout  # Override session timeout if provided
+            ) as response:
                 response.raise_for_status()
                 
                 if stream:

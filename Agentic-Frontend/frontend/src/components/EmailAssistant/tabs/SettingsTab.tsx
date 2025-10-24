@@ -79,28 +79,65 @@ export const SettingsTab: React.FC = () => {
   const [purgingEmails, setPurgingEmails] = useState(false);
   const [purgingEmbeddings, setPurgingEmbeddings] = useState(false);
 
-  // AI Assistant settings
+  // AI Assistant settings - stored in SECONDS for better UX
+  // (converted to milliseconds when saving to backend)
   const [assistantSettings, setAssistantSettings] = useState({
     defaultModel: 'qwen3:30b-a3b-thinking-2507-q8_0',
     enableStreaming: true,
     showThinking: true,
     autoSave: false,
-    connectionTimeout: 30000, // 30 seconds
-    responseTimeout: 120000,  // 2 minutes
+    connectionTimeout: 30, // seconds
+    responseTimeout: 120,  // seconds
     maxRetries: 3,
     autoReconnect: true,
   });
+  const [loadingPreferences, setLoadingPreferences] = useState(true);
+  const [savingPreferences, setSavingPreferences] = useState(false);
+  const [availableModels, setAvailableModels] = useState<string[]>([]);
+  const [defaultModelFromServer, setDefaultModelFromServer] = useState<string>('');
 
-  // Load assistant settings from localStorage on mount
+  // Load available models from Ollama
   React.useEffect(() => {
-    const savedSettings = localStorage.getItem('assistantSettings');
-    if (savedSettings) {
+    const loadModels = async () => {
       try {
-        setAssistantSettings(JSON.parse(savedSettings));
+        const response = await apiClient.getAvailableModels();
+        setAvailableModels(response.models || []);
+        setDefaultModelFromServer(response.default_model || '');
       } catch (error) {
-        console.error('Failed to load assistant settings:', error);
+        console.error('Failed to load models:', error);
       }
-    }
+    };
+    loadModels();
+  }, []);
+
+  // Load assistant settings from backend API on mount
+  React.useEffect(() => {
+    const loadPreferences = async () => {
+      try {
+        setLoadingPreferences(true);
+        const prefs = await apiClient.getUserChatPreferences();
+
+        // Convert backend snake_case to frontend camelCase
+        // Convert milliseconds to seconds for frontend display
+        setAssistantSettings({
+          defaultModel: prefs.default_model || defaultModelFromServer || 'qwen3:30b-a3b-thinking-2507-q8_0',
+          enableStreaming: prefs.enable_streaming ?? true,
+          showThinking: prefs.show_thinking ?? true,
+          autoSave: prefs.auto_save_conversations ?? false,
+          connectionTimeout: Math.round((prefs.connection_timeout ?? 30000) / 1000),
+          responseTimeout: Math.round((prefs.response_timeout ?? 120000) / 1000),
+          maxRetries: prefs.max_retries ?? 3,
+          autoReconnect: prefs.auto_reconnect ?? true,
+        });
+      } catch (error) {
+        console.error('Failed to load assistant preferences:', error);
+        enqueueSnackbar('Failed to load assistant settings', { variant: 'warning' });
+      } finally {
+        setLoadingPreferences(false);
+      }
+    };
+
+    loadPreferences();
   }, []);
 
   const handlePanelChange = (panel: string) => (event: React.SyntheticEvent, isExpanded: boolean) => {
@@ -503,6 +540,12 @@ export const SettingsTab: React.FC = () => {
           </Box>
         </AccordionSummary>
         <AccordionDetails>
+          {loadingPreferences ? (
+            <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', py: 4 }}>
+              <CircularProgress />
+              <Typography sx={{ ml: 2 }}>Loading settings...</Typography>
+            </Box>
+          ) : (
           <Grid container spacing={2}>
             <Grid item xs={12}>
               <FormControl fullWidth>
@@ -512,11 +555,18 @@ export const SettingsTab: React.FC = () => {
                   label="Default Model"
                   onChange={(e) => setAssistantSettings({ ...assistantSettings, defaultModel: e.target.value })}
                 >
-                  <MenuItem value="qwen3:30b-a3b-thinking-2507-q8_0">
-                    Qwen3 30B Thinking (Best Quality)
-                  </MenuItem>
-                  <MenuItem value="llama3.2:latest">Llama 3.2 (Faster)</MenuItem>
-                  <MenuItem value="mistral:latest">Mistral (Balanced)</MenuItem>
+                  {availableModels.length > 0 ? (
+                    availableModels.map((model) => (
+                      <MenuItem key={model} value={model}>
+                        {model}
+                        {model === defaultModelFromServer && ' (Default)'}
+                      </MenuItem>
+                    ))
+                  ) : (
+                    <MenuItem value={assistantSettings.defaultModel}>
+                      {assistantSettings.defaultModel || 'Loading models...'}
+                    </MenuItem>
+                  )}
                 </Select>
               </FormControl>
             </Grid>
@@ -566,10 +616,10 @@ export const SettingsTab: React.FC = () => {
                 fullWidth
                 label="Connection Timeout (seconds)"
                 type="number"
-                value={assistantSettings.connectionTimeout / 1000}
+                value={assistantSettings.connectionTimeout}
                 onChange={(e) => setAssistantSettings({
                   ...assistantSettings,
-                  connectionTimeout: parseInt(e.target.value) * 1000
+                  connectionTimeout: parseInt(e.target.value)
                 })}
                 helperText="Time to wait for initial connection"
                 InputProps={{ inputProps: { min: 5, max: 60 } }}
@@ -581,13 +631,13 @@ export const SettingsTab: React.FC = () => {
                 fullWidth
                 label="Response Timeout (seconds)"
                 type="number"
-                value={assistantSettings.responseTimeout / 1000}
+                value={assistantSettings.responseTimeout}
                 onChange={(e) => setAssistantSettings({
                   ...assistantSettings,
-                  responseTimeout: parseInt(e.target.value) * 1000
+                  responseTimeout: parseInt(e.target.value)
                 })}
-                helperText="Max time to wait for AI response"
-                InputProps={{ inputProps: { min: 30, max: 600 } }}
+                helperText="Max time to wait for AI response (30s - 30min)"
+                InputProps={{ inputProps: { min: 30, max: 1800 } }}
               />
             </Grid>
 
@@ -625,16 +675,38 @@ export const SettingsTab: React.FC = () => {
               <Button
                 variant="contained"
                 fullWidth
-                onClick={() => {
-                  // Save settings to local storage
-                  localStorage.setItem('assistantSettings', JSON.stringify(assistantSettings));
-                  enqueueSnackbar('Assistant settings saved', { variant: 'success' });
+                disabled={savingPreferences}
+                onClick={async () => {
+                  try {
+                    setSavingPreferences(true);
+
+                    // Convert frontend camelCase to backend snake_case
+                    // Convert seconds to milliseconds for backend storage
+                    await apiClient.updateUserChatPreferences({
+                      default_model: assistantSettings.defaultModel,
+                      enable_streaming: assistantSettings.enableStreaming,
+                      show_thinking: assistantSettings.showThinking,
+                      auto_save_conversations: assistantSettings.autoSave,
+                      connection_timeout: assistantSettings.connectionTimeout * 1000, // seconds -> ms
+                      response_timeout: assistantSettings.responseTimeout * 1000, // seconds -> ms
+                      max_retries: assistantSettings.maxRetries,
+                      auto_reconnect: assistantSettings.autoReconnect,
+                    });
+
+                    enqueueSnackbar('Assistant settings saved successfully', { variant: 'success' });
+                  } catch (error) {
+                    console.error('Failed to save assistant preferences:', error);
+                    enqueueSnackbar('Failed to save assistant settings', { variant: 'error' });
+                  } finally {
+                    setSavingPreferences(false);
+                  }
                 }}
               >
-                Save Assistant Settings
+                {savingPreferences ? 'Saving...' : 'Save Assistant Settings'}
               </Button>
             </Grid>
           </Grid>
+          )}
         </AccordionDetails>
       </Accordion>
 

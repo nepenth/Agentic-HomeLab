@@ -18,11 +18,58 @@ import asyncio
 from app.api.dependencies import get_db_session, get_current_user
 from app.services.enhanced_email_chat_service import enhanced_email_chat_service
 from app.services.email_chat_service import email_chat_service, EmailChatResponse
+from app.services.chat_session_naming_service import chat_session_naming_service
+from app.services.agentic_reasoning_service import agentic_reasoning_service
 from app.utils.logging import get_logger
 from app.db.models.user import User
+from fastapi import BackgroundTasks
 
 logger = get_logger("email_chat_api")
 router = APIRouter()
+
+
+async def generate_and_update_session_name(
+    session_id: str,
+    user_message: str,
+    assistant_response: str,
+    user_id: int
+):
+    """Background task to generate and update session name after response is sent."""
+    logger.info(f"🔄 Background naming task started for session {session_id}")
+    try:
+        from app.db.models.chat_session import ChatSession
+        from app.api.dependencies import get_db_session
+        from sqlalchemy import select
+        from uuid import UUID
+
+        # Generate name using both user message and assistant response for better context
+        combined_context = f"User: {user_message}\n\nAssistant: {assistant_response[:200]}"
+        logger.info(f"Generating session name with context length: {len(combined_context)}")
+        session_name = await chat_session_naming_service.generate_session_name(combined_context)
+        logger.info(f"Generated session name: '{session_name}'")
+
+        # Update the session title in database
+        async for db in get_db_session():
+            try:
+                session_stmt = select(ChatSession).where(
+                    ChatSession.id == UUID(session_id),
+                    ChatSession.user_id == user_id
+                )
+                result = await db.execute(session_stmt)
+                session = result.scalar_one_or_none()
+
+                if session:
+                    session.title = session_name
+                    await db.commit()
+                    logger.info(f"Updated session {session_id} title to: '{session_name}'")
+                break
+            except Exception as e:
+                logger.error(f"Failed to update session name in DB: {e}")
+                await db.rollback()
+
+    except Exception as e:
+        logger.error(f"Background session naming failed: {e}")
+        # Non-critical, don't raise
 
 
 class EmailChatRequest(BaseModel):
@@ -47,6 +94,7 @@ class EmailChatResponseModel(BaseModel):
     tasks_created: list = Field(default_factory=list, description="Tasks created from emails")
     task_suggestions: list = Field(default_factory=list, description="Suggested tasks from analysis")
     thinking_content: list = Field(default_factory=list, description="Extracted thinking content from LLM")
+    suggested_session_name: Optional[str] = Field(None, description="Auto-generated session name for first message")
     timestamp: str
     metadata: Optional[Dict[str, Any]] = Field(default_factory=dict, description="Processing metadata")
 
@@ -72,22 +120,35 @@ async def stream_chat_response(
     message: str,
     model_name: Optional[str] = None,
     max_days_back: int = 30,
-    conversation_history: Optional[list] = None
+    conversation_history: Optional[list] = None,
+    session_id: Optional[str] = None  # Add session_id parameter
 ) -> AsyncIterator[str]:
     """Generate streaming chat response."""
     try:
+        # Load user preferences for timeout
+        from app.db.models.chat_session import UserChatPreferences
+        from sqlalchemy import select
+
+        prefs_stmt = select(UserChatPreferences).where(UserChatPreferences.user_id == user_id)
+        prefs_result = await db.execute(prefs_stmt)
+        user_prefs = prefs_result.scalar_one_or_none()
+        timeout_ms = user_prefs.response_timeout if user_prefs else 120000
+
+        logger.info(f"[STREAMING] Using user timeout: {timeout_ms}ms ({timeout_ms/1000}s)")
+
         # First, send a status update about email search
         yield f"data: {json.dumps({'type': 'status', 'message': 'Searching relevant emails...'})}\n\n"
         await asyncio.sleep(0.1)
 
-        # Use the enhanced service to process the chat (this could be made streaming too)
+        # Use the enhanced service to process the chat with user's timeout
         response = await enhanced_email_chat_service.chat_with_email_context(
             db=db,
             user_id=user_id,
             message=message,
             model_name=model_name,
             max_days_back=max_days_back,
-            conversation_history=conversation_history
+            conversation_history=conversation_history,
+            timeout_ms=timeout_ms  # Pass user's timeout preference
         )
 
         # Send the email search results first
@@ -111,6 +172,99 @@ async def stream_chat_response(
             yield f"data: {json.dumps({'type': 'response_chunk', 'text': word + ' ', 'accumulated': accumulated_text.strip()})}\n\n"
             await asyncio.sleep(0.05)  # Small delay to simulate streaming
 
+        # Save session and messages if auto-save is enabled
+        from app.db.models.chat_session import ChatSession, ChatMessage, MessageType
+        from uuid import UUID, uuid4
+
+        actual_session_id = session_id
+        is_first_message = not session_id and (not conversation_history or len(conversation_history) == 0)
+
+        logger.info(f"[STREAMING] First message check: session_id={session_id}, is_first={is_first_message}")
+
+        if user_prefs and user_prefs.auto_save_conversations:
+            try:
+                # Get or create session
+                if session_id:
+                    session_stmt = select(ChatSession).where(
+                        ChatSession.id == UUID(session_id),
+                        ChatSession.user_id == user_id
+                    )
+                    session_result = await db.execute(session_stmt)
+                    session = session_result.scalar_one_or_none()
+
+                    if not session:
+                        session = ChatSession(
+                            id=UUID(session_id),
+                            user_id=user_id,
+                            title="New Chat",
+                            selected_model=model_name or "qwen3:30b-a3b-thinking-2507-q8_0",
+                            message_count=0
+                        )
+                        db.add(session)
+                        await db.flush()
+                else:
+                    session = ChatSession(
+                        id=uuid4(),
+                        user_id=user_id,
+                        title="New Chat",
+                        selected_model=model_name or "qwen3:30b-a3b-thinking-2507-q8_0",
+                        message_count=0
+                    )
+                    db.add(session)
+                    await db.flush()
+                    actual_session_id = str(session.id)
+
+                # Save user message
+                user_message = ChatMessage(
+                    id=uuid4(),
+                    session_id=session.id,
+                    message_type=MessageType.USER.value,
+                    content=message,
+                    sequence_number=session.message_count
+                )
+                db.add(user_message)
+                session.message_count += 1
+
+                # Save assistant message
+                assistant_message = ChatMessage(
+                    id=uuid4(),
+                    session_id=session.id,
+                    message_type=MessageType.ASSISTANT.value,
+                    content=response["response"],
+                    sequence_number=session.message_count,
+                    model_used=model_name,
+                    rich_content={
+                        "email_references": response["email_references"],
+                        "suggested_actions": response["suggested_actions"]
+                    }
+                )
+                db.add(assistant_message)
+                session.message_count += 1
+
+                session.last_activity = datetime.now()
+                await db.commit()
+
+                logger.info(f"[STREAMING] Saved chat session {session.id}")
+
+                # Generate session name for first message
+                if is_first_message and actual_session_id:
+                    logger.info(f"[STREAMING] Generating session name for {actual_session_id}")
+                    try:
+                        # Generate name asynchronously (non-blocking for user)
+                        combined_context = f"User: {message}\n\nAssistant: {response['response'][:200]}"
+                        session_name = await chat_session_naming_service.generate_session_name(combined_context)
+
+                        # Update session title
+                        session.title = session_name
+                        await db.commit()
+                        logger.info(f"[STREAMING] Updated session title to: '{session_name}'")
+                    except Exception as e:
+                        logger.error(f"[STREAMING] Failed to generate session name: {e}")
+
+            except Exception as e:
+                logger.error(f"[STREAMING] Failed to save chat session: {e}")
+                await db.rollback()
+
         # Send final metadata
         final_data = {
             'type': 'complete',
@@ -119,7 +273,8 @@ async def stream_chat_response(
                 'tasks_created': response["tasks_created"],
                 'task_suggestions': response.get("task_suggestions", []),
                 'metadata': response["metadata"],
-                'timestamp': datetime.now().isoformat()
+                'timestamp': datetime.now().isoformat(),
+                'session_id': actual_session_id  # Include session_id in response
             }
         }
         yield f"data: {json.dumps(final_data)}\n\n"
@@ -132,6 +287,7 @@ async def stream_chat_response(
 @router.post("/chat")
 async def chat_with_emails(
     request: EmailChatRequest,
+    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db_session)
 ):
@@ -153,7 +309,8 @@ async def chat_with_emails(
                     message=request.message,
                     model_name=request.model_name,
                     max_days_back=request.max_days_back,
-                    conversation_history=request.conversation_history
+                    conversation_history=request.conversation_history,
+                    session_id=request.session_id  # Pass session_id for persistence
                 ),
                 media_type="text/event-stream",
                 headers={
@@ -163,6 +320,20 @@ async def chat_with_emails(
                 }
             )
 
+        # Load user preferences for timeout and other settings
+        from app.db.models.chat_session import UserChatPreferences, ChatSession, ChatMessage, MessageType
+        from sqlalchemy import select
+        from uuid import UUID, uuid4
+
+        logger.info(f"Loading user preferences for user_id={current_user.id}")
+        prefs_stmt = select(UserChatPreferences).where(UserChatPreferences.user_id == current_user.id)
+        prefs_result = await db.execute(prefs_stmt)
+        user_prefs = prefs_result.scalar_one_or_none()
+
+        # Get timeout from user preferences (default to 2 minutes if not set)
+        timeout_ms = user_prefs.response_timeout if user_prefs else 120000
+        logger.info(f"✓ Using user timeout preference: {timeout_ms}ms ({timeout_ms/1000}s) from database")
+
         # Non-streaming response (original behavior)
         response = await enhanced_email_chat_service.chat_with_email_context(
             db=db,
@@ -170,8 +341,118 @@ async def chat_with_emails(
             message=request.message,
             model_name=request.model_name,
             max_days_back=request.max_days_back,
-            conversation_history=request.conversation_history
+            conversation_history=request.conversation_history,
+            timeout_ms=timeout_ms  # Pass user's timeout preference
         )
+
+        # Detect if this is the first message (for background session naming)
+        # Check if session_id is None AND (conversation_history is None or empty list)
+        is_first_message = (
+            not request.session_id and
+            (not request.conversation_history or len(request.conversation_history) == 0)
+        )
+        logger.info(f"First message detection: session_id={request.session_id}, "
+                   f"conv_history_len={len(request.conversation_history) if request.conversation_history else 0}, "
+                   f"is_first={is_first_message}")
+
+        # If auto-save is enabled, persist the session and messages
+        actual_session_id = request.session_id
+        if user_prefs and user_prefs.auto_save_conversations:
+            try:
+                # Get or create session
+                if request.session_id:
+                    # Try to load existing session
+                    session_stmt = select(ChatSession).where(
+                        ChatSession.id == UUID(request.session_id),
+                        ChatSession.user_id == current_user.id
+                    )
+                    session_result = await db.execute(session_stmt)
+                    session = session_result.scalar_one_or_none()
+
+                    if not session:
+                        # Session doesn't exist, create it with temporary title
+                        session = ChatSession(
+                            id=UUID(request.session_id),
+                            user_id=current_user.id,
+                            title="New Chat",  # Will be updated by background task
+                            selected_model=request.model_name or "qwen3:30b-a3b-thinking-2507-q8_0",
+                            message_count=0
+                        )
+                        db.add(session)
+                        await db.flush()
+                else:
+                    # Create new session with temporary title
+                    session = ChatSession(
+                        id=uuid4(),
+                        user_id=current_user.id,
+                        title="New Chat",  # Will be updated by background task
+                        selected_model=request.model_name or "qwen3:30b-a3b-thinking-2507-q8_0",
+                        message_count=0
+                    )
+                    db.add(session)
+                    await db.flush()
+                    actual_session_id = str(session.id)
+
+                # Save user message
+                user_message = ChatMessage(
+                    id=uuid4(),
+                    session_id=session.id,
+                    message_type=MessageType.USER.value,
+                    content=request.message,
+                    sequence_number=session.message_count,
+                    message_metadata=request.context or {}
+                )
+                db.add(user_message)
+                session.message_count += 1
+
+                # Save assistant response
+                assistant_message = ChatMessage(
+                    id=uuid4(),
+                    session_id=session.id,
+                    message_type=MessageType.ASSISTANT.value,
+                    content=response["response"],
+                    sequence_number=session.message_count,
+                    model_used=request.model_name or "qwen3:30b-a3b-thinking-2507-q8_0",
+                    message_metadata={
+                        "email_references": response["email_references"],
+                        "task_suggestions": response.get("task_suggestions", []),
+                        "tasks_created": response["tasks_created"],
+                        "thinking_content": response.get("thinking_content", []),
+                        **response["metadata"]
+                    },
+                    rich_content={
+                        "email_references": response["email_references"],
+                        "suggested_actions": response["suggested_actions"]
+                    }
+                )
+                db.add(assistant_message)
+                session.message_count += 1
+
+                # Update session activity
+                session.last_activity = datetime.now()
+
+                await db.commit()
+                logger.info(f"Saved chat messages to session {session.id}")
+
+                # Schedule background task to generate and update session name
+                # Only for first message to avoid regenerating names
+                logger.info(f"Checking background naming: is_first={is_first_message}, session_id={actual_session_id}")
+                if is_first_message and actual_session_id:
+                    background_tasks.add_task(
+                        generate_and_update_session_name,
+                        session_id=actual_session_id,
+                        user_message=request.message,
+                        assistant_response=response["response"],
+                        user_id=current_user.id
+                    )
+                    logger.info(f"✓ Scheduled background session naming for session {actual_session_id}")
+                else:
+                    logger.info(f"✗ Skipping background naming: is_first={is_first_message}, session_id={actual_session_id}")
+
+            except Exception as e:
+                logger.error(f"Failed to save chat session: {e}")
+                await db.rollback()
+                # Non-critical, continue without saving
 
         # Convert to API response format
         api_response = EmailChatResponseModel(
@@ -184,8 +465,12 @@ async def chat_with_emails(
             tasks_created=response["tasks_created"],
             task_suggestions=response.get("task_suggestions", []),
             thinking_content=response.get("thinking_content", []),
+            suggested_session_name=None,  # Session name is generated in background task
             timestamp=datetime.now().isoformat(),
-            metadata=response["metadata"]
+            metadata={
+                **response["metadata"],
+                "session_id": actual_session_id  # Include session ID for frontend
+            }
         )
 
         logger.info(f"Enhanced email chat processed for user {current_user.id}: {request.message[:50]}...")
@@ -530,3 +815,78 @@ async def get_email_chat_examples():
         ],
         "timestamp": datetime.now().isoformat()
     }
+
+
+@router.post("/chat/stream-agentic")
+async def stream_agentic_chat(
+    request: EmailChatRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db_session)
+):
+    """
+    Stream chat responses with visible chain-of-thought reasoning.
+
+    This endpoint uses the agentic reasoning service to perform multi-step
+    reasoning with tool calling, streaming each step to the client as it happens.
+
+    The response includes:
+    - Planning steps showing the AI's reasoning
+    - Tool calls and their results
+    - Analysis of gathered information
+    - Final comprehensive answer
+
+    Response format (SSE):
+    - Each event is sent as "data: {json}\n\n"
+    - Step types: planning, tool_call, analysis, synthesis, final_answer, error
+    - Final event has type: "complete"
+    """
+
+    async def generate_reasoning_stream():
+        """Generator for SSE streaming of reasoning steps"""
+        try:
+            # Load user preferences for timeout
+            from app.db.models.chat_session import UserChatPreferences
+            from sqlalchemy import select
+
+            prefs_stmt = select(UserChatPreferences).where(UserChatPreferences.user_id == current_user.id)
+            prefs_result = await db.execute(prefs_stmt)
+            user_prefs = prefs_result.scalar_one_or_none()
+            timeout_ms = user_prefs.response_timeout if user_prefs else 120000
+
+            logger.info(f"[AGENTIC] Starting chain-of-thought reasoning for user {current_user.id}")
+
+            # Stream reasoning steps
+            async for step in agentic_reasoning_service.reason_and_respond(
+                db=db,
+                user_id=current_user.id,
+                user_query=request.message,
+                model_name=request.model_name or "qwen3:30b-a3b-thinking-2507-q8_0",
+                conversation_history=request.conversation_history,
+                timeout_ms=timeout_ms
+            ):
+                # Format as SSE
+                step_data = step.to_dict()
+                yield f"data: {json.dumps(step_data)}\n\n"
+
+            # Send completion signal
+            yield f"data: {json.dumps({'type': 'complete'})}\n\n"
+            logger.info(f"[AGENTIC] Completed chain-of-thought reasoning")
+
+        except Exception as e:
+            logger.error(f"[AGENTIC] Streaming error: {e}", exc_info=True)
+            error_data = {
+                "type": "error",
+                "error": str(e),
+                "step_type": "error"
+            }
+            yield f"data: {json.dumps(error_data)}\n\n"
+
+    return StreamingResponse(
+        generate_reasoning_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no"
+        }
+    )

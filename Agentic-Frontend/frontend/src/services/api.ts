@@ -465,7 +465,8 @@ class ApiClient {
   }
 
   async getChatModels(): Promise<ChatModelsResponse> {
-    const response = await this.client.get('/api/v1/chat/models');
+    // Use email-assistant endpoint which filters out embedding models
+    const response = await this.client.get('/api/v1/email-assistant/models');
     return response.data;
   }
 
@@ -515,7 +516,8 @@ class ApiClient {
 
   // Dynamic Model Selection System (Phase 1.3)
   async getAvailableModels() {
-    const response = await this.client.get('/api/v1/models/available');
+    // Use email-assistant endpoint which filters out embedding models
+    const response = await this.client.get('/api/v1/email-assistant/models');
     return response.data;
   }
 
@@ -2094,6 +2096,27 @@ class ApiClient {
 
   async getEmailChatSuggestions() {
     const response = await this.client.get('/api/v1/email/chat/suggestions');
+    return response.data;
+  }
+
+  // User Chat Preferences (Assistant Settings)
+  async getUserChatPreferences() {
+    const response = await this.client.get('/api/v1/email-assistant/preferences');
+    return response.data;
+  }
+
+  async updateUserChatPreferences(preferences: {
+    default_model?: string;
+    enable_streaming?: boolean;
+    show_thinking?: boolean;
+    auto_save_conversations?: boolean;
+    connection_timeout?: number;
+    response_timeout?: number;
+    max_retries?: number;
+    auto_reconnect?: boolean;
+    theme?: string;
+  }) {
+    const response = await this.client.put('/api/v1/email-assistant/preferences', preferences);
     return response.data;
   }
 

@@ -38,7 +38,9 @@ class EmailEmbeddingService:
         self.logger = get_logger("email_embedding_service")
         self.batch_size = settings.embedding_batch_size  # Process emails in batches
         self.concurrency = settings.embedding_concurrency  # Number of concurrent embedding operations
-        self.max_content_length = 8000  # Max chars for embedding (to fit token limits)
+        # Max chars for embedding - set conservatively for smallest model (embeddinggemma: 2048 tokens)
+        # Using ~3.5 chars per token: 2048 tokens ≈ 7000 chars, use 6000 for safety margin
+        self.max_content_length = 6000
 
     async def process_pending_emails(
         self,
