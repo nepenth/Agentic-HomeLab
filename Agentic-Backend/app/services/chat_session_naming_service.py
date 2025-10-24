@@ -32,20 +32,21 @@ class ChatSessionNamingService:
         """
         try:
             # Create a prompt for the naming model
-            prompt = f"""Based on this user message, create a very short, concise title (maximum 6 words) for this conversation.
+            prompt = f"""Create a very short, concise title (maximum 6 words) for this conversation based on the user message.
 
 User message: "{initial_message}"
 
 Requirements:
 - Maximum 6 words
-- No quotes or punctuation at start/end
+- No quotes, punctuation, or extra text
 - Descriptive and specific
 - Use title case
+- Just the title, nothing else
 
 Examples:
-- "What are my recent emails?" → "Recent Email Summary"
-- "Find tracking numbers from Amazon" → "Amazon Tracking Numbers"
-- "Help me organize my inbox" → "Inbox Organization Help"
+"What are my recent emails?" → Recent Email Summary
+"Find tracking numbers from Amazon" → Amazon Tracking Numbers
+"Help me organize my inbox" → Inbox Organization Help
 
 Title:"""
 
@@ -97,6 +98,26 @@ Title:"""
         # Remove "Title:" prefix if present
         if name.lower().startswith("title:"):
             name = name[6:].strip()
+
+        # Remove common LLM prefixes
+        prefixes_to_remove = [
+            "here's a title for the conversation:",
+            "conversation title:",
+            "suggested title:",
+            "title suggestion:",
+            "session title:",
+            "chat title:",
+            "topic:",
+            "subject:",
+            "here's a title:",
+            "title:"
+        ]
+
+        name_lower = name.lower()
+        for prefix in prefixes_to_remove:
+            if name_lower.startswith(prefix):
+                name = name[len(prefix):].strip()
+                break
 
         # Remove trailing punctuation
         while name and name[-1] in '.!?,;:':

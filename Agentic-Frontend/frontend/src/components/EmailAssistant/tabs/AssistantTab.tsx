@@ -40,6 +40,8 @@ import {
   CheckCircle as CheckCircleIcon,
 } from '@mui/icons-material';
 import { useAssistant } from '../../../hooks/useAssistant';
+import { useDispatch } from 'react-redux';
+import { addMessage, updateLastMessage } from '../../../store/assistantSlice';
 import ModelSelector from '../ModelSelector';
 import { formatDistanceToNow } from 'date-fns';
 import { ConnectionStatusIndicator, useConnectionQuality } from '../ConnectionStatus';
@@ -52,6 +54,7 @@ interface AssistantTabProps {
 
 export const AssistantTab: React.FC<AssistantTabProps> = ({ onNavigateToEmail }) => {
   const theme = useTheme();
+  const dispatch = useDispatch();
   const {
     currentSession,
     sessions,
@@ -150,6 +153,27 @@ export const AssistantTab: React.FC<AssistantTabProps> = ({ onNavigateToEmail })
     setActiveReasoningMessageId(messageId);
     setReasoningSteps(new Map(reasoningSteps).set(messageId, []));
 
+    // Add user message to chat
+    const userChatMessage = {
+      id: messageId,
+      role: 'user' as const,
+      content: userMessage,
+      timestamp: new Date().toISOString(),
+    };
+    dispatch(addMessage(userChatMessage));
+
+    // Add placeholder assistant message for live reasoning display
+    const assistantPlaceholderMessage = {
+      id: `assistant-${messageId}`,
+      role: 'assistant' as const,
+      content: '',
+      timestamp: new Date().toISOString(),
+      metadata: {
+        thinking_content: 'Chain-of-thought reasoning in progress...',
+      },
+    };
+    dispatch(addMessage(assistantPlaceholderMessage));
+
     console.log('[AGENTIC] Starting chain-of-thought request');
 
     try {
@@ -247,6 +271,39 @@ export const AssistantTab: React.FC<AssistantTabProps> = ({ onNavigateToEmail })
               // Backend sends step_type (not type)
               if (data.step_type === 'complete') {
                 console.log('[AGENTIC] Stream complete');
+
+                // Update the placeholder assistant message with final content
+                const finalContent = data.content || 'Chain-of-thought reasoning completed.';
+                const finalSteps = reasoningSteps.get(messageId) || [];
+                const finalThinkingContent = formatReasoningStepsForDisplay(finalSteps);
+
+                dispatch(updateLastMessage({
+                  content: finalContent,
+                  metadata: {
+                    thinking_content: finalThinkingContent,
+                  },
+                }));
+
+                setActiveReasoningMessageId(null);
+                break;
+              }
+
+              // Handle final_answer step type (new format)
+              if (data.step_type === 'final_answer') {
+                console.log('[AGENTIC] Final answer received');
+
+                // Update the assistant message with the final answer
+                const finalContent = data.content || 'Final answer provided.';
+                const finalSteps = reasoningSteps.get(messageId) || [];
+                const finalThinkingContent = formatReasoningStepsForDisplay(finalSteps);
+
+                dispatch(updateLastMessage({
+                  content: finalContent,
+                  metadata: {
+                    thinking_content: finalThinkingContent,
+                  },
+                }));
+
                 setActiveReasoningMessageId(null);
                 break;
               }
@@ -257,13 +314,26 @@ export const AssistantTab: React.FC<AssistantTabProps> = ({ onNavigateToEmail })
                 break;
               }
 
-              // Add reasoning step
+              // Add reasoning step and update the assistant message content
               if (data.step_number !== undefined) {
                 console.log('[AGENTIC] Adding reasoning step:', data.step_number, data.step_type);
                 setReasoningSteps(prev => {
                   const steps = prev.get(messageId) || [];
-                  return new Map(prev).set(messageId, [...steps, data as ReasoningStep]);
+                  const newSteps = [...steps, data as ReasoningStep];
+                  return new Map(prev).set(messageId, newSteps);
                 });
+
+                // Update the assistant message with current reasoning steps
+                const currentSteps = reasoningSteps.get(messageId) || [];
+                const newSteps = [...currentSteps, data as ReasoningStep];
+                const thinkingContent = formatReasoningStepsForDisplay(newSteps);
+
+                dispatch(updateLastMessage({
+                  content: '',
+                  metadata: {
+                    thinking_content: thinkingContent,
+                  },
+                }));
               }
             } catch (parseError) {
               console.error('[AGENTIC] Failed to parse SSE data:', parseError, 'Line:', line);
@@ -276,6 +346,15 @@ export const AssistantTab: React.FC<AssistantTabProps> = ({ onNavigateToEmail })
 
     } catch (error) {
       console.error('Agentic message error:', error);
+
+      // Update the placeholder message with error
+      dispatch(updateLastMessage({
+        content: `Chain-of-thought reasoning failed: ${error instanceof Error ? error.message : 'Unknown error'}`,
+        metadata: {
+          thinking_content: `Error during reasoning: ${error instanceof Error ? error.message : 'Unknown error'}`,
+        },
+      }));
+
       setActiveReasoningMessageId(null);
     }
   };
@@ -341,6 +420,88 @@ export const AssistantTab: React.FC<AssistantTabProps> = ({ onNavigateToEmail })
     }
 
     return String(thinkingData);
+  };
+
+  const formatReasoningStepsForDisplay = (steps: ReasoningStep[]): string => {
+    return steps.map((step) => {
+      let content = `**Step ${step.step_number}:** ${step.description}\n\n`;
+
+      if (step.tool_call) {
+        content += `🔧 **Tool Call:** ${step.tool_call.tool}\n\n`;
+
+        // Format parameters based on tool type
+        if (step.tool_call.tool === 'search_emails') {
+          const params = step.tool_call.parameters;
+          content += `📧 **Searching emails** with query: "${params.query}"\n`;
+          if (params.days_back) content += `📅 **Time range:** Last ${params.days_back} days\n`;
+          if (params.max_results) content += `📊 **Max results:** ${params.max_results}\n`;
+        } else if (step.tool_call.tool === 'extract_entities') {
+          const params = step.tool_call.parameters;
+          content += `🔍 **Extracting entities** from ${params.email_ids?.length || 0} email(s)\n`;
+          if (params.entity_types) content += `🎯 **Entity types:** ${params.entity_types.join(', ')}\n`;
+        } else if (step.tool_call.tool === 'get_email_thread') {
+          const params = step.tool_call.parameters;
+          content += `📧 **Retrieving email thread** for email ID: ${params.email_id}\n`;
+          if (params.include_sent) content += `📤 **Including sent emails:** Yes\n`;
+        } else {
+          // Generic parameter display
+          content += `⚙️ **Parameters:**\n\`\`\`json\n${JSON.stringify(step.tool_call.parameters, null, 2)}\n\`\`\`\n\n`;
+        }
+        content += '\n';
+      }
+
+      if (step.tool_result) {
+        if (step.tool_result.success) {
+          content += `✅ **Success:** `;
+
+          if (step.tool_result.count !== undefined) {
+            content += `Found ${step.tool_result.count} item(s)\n\n`;
+          }
+
+          if (step.tool_result.emails && Array.isArray(step.tool_result.emails)) {
+            content += `📧 **Email Results:**\n`;
+            step.tool_result.emails.slice(0, 3).forEach((email: any, idx: number) => {
+              content += `${idx + 1}. **${email.subject}** from ${email.sender}\n`;
+              content += `   📅 ${new Date(email.received_at).toLocaleDateString()}\n`;
+              if (email.preview) {
+                content += `   💬 "${email.preview.substring(0, 100)}${email.preview.length > 100 ? '...' : ''}"\n`;
+              }
+              content += '\n';
+            });
+            if (step.tool_result.emails.length > 3) {
+              content += `... and ${step.tool_result.emails.length - 3} more emails\n\n`;
+            }
+          }
+
+          if (step.tool_result.entities && typeof step.tool_result.entities === 'object') {
+            const entityCount = Object.keys(step.tool_result.entities).length;
+            if (entityCount > 0) {
+              content += `🎯 **Extracted Entities:**\n`;
+              Object.entries(step.tool_result.entities).forEach(([type, values]) => {
+                if (Array.isArray(values) && values.length > 0) {
+                  content += `- **${type}:** ${values.join(', ')}\n`;
+                }
+              });
+              content += '\n';
+            } else {
+              content += `No entities found\n\n`;
+            }
+          }
+
+          if (step.tool_result.error) {
+            content += `❌ **Error:** ${step.tool_result.error}\n\n`;
+          }
+        } else {
+          content += `❌ **Failed:** ${step.tool_result.error || 'Unknown error'}\n\n`;
+        }
+      }
+
+      if (step.duration_ms) {
+        content += `⏱️ **Duration:** ${step.duration_ms}ms\n\n`;
+      }
+
+      return content;
+    }).join('---\n\n');
   };
 
   const getMessageAvatar = (role: string) => {
@@ -553,6 +714,9 @@ export const AssistantTab: React.FC<AssistantTabProps> = ({ onNavigateToEmail })
                                 <ReasoningChain
                                   steps={reasoningSteps.get(message.id) || []}
                                   isActive={activeReasoningMessageId === message.id}
+                                  messageId={message.id}
+                                  expandedThinking={expandedThinking}
+                                  onToggleThinking={toggleThinking}
                                 />
                               </Box>
                             )}
@@ -907,9 +1071,24 @@ export const AssistantTab: React.FC<AssistantTabProps> = ({ onNavigateToEmail })
                   <Typography variant="caption" sx={{ display: 'block', mb: 0.5 }}>
                     Model: {currentSession.model_name}
                   </Typography>
-                  <Typography variant="caption" sx={{ display: 'block' }}>
+                  <Typography variant="caption" sx={{ display: 'block', mb: 0.5 }}>
                     Created: {new Date(currentSession.created_at).toLocaleDateString()}
                   </Typography>
+                  <Typography variant="caption" sx={{ display: 'block', mb: 0.5 }}>
+                    Updated: {new Date(currentSession.updated_at).toLocaleDateString()}
+                  </Typography>
+                  <Typography variant="caption" sx={{ display: 'block' }}>
+                    Status: {currentSession.is_active ? 'Active' : 'Inactive'}
+                  </Typography>
+                  {/* Performance metrics placeholder */}
+                  <Box sx={{ mt: 1, pt: 1, borderTop: `1px solid ${alpha(theme.palette.divider, 0.3)}` }}>
+                    <Typography variant="caption" sx={{ display: 'block', fontWeight: 600, mb: 0.5 }}>
+                      Performance:
+                    </Typography>
+                    <Typography variant="caption" sx={{ display: 'block', color: theme.palette.text.secondary }}>
+                      Tokens/s: -- | Total tokens: --
+                    </Typography>
+                  </Box>
                 </Box>
               )}
             </Box>

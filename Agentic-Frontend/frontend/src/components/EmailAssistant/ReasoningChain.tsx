@@ -45,6 +45,9 @@ interface ReasoningChainProps {
   isActive: boolean;
   autoCollapse?: boolean;
   showPerformanceMetrics?: boolean;
+  messageId?: string;
+  expandedThinking?: Set<string>;
+  onToggleThinking?: (messageId: string) => void;
 }
 
 export const ReasoningChain: React.FC<ReasoningChainProps> = ({
@@ -52,20 +55,24 @@ export const ReasoningChain: React.FC<ReasoningChainProps> = ({
   isActive,
   autoCollapse = true,
   showPerformanceMetrics = true,
+  messageId,
+  expandedThinking,
+  onToggleThinking,
 }) => {
   const [expanded, setExpanded] = useState(true);
+  const [userExpanded, setUserExpanded] = useState(false);
   const [copiedSnackbar, setCopiedSnackbar] = useState(false);
   const [highlightedStep, setHighlightedStep] = useState<number | null>(null);
 
-  // Auto-collapse after completion if enabled
+  // Auto-collapse after completion if enabled, but only if not explicitly expanded by user
   useEffect(() => {
-    if (!isActive && steps.length > 0 && autoCollapse) {
+    if (!isActive && steps.length > 0 && autoCollapse && !userExpanded) {
       const timer = setTimeout(() => {
         setExpanded(false);
       }, 3000); // Collapse 3 seconds after completion
       return () => clearTimeout(timer);
     }
-  }, [isActive, steps.length, autoCollapse]);
+  }, [isActive, steps.length, autoCollapse, userExpanded]);
 
   // Highlight newest step with animation
   useEffect(() => {
@@ -214,7 +221,10 @@ export const ReasoningChain: React.FC<ReasoningChainProps> = ({
         >
           {/* Header */}
           <Box
-            onClick={() => setExpanded(!expanded)}
+            onClick={() => {
+              setExpanded(!expanded);
+              setUserExpanded(!expanded); // Track that user manually expanded/collapsed
+            }}
             sx={{
               display: 'flex',
               alignItems: 'center',

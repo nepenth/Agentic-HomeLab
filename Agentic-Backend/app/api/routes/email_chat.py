@@ -19,7 +19,7 @@ from app.api.dependencies import get_db_session, get_current_user
 from app.services.enhanced_email_chat_service import enhanced_email_chat_service
 from app.services.email_chat_service import email_chat_service, EmailChatResponse
 from app.services.chat_session_naming_service import chat_session_naming_service
-from app.services.agentic_reasoning_service import agentic_reasoning_service
+from app.services.agentic_reasoning_service import agentic_reasoning_service, ReasoningStepType
 from app.utils.logging import get_logger
 from app.db.models.user import User
 from fastapi import BackgroundTasks
@@ -820,6 +820,7 @@ async def get_email_chat_examples():
 @router.post("/chat/stream-agentic")
 async def stream_agentic_chat(
     request: EmailChatRequest,
+    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db_session)
 ):
@@ -844,9 +845,10 @@ async def stream_agentic_chat(
     async def generate_reasoning_stream():
         """Generator for SSE streaming of reasoning steps"""
         try:
-            # Load user preferences for timeout
-            from app.db.models.chat_session import UserChatPreferences
+            # Load user preferences for timeout and auto-save settings
+            from app.db.models.chat_session import UserChatPreferences, ChatSession, ChatMessage, MessageType
             from sqlalchemy import select
+            from uuid import UUID, uuid4
 
             prefs_stmt = select(UserChatPreferences).where(UserChatPreferences.user_id == current_user.id)
             prefs_result = await db.execute(prefs_stmt)
@@ -854,6 +856,11 @@ async def stream_agentic_chat(
             timeout_ms = user_prefs.response_timeout if user_prefs else 120000
 
             logger.info(f"[AGENTIC] Starting chain-of-thought reasoning for user {current_user.id}")
+
+            # Initialize session variables for auto-saving
+            actual_session_id = request.session_id
+            final_answer_content = ""
+            reasoning_steps = []
 
             # Stream reasoning steps
             async for step in agentic_reasoning_service.reason_and_respond(
@@ -864,12 +871,115 @@ async def stream_agentic_chat(
                 conversation_history=request.conversation_history,
                 timeout_ms=timeout_ms
             ):
+                # Collect reasoning steps for session saving
+                reasoning_steps.append(step.to_dict())
+
+                # Capture final answer content
+                if step.step_type == ReasoningStepType.FINAL_ANSWER:
+                    final_answer_content = step.content
+
                 # Format as SSE
                 step_data = step.to_dict()
                 yield f"data: {json.dumps(step_data)}\n\n"
 
-            # Send completion signal
-            yield f"data: {json.dumps({'type': 'complete'})}\n\n"
+            # Auto-save session and messages if enabled
+            if user_prefs and user_prefs.auto_save_conversations:
+                try:
+                    # Get or create session
+                    if request.session_id:
+                        session_stmt = select(ChatSession).where(
+                            ChatSession.id == UUID(request.session_id),
+                            ChatSession.user_id == current_user.id
+                        )
+                        session_result = await db.execute(session_stmt)
+                        session = session_result.scalar_one_or_none()
+
+                        if not session:
+                            session = ChatSession(
+                                id=UUID(request.session_id),
+                                user_id=current_user.id,
+                                title="New Chat",
+                                selected_model=request.model_name or "qwen3:30b-a3b-thinking-2507-q8_0",
+                                message_count=0
+                            )
+                            db.add(session)
+                            await db.flush()
+                    else:
+                        session = ChatSession(
+                            id=uuid4(),
+                            user_id=current_user.id,
+                            title="New Chat",
+                            selected_model=request.model_name or "qwen3:30b-a3b-thinking-2507-q8_0",
+                            message_count=0
+                        )
+                        db.add(session)
+                        await db.flush()
+                        actual_session_id = str(session.id)
+
+                    # Save user message
+                    user_message = ChatMessage(
+                        id=uuid4(),
+                        session_id=session.id,
+                        message_type=MessageType.USER.value,
+                        content=request.message,
+                        sequence_number=session.message_count,
+                        message_metadata=request.context or {}
+                    )
+                    db.add(user_message)
+                    session.message_count += 1
+
+                    # Save assistant message with reasoning steps
+                    assistant_message = ChatMessage(
+                        id=uuid4(),
+                        session_id=session.id,
+                        message_type=MessageType.ASSISTANT.value,
+                        content=final_answer_content,
+                        sequence_number=session.message_count,
+                        model_used=request.model_name or "qwen3:30b-a3b-thinking-2507-q8_0",
+                        message_metadata={
+                            "reasoning_steps": reasoning_steps,
+                            "agentic_mode": True,
+                            **(request.context or {})
+                        },
+                        rich_content={
+                            "reasoning_steps": reasoning_steps,
+                            "agentic_mode": True
+                        }
+                    )
+                    db.add(assistant_message)
+                    session.message_count += 1
+
+                    session.last_activity = datetime.now()
+                    await db.commit()
+
+                    logger.info(f"[AGENTIC] Saved agentic chat session {session.id}")
+
+                    # Generate session name for first message
+                    is_first_message = (
+                        not request.session_id and
+                        (not request.conversation_history or len(request.conversation_history) == 0)
+                    )
+
+                    if is_first_message and actual_session_id:
+                        logger.info(f"[AGENTIC] Scheduling session name generation for {actual_session_id}")
+                        background_tasks.add_task(
+                            generate_and_update_session_name,
+                            session_id=actual_session_id,
+                            user_message=request.message,
+                            assistant_response=final_answer_content,
+                            user_id=current_user.id
+                        )
+
+                except Exception as e:
+                    logger.error(f"[AGENTIC] Failed to save agentic chat session: {e}")
+                    await db.rollback()
+
+            # Send completion signal with session info
+            completion_data = {'type': 'complete'}
+            if actual_session_id:
+                completion_data['session_id'] = actual_session_id
+
+            yield f"data: {json.dumps(completion_data)}\n\n"
             logger.info(f"[AGENTIC] Completed chain-of-thought reasoning")
 
         except Exception as e:
