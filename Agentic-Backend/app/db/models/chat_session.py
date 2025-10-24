@@ -173,6 +173,13 @@ class UserChatPreferences(Base):
     auto_save_conversations = Column(Boolean, default=True)
     enable_streaming = Column(Boolean, default=True)
     max_conversation_history = Column(Integer, default=100)  # Max messages per session
+    show_thinking = Column(Boolean, default=True)  # Show model thinking process
+
+    # Connection and retry settings
+    connection_timeout = Column(Integer, default=30000)  # Connection timeout in milliseconds
+    response_timeout = Column(Integer, default=120000)  # Response timeout in milliseconds
+    max_retries = Column(Integer, default=3)  # Maximum retry attempts
+    auto_reconnect = Column(Boolean, default=True)  # Auto-reconnect on disconnect
 
     # Personalization data
     frequent_models = Column(JSONB, default=list)  # List of frequently used models
@@ -209,6 +216,11 @@ class UserChatPreferences(Base):
             "auto_save_conversations": self.auto_save_conversations,
             "enable_streaming": self.enable_streaming,
             "max_conversation_history": self.max_conversation_history,
+            "show_thinking": self.show_thinking,
+            "connection_timeout": self.connection_timeout,
+            "response_timeout": self.response_timeout,
+            "max_retries": self.max_retries,
+            "auto_reconnect": self.auto_reconnect,
             "frequent_models": self.frequent_models,
             "custom_prompts": self.custom_prompts,
             "quick_actions": self.quick_actions,

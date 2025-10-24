@@ -2290,7 +2290,7 @@ async def get_folder_sync_status(
 
             folder_status.append({
                 "folder_name": state.folder_name,
-                "last_synced_at": state.last_synced_at.isoformat() if state.last_sync_at else None,
+                "last_synced_at": state.last_sync_at.isoformat() if state.last_sync_at else None,
                 "last_synced_uid": state.last_synced_uid,
                 "uid_validity": state.uid_validity,
                 "highest_mod_seq": state.highest_mod_seq,

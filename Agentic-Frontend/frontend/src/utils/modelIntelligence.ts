@@ -234,6 +234,19 @@ const MODEL_DATABASE: Record<string, Partial<ModelInfo>> = {
     limitations: ['Limited general capabilities', 'Older architecture', 'Specialized focus only']
   },
 
+  // Granite Models - IBM Research
+  'granite4': {
+    displayName: 'Granite 4',
+    description: 'IBM\'s latest enterprise-grade language model with strong reasoning and code capabilities.',
+    category: 'general',
+    recommended: true,
+    capabilities: ['conversation', 'reasoning', 'coding', 'analysis', 'enterprise-tasks', 'instruction-following'],
+    performance: { reasoning: 8, coding: 8, speed: 7, efficiency: 8 },
+    useCases: ['Enterprise applications', 'Code generation', 'Complex reasoning', 'Business analysis'],
+    strengths: ['Enterprise focus', 'Strong coding', 'Reliable performance', 'Well-balanced'],
+    limitations: ['Newer model with less community testing']
+  },
+
   // General Purpose Models
   'llama3.3': {
     displayName: 'Llama 3.3',

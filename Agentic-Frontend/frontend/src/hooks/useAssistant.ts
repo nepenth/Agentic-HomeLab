@@ -327,9 +327,24 @@ export const useAssistant = () => {
             task_suggestions: response.data.task_suggestions,
             tasks_created: response.data.tasks_created,
             thinking_content: response.data.thinking_content,
+            suggested_session_name: response.data.suggested_session_name,
             ...response.data.metadata,
           },
         }));
+
+        // If we got a suggested session name and this is a new session, update the session title
+        if (response.data.suggested_session_name && currentSession) {
+          // Check if auto-save is enabled
+          const savedSettings = localStorage.getItem('assistantSettings');
+          const settings = savedSettings ? JSON.parse(savedSettings) : {};
+
+          if (settings.autoSaveSessions) {
+            dispatch(setCurrentSession({
+              ...currentSession,
+              title: response.data.suggested_session_name
+            }));
+          }
+        }
 
         return response.data;
       }

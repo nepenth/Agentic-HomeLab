@@ -67,6 +67,7 @@ const ModelSelector: React.FC<ModelSelectorProps> = ({
   const [webResearchEnabled, setWebResearchEnabled] = useState(false);
   const [detailsExpanded, setDetailsExpanded] = useState(false);
   const [autoCollapseTimer, setAutoCollapseTimer] = useState<NodeJS.Timeout | null>(null);
+  const [runtimeModelInfo, setRuntimeModelInfo] = useState<Map<string, any>>(new Map());
 
   // Fetch available models from chat endpoint which includes default model
   const {
@@ -88,11 +89,45 @@ const ModelSelector: React.FC<ModelSelectorProps> = ({
   // Hybrid model intelligence system
   const hybridIntelligence = HybridModelIntelligence.getInstance();
 
-  // Get current model info (enhanced if available, fallback to static)
+  // Fetch runtime data for all models on mount with rate limiting
+  useEffect(() => {
+    const loadRuntimeModelData = async () => {
+      if (!modelsData?.models) return;
+
+      const modelInfoMap = new Map();
+
+      // Rate limit: Process models sequentially with delay to avoid nginx rate limiting
+      // nginx is configured with: limit_req_zone rate=10r/s burst=20
+      // We'll use 150ms delay between requests to stay well under 10r/s (6.6r/s)
+      for (const modelName of modelsData.models) {
+        try {
+          // Get runtime data (without web research to keep it fast)
+          const info = await hybridIntelligence.getModelInfo(modelName, false);
+          modelInfoMap.set(modelName, info);
+
+          // Throttle requests to prevent nginx rate limiting (150ms = ~6.6 req/sec)
+          await new Promise(resolve => setTimeout(resolve, 150));
+        } catch (error) {
+          console.warn(`Failed to load runtime data for ${modelName}:`, error);
+        }
+      }
+      setRuntimeModelInfo(modelInfoMap);
+    };
+
+    loadRuntimeModelData();
+  }, [modelsData?.models, hybridIntelligence]);
+
+  // Get current model info (runtime if available, enhanced for selected, fallback to static)
   const getModelInfo = (modelName: string) => {
+    // If this is the selected model and we have enhanced info with web research, use it
     if (enhancedModelInfo && enhancedModelInfo.name === modelName) {
       return enhancedModelInfo;
     }
+    // Otherwise use runtime info (includes parameter_size from Ollama API)
+    if (runtimeModelInfo.has(modelName)) {
+      return runtimeModelInfo.get(modelName);
+    }
+    // Final fallback to static info
     return getEnhancedModelInfo(modelName);
   };
 
