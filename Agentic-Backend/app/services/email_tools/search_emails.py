@@ -54,6 +54,7 @@ class SearchEmailsTool(EmailTool):
     @classmethod
     async def execute(cls, db: AsyncSession, user_id: int, **kwargs) -> Dict[str, Any]:
         from app.services.email_embedding_service import email_embedding_service
+        from datetime import datetime, timedelta
 
         query = kwargs.get("query")
         days_back = kwargs.get("days_back", 30)
@@ -70,7 +71,11 @@ class SearchEmailsTool(EmailTool):
         logger.info(f"Searching emails for user {user_id}: query='{query}', days_back={days_back}, max_results={max_results}")
 
         try:
-            # Use semantic search
+            # Calculate date range for filtering
+            end_date = datetime.now()
+            start_date = end_date - timedelta(days=days_back)
+
+            # Use semantic search with date filtering
             similar_emails = await email_embedding_service.search_similar_emails(
                 db=db,
                 query_text=query,
@@ -79,6 +84,51 @@ class SearchEmailsTool(EmailTool):
                 similarity_threshold=0.3,
                 temporal_boost=0.2
             )
+
+            # Apply date filtering to results
+            filtered_emails = []
+            for email, score in similar_emails:
+                # Check if email has a received_at date and falls within range
+                if email.received_at:
+                    email_date = email.received_at
+                    # Handle timezone-naive datetimes
+                    if email_date.tzinfo is None:
+                        from datetime import timezone
+                        email_date = email_date.replace(tzinfo=timezone.utc)
+
+                    if start_date <= email_date <= end_date:
+                        filtered_emails.append((email, score))
+
+            # If we filtered out too many results, get more from the original search
+            if len(filtered_emails) < max_results and len(similar_emails) > len(filtered_emails):
+                additional_needed = max_results - len(filtered_emails)
+                # Get more results from the original search
+                more_emails = await email_embedding_service.search_similar_emails(
+                    db=db,
+                    query_text=query,
+                    user_id=user_id,
+                    limit=max_results * 2,  # Get more to filter
+                    similarity_threshold=0.3,
+                    temporal_boost=0.2
+                )
+
+                # Filter the additional results by date
+                for email, score in more_emails:
+                    if len(filtered_emails) >= max_results:
+                        break
+
+                    if email.received_at:
+                        email_date = email.received_at
+                        if email_date.tzinfo is None:
+                            from datetime import timezone
+                            email_date = email_date.replace(tzinfo=timezone.utc)
+
+                        if start_date <= email_date <= end_date:
+                            # Check if we already have this email
+                            if not any(existing_email.id == email.id for existing_email, _ in filtered_emails):
+                                filtered_emails.append((email, score))
+
+            similar_emails = filtered_emails
 
             # Filter by folder if specified
             if folder and folder != "all":
