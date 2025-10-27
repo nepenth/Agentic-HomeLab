@@ -14,7 +14,7 @@ import {
 } from '../store/emailSlice';
 import apiClient from '../services/api';
 
-export const useEmail = () => {
+export const useEmail = (pagination?: { currentPage: number; emailsPerPage: number }) => {
   const dispatch = useDispatch();
   const queryClient = useQueryClient();
 
@@ -53,13 +53,13 @@ export const useEmail = () => {
     }
   }, [accounts, selectedAccount, dispatch]);
 
-  // Fetch emails with filters
+  // Fetch emails with filters and pagination
   const { data: emailsData, isLoading: emailsLoading, refetch: refetchEmails } = useQuery({
-    queryKey: ['emails', filters, sort, selectedAccount?.account_id],
+    queryKey: ['emails', filters, sort, selectedAccount?.account_id, pagination?.currentPage || 1],
     queryFn: async () => {
       const params: any = {
-        limit: 100,
-        offset: 0,
+        limit: pagination?.emailsPerPage || 100,
+        offset: ((pagination?.currentPage || 1) - 1) * (pagination?.emailsPerPage || 100),
         sort_by: sort.field,
         sort_order: sort.direction,
       };

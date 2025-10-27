@@ -311,7 +311,9 @@ export const FolderSidebar: React.FC<FolderSidebarProps> = ({
       height: '100%',
       display: 'flex',
       flexDirection: 'column',
-      borderRight: `1px solid ${theme.palette.divider}`
+      borderRight: `1px solid ${theme.palette.divider}`,
+      backgroundColor: theme.palette.background.paper,
+      borderRadius: '8px 0 0 8px'
     }}>
       {/* Header */}
       <Box sx={{
@@ -319,7 +321,9 @@ export const FolderSidebar: React.FC<FolderSidebarProps> = ({
         display: 'flex',
         justifyContent: 'space-between',
         alignItems: 'center',
-        borderBottom: `1px solid ${theme.palette.divider}`
+        borderBottom: `1px solid ${theme.palette.divider}`,
+        backgroundColor: alpha(theme.palette.primary.main, 0.02),
+        borderRadius: '8px 0 0 0'
       }}>
         <Typography variant="subtitle2" sx={{ fontWeight: 700, fontSize: '0.875rem', textTransform: 'uppercase', letterSpacing: 0.5 }}>
           Folders

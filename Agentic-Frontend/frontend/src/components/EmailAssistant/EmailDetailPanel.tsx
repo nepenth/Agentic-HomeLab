@@ -31,7 +31,7 @@ import {
 import { decodeMimeHeader } from '../../utils/emailUtils';
 
 interface EmailDetail {
-  id: string;
+  email_id: string;
   subject: string;
   sender_email: string;
   sender_name: string;
@@ -96,6 +96,71 @@ export const EmailDetailPanel: React.FC<EmailDetailPanelProps> = ({
     return sanitized;
   };
 
+  // Enhanced email content rendering with better multipart support
+  const renderEmailContent = (email: EmailDetail) => {
+    // Priority: HTML > Text > Multipart alternatives
+    if (email.body_html) {
+      return (
+        <Box
+          dangerouslySetInnerHTML={{ __html: sanitizeEmailHtml(email.body_html) }}
+          sx={{
+            '& img': { maxWidth: '100%', height: 'auto' },
+            '& a': { color: theme.palette.primary.main, textDecoration: 'underline' },
+            '& table': { maxWidth: '100%', borderCollapse: 'collapse' },
+            '& td, & th': { padding: '8px' },
+            '& p': { margin: '0.5em 0' },
+            '& blockquote': {
+              borderLeft: `3px solid ${theme.palette.divider}`,
+              paddingLeft: theme.spacing(2),
+              marginLeft: 0,
+              color: theme.palette.text.secondary
+            },
+            '& pre': {
+              backgroundColor: alpha(theme.palette.background.default, 0.5),
+              padding: theme.spacing(1),
+              borderRadius: 1,
+              overflow: 'auto',
+              fontFamily: 'monospace',
+              fontSize: '0.875rem'
+            },
+            '& code': {
+              backgroundColor: alpha(theme.palette.background.default, 0.3),
+              padding: '2px 4px',
+              borderRadius: 0.5,
+              fontFamily: 'monospace',
+              fontSize: '0.875rem'
+            }
+          }}
+        />
+      );
+    }
+
+    // Fallback to text content with better formatting
+    if (email.body_text) {
+      return (
+        <Typography
+          variant="body2"
+          sx={{
+            whiteSpace: 'pre-wrap',
+            wordWrap: 'break-word',
+            lineHeight: 1.6,
+            '& > p': { margin: '0.5em 0' },
+            '& > br': { display: 'block', content: '""', marginTop: '0.5em' }
+          }}
+        >
+          {email.body_text}
+        </Typography>
+      );
+    }
+
+    // No content available
+    return (
+      <Typography variant="body2" sx={{ fontStyle: 'italic', color: 'text.secondary' }}>
+        (No content available)
+      </Typography>
+    );
+  };
+
   const formatRecipients = (recipients: Array<{ email: string; name?: string }>) => {
     return recipients.map((r, i) => (
       <span key={i}>
@@ -139,9 +204,20 @@ export const EmailDetailPanel: React.FC<EmailDetailPanelProps> = ({
   }
 
   return (
-    <Box sx={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
+    <Box sx={{
+      height: '100%',
+      display: 'flex',
+      flexDirection: 'column',
+      backgroundColor: theme.palette.background.paper,
+      borderRadius: '0 0 8px 8px'
+    }}>
       {/* Header */}
-      <Box sx={{ p: 2, borderBottom: `1px solid ${theme.palette.divider}` }}>
+      <Box sx={{
+        p: 2,
+        borderBottom: `1px solid ${theme.palette.divider}`,
+        backgroundColor: alpha(theme.palette.background.default, 0.5),
+        borderRadius: '0 0 8px 8px'
+      }}>
         {/* Action Bar */}
         <Box sx={{ display: 'flex', gap: 1, mb: 2 }}>
           <Tooltip title="Reply">
@@ -316,65 +392,68 @@ export const EmailDetailPanel: React.FC<EmailDetailPanelProps> = ({
             {email.attachments.length} Attachment{email.attachments.length > 1 ? 's' : ''}
           </Typography>
           <Box sx={{ display: 'flex', gap: 1, flexWrap: 'wrap' }}>
-            {email.attachments.map((attachment) => (
-              <Paper
-                key={attachment.id}
-                variant="outlined"
-                sx={{
-                  p: 1,
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: 1,
-                  minWidth: 200,
-                  '&:hover': {
-                    backgroundColor: alpha(theme.palette.primary.main, 0.04)
-                  }
-                }}
-              >
-                <AttachFileIcon fontSize="small" color="action" />
-                <Box sx={{ flex: 1, minWidth: 0 }}>
-                  <Typography variant="caption" sx={{ display: 'block', fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                    {attachment.filename}
-                  </Typography>
-                  <Typography variant="caption" color="text.secondary">
-                    {formatFileSize(attachment.size_bytes)}
-                  </Typography>
-                </Box>
-                <Tooltip title="Download">
-                  <IconButton size="small">
-                    <DownloadIcon fontSize="small" />
-                  </IconButton>
-                </Tooltip>
-              </Paper>
-            ))}
+            {email.attachments.map((attachment) => {
+              const isImage = attachment.content_type?.startsWith('image/');
+              const isPreviewable = isImage || attachment.content_type?.includes('pdf') || attachment.content_type?.includes('text');
+
+              return (
+                <Paper
+                  key={attachment.id}
+                  variant="outlined"
+                  sx={{
+                    p: 1,
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: 1,
+                    minWidth: 200,
+                    cursor: isPreviewable ? 'pointer' : 'default',
+                    '&:hover': {
+                      backgroundColor: alpha(theme.palette.primary.main, 0.04)
+                    }
+                  }}
+                  onClick={() => {
+                    if (isPreviewable) {
+                      // TODO: Implement preview functionality
+                      console.log('Preview attachment:', attachment.filename);
+                    }
+                  }}
+                >
+                  <AttachFileIcon fontSize="small" color="action" />
+                  <Box sx={{ flex: 1, minWidth: 0 }}>
+                    <Typography variant="caption" sx={{ display: 'block', fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      {attachment.filename}
+                    </Typography>
+                    <Typography variant="caption" color="text.secondary">
+                      {formatFileSize(attachment.size_bytes)}
+                      {isPreviewable && (
+                        <span style={{ marginLeft: '8px', color: theme.palette.primary.main }}>
+                          • Preview available
+                        </span>
+                      )}
+                    </Typography>
+                  </Box>
+                  <Tooltip title="Download">
+                    <IconButton
+                      size="small"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        // TODO: Implement download functionality
+                        console.log('Download attachment:', attachment.filename);
+                      }}
+                    >
+                      <DownloadIcon fontSize="small" />
+                    </IconButton>
+                  </Tooltip>
+                </Paper>
+              );
+            })}
           </Box>
         </Box>
       )}
 
       {/* Email Body */}
       <Box sx={{ flex: 1, overflow: 'auto', p: 3 }}>
-        {email.body_html ? (
-          <Box
-            dangerouslySetInnerHTML={{ __html: sanitizeEmailHtml(email.body_html) }}
-            sx={{
-              '& img': { maxWidth: '100%', height: 'auto' },
-              '& a': { color: theme.palette.primary.main, textDecoration: 'underline' },
-              '& table': { maxWidth: '100%', borderCollapse: 'collapse' },
-              '& td, & th': { padding: '8px' },
-              '& p': { margin: '0.5em 0' },
-              '& blockquote': {
-                borderLeft: `3px solid ${theme.palette.divider}`,
-                paddingLeft: theme.spacing(2),
-                marginLeft: 0,
-                color: theme.palette.text.secondary
-              }
-            }}
-          />
-        ) : (
-          <Typography variant="body2" sx={{ whiteSpace: 'pre-wrap' }}>
-            {email.body_text || '(No content)'}
-          </Typography>
-        )}
+        {renderEmailContent(email)}
       </Box>
     </Box>
   );
