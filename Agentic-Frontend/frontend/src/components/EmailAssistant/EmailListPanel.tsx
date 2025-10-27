@@ -114,7 +114,15 @@ export const EmailListPanel: React.FC<EmailListPanelProps> = ({
   }
 
   return (
-    <List sx={{ p: 0, height: '100%', overflow: 'auto' }}>
+    <List sx={{
+      p: 0,
+      height: '100%',
+      overflow: 'auto',
+      '& .MuiListItem-root:hover': {
+        backgroundColor: alpha(theme.palette.primary.main, 0.04),
+        transition: 'background-color 0.2s ease'
+      }
+    }}>
       {emails.map((email) => {
         const isSelected = selectedEmailId === email.email_id;
         const isChecked = selectedItems.includes(email.email_id);
@@ -124,12 +132,18 @@ export const EmailListPanel: React.FC<EmailListPanelProps> = ({
             key={email.email_id}
             disablePadding
             sx={{
-              borderBottom: `1px solid ${theme.palette.divider}`,
+              borderBottom: `1px solid ${alpha(theme.palette.divider, 0.3)}`,
               backgroundColor: isSelected
                 ? alpha(theme.palette.primary.main, 0.08)
                 : !email.is_read
                 ? alpha(theme.palette.primary.main, 0.02)
-                : 'transparent'
+                : 'transparent',
+              transition: 'all 0.2s ease',
+              '&:hover': {
+                backgroundColor: isSelected
+                  ? alpha(theme.palette.primary.main, 0.12)
+                  : alpha(theme.palette.primary.main, 0.04)
+              }
             }}
           >
             <ListItemButton
@@ -181,10 +195,13 @@ export const EmailListPanel: React.FC<EmailListPanelProps> = ({
                   {!email.is_read && (
                     <CircleIcon sx={{ fontSize: 8, color: theme.palette.primary.main }} />
                   )}
+                  {email.is_important && (
+                    <StarIcon sx={{ fontSize: 12, color: theme.palette.warning.main }} />
+                  )}
                   <Typography
                     variant="body2"
                     sx={{
-                      fontWeight: !email.is_read ? 700 : 500,
+                      fontWeight: !email.is_read ? 700 : (email.is_important ? 600 : 500),
                       color: 'text.primary',
                       overflow: 'hidden',
                       textOverflow: 'ellipsis',
@@ -194,7 +211,7 @@ export const EmailListPanel: React.FC<EmailListPanelProps> = ({
                   >
                     {email.sender_name || email.sender_email}
                   </Typography>
-                  <Typography variant="caption" color="text.secondary" sx={{ flexShrink: 0 }}>
+                  <Typography variant="caption" color="text.secondary" sx={{ flexShrink: 0, fontSize: '0.7rem', fontWeight: !email.is_read ? 600 : 400 }}>
                     {formatDistanceToNow(new Date(email.received_at || email.sent_at), { addSuffix: true })}
                   </Typography>
                 </Box>
@@ -203,7 +220,7 @@ export const EmailListPanel: React.FC<EmailListPanelProps> = ({
                 <Typography
                   variant="body2"
                   sx={{
-                    fontWeight: !email.is_read ? 600 : 400,
+                    fontWeight: !email.is_read ? 600 : (email.is_important ? 500 : 400),
                     color: 'text.primary',
                     overflow: 'hidden',
                     textOverflow: 'ellipsis',
@@ -222,12 +239,13 @@ export const EmailListPanel: React.FC<EmailListPanelProps> = ({
                     overflow: 'hidden',
                     textOverflow: 'ellipsis',
                     display: '-webkit-box',
-                    WebkitLineClamp: 1,
+                    WebkitLineClamp: 2,
                     WebkitBoxOrient: 'vertical',
-                    lineHeight: 1.4
+                    lineHeight: 1.4,
+                    minHeight: '2.8em' // Ensure consistent height for 2 lines
                   }}
                 >
-                  {email.body_text?.substring(0, 150) || ''}
+                  {email.body_text?.substring(0, 200) || '(No preview available)'}
                 </Typography>
 
                 {/* Flags & Labels */}
@@ -261,8 +279,9 @@ export const EmailListPanel: React.FC<EmailListPanelProps> = ({
                   {email.has_attachments && (
                     <Chip
                       icon={<AttachFileIcon sx={{ fontSize: 12 }} />}
-                      label={email.attachment_count || ''}
+                      label={email.attachment_count ? email.attachment_count.toString() : '1'}
                       size="small"
+                      color="info"
                       sx={{ height: 20, fontSize: '0.625rem', '& .MuiChip-icon': { ml: 0.5 } }}
                     />
                   )}

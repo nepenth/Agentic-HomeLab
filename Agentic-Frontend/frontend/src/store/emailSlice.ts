@@ -1,18 +1,24 @@
 import { createSlice, PayloadAction } from '@reduxjs/toolkit';
 
 interface Email {
-  id: string;
+  email_id: string;
   subject: string;
   sender_email: string;
   sender_name: string;
   body_text: string;
-  body_html: string;
   sent_at: string;
   received_at: string;
   is_read: boolean;
   is_important: boolean;
+  is_flagged: boolean;
+  is_draft: boolean;
+  is_answered: boolean;
+  is_deleted: boolean;
+  is_spam: boolean;
   has_attachments: boolean;
+  attachment_count?: number;
   category?: string;
+  folder_path?: string;
   importance_score?: number;
   thread_id?: string;
 }
@@ -88,13 +94,13 @@ const emailSlice = createSlice({
       state.emails.unshift(action.payload);
     },
     updateEmail(state, action: PayloadAction<Email>) {
-      const index = state.emails.findIndex(e => e.id === action.payload.id);
+      const index = state.emails.findIndex(e => e.email_id === action.payload.email_id);
       if (index !== -1) {
         state.emails[index] = action.payload;
       }
     },
     removeEmail(state, action: PayloadAction<string>) {
-      state.emails = state.emails.filter(e => e.id !== action.payload);
+      state.emails = state.emails.filter(e => e.email_id !== action.payload);
     },
     setSelectedEmail(state, action: PayloadAction<Email | null>) {
       state.selectedEmail = action.payload;

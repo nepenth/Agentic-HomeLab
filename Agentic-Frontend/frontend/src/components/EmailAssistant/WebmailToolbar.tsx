@@ -25,7 +25,14 @@ import {
   MarkunreadOutlined as MarkUnreadIcon,
   DraftsOutlined as MarkReadIcon,
   Label as LabelIcon,
-  Close as CloseIcon
+  Close as CloseIcon,
+  ChevronLeft as ChevronLeftIcon,
+  ChevronRight as ChevronRightIcon,
+  ViewColumn as ViewColumnIcon,
+  ViewList as ViewListIcon,
+  ViewModule as ViewModuleIcon,
+  KeyboardArrowDown as KeyboardArrowDownIcon,
+  KeyboardArrowRight as KeyboardArrowRightIcon
 } from '@mui/icons-material';
 
 interface WebmailToolbarProps {
@@ -42,6 +49,12 @@ interface WebmailToolbarProps {
   filterActive?: boolean;
   onFilterClick?: (event: React.MouseEvent<HTMLElement>) => void;
   onSortClick?: (event: React.MouseEvent<HTMLElement>) => void;
+  onToggleFolderCollapse?: () => void;
+  isFolderCollapsed?: boolean;
+  onLayoutChange?: (layout: 'three-column' | 'horizontal-split' | 'vertical-split') => void;
+  currentLayout?: 'three-column' | 'horizontal-split' | 'vertical-split';
+  onEmailViewerPositionChange?: (position: 'right' | 'below') => void;
+  emailViewerPosition?: 'right' | 'below';
 }
 
 export const WebmailToolbar: React.FC<WebmailToolbarProps> = ({
@@ -57,7 +70,13 @@ export const WebmailToolbar: React.FC<WebmailToolbarProps> = ({
   onBulkMarkUnread,
   filterActive = false,
   onFilterClick,
-  onSortClick
+  onSortClick,
+  onToggleFolderCollapse,
+  isFolderCollapsed = false,
+  onLayoutChange,
+  currentLayout = 'three-column',
+  onEmailViewerPositionChange,
+  emailViewerPosition = 'right'
 }) => {
   const theme = useTheme();
 
@@ -69,7 +88,9 @@ export const WebmailToolbar: React.FC<WebmailToolbarProps> = ({
         backgroundColor: theme.palette.background.paper,
         display: 'flex',
         alignItems: 'center',
-        gap: 2
+        gap: 2,
+        borderRadius: '8px 8px 0 0',
+        boxShadow: '0 1px 3px rgba(0,0,0,0.1)'
       }}
     >
       {/* Selection Actions */}
@@ -171,6 +192,86 @@ export const WebmailToolbar: React.FC<WebmailToolbarProps> = ({
           </Tooltip>
 
           <Divider orientation="vertical" flexItem />
+
+          {/* Layout Selection */}
+          {onLayoutChange && (
+            <>
+              <Tooltip title="Three Column Layout">
+                <IconButton
+                  size="small"
+                  onClick={() => onLayoutChange('three-column')}
+                  sx={{
+                    color: currentLayout === 'three-column' ? 'primary.main' : 'inherit',
+                    backgroundColor: currentLayout === 'three-column' ? alpha(theme.palette.primary.main, 0.1) : 'transparent',
+                    [theme.breakpoints.down('md')]: {
+                      display: 'none' // Hide on mobile/tablet to save space
+                    }
+                  }}
+                >
+                  <ViewColumnIcon fontSize="small" />
+                </IconButton>
+              </Tooltip>
+              <Tooltip title="Horizontal Split Layout">
+                <IconButton
+                  size="small"
+                  onClick={() => onLayoutChange('horizontal-split')}
+                  sx={{
+                    color: currentLayout === 'horizontal-split' ? 'primary.main' : 'inherit',
+                    backgroundColor: currentLayout === 'horizontal-split' ? alpha(theme.palette.primary.main, 0.1) : 'transparent',
+                    [theme.breakpoints.down('md')]: {
+                      display: 'none' // Hide on mobile/tablet to save space
+                    }
+                  }}
+                >
+                  <ViewListIcon fontSize="small" />
+                </IconButton>
+              </Tooltip>
+              <Tooltip title="Vertical Split Layout">
+                <IconButton
+                  size="small"
+                  onClick={() => onLayoutChange('vertical-split')}
+                  sx={{
+                    color: currentLayout === 'vertical-split' ? 'primary.main' : 'inherit',
+                    backgroundColor: currentLayout === 'vertical-split' ? alpha(theme.palette.primary.main, 0.1) : 'transparent'
+                  }}
+                >
+                  <ViewModuleIcon fontSize="small" />
+                </IconButton>
+              </Tooltip>
+              <Divider orientation="vertical" flexItem />
+    
+              {/* Email Viewer Position */}
+              {onEmailViewerPositionChange && (
+                <>
+                  <Tooltip title={`Email viewer ${emailViewerPosition === 'right' ? 'below' : 'to the right'}`}>
+                    <IconButton
+                      size="small"
+                      onClick={() => onEmailViewerPositionChange(emailViewerPosition === 'right' ? 'below' : 'right')}
+                      sx={{
+                        color: 'primary.main',
+                        backgroundColor: alpha(theme.palette.primary.main, 0.1),
+                        [theme.breakpoints.down('md')]: {
+                          display: 'none' // Hide on mobile/tablet to save space
+                        }
+                      }}
+                    >
+                      {emailViewerPosition === 'right' ? <KeyboardArrowDownIcon fontSize="small" /> : <KeyboardArrowRightIcon fontSize="small" />}
+                    </IconButton>
+                  </Tooltip>
+                  <Divider orientation="vertical" flexItem />
+                </>
+              )}
+            </>
+          )}
+
+          {/* Toggle Folder Sidebar */}
+          {onToggleFolderCollapse && (
+            <Tooltip title={isFolderCollapsed ? "Show folders" : "Hide folders"}>
+              <IconButton size="small" onClick={onToggleFolderCollapse}>
+                {isFolderCollapsed ? <ChevronRightIcon fontSize="small" /> : <ChevronLeftIcon fontSize="small" />}
+              </IconButton>
+            </Tooltip>
+          )}
 
           {/* Refresh */}
           <Tooltip title="Refresh">
