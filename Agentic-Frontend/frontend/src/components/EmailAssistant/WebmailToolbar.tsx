@@ -32,8 +32,12 @@ import {
   ViewList as ViewListIcon,
   ViewModule as ViewModuleIcon,
   KeyboardArrowDown as KeyboardArrowDownIcon,
-  KeyboardArrowRight as KeyboardArrowRightIcon
+  KeyboardArrowRight as KeyboardArrowRightIcon,
+  GetApp as ExportIcon
 } from '@mui/icons-material';
+import { SemanticSearchBar } from './SemanticSearchBar';
+import { AdvancedFilterPanel } from './AdvancedFilterPanel';
+import { ExportDialog } from './ExportDialog';
 
 interface WebmailToolbarProps {
   selectedCount: number;
@@ -55,6 +59,14 @@ interface WebmailToolbarProps {
   currentLayout?: 'three-column' | 'horizontal-split' | 'vertical-split';
   onEmailViewerPositionChange?: (position: 'right' | 'below') => void;
   emailViewerPosition?: 'right' | 'below';
+  // Advanced filtering props
+  filters?: any;
+  onFiltersChange?: (filters: any) => void;
+  availableCategories?: string[];
+  availableFolders?: string[];
+  // Export props
+  onExport?: () => void;
+  totalResults?: number;
 }
 
 export const WebmailToolbar: React.FC<WebmailToolbarProps> = ({
@@ -76,9 +88,17 @@ export const WebmailToolbar: React.FC<WebmailToolbarProps> = ({
   onLayoutChange,
   currentLayout = 'three-column',
   onEmailViewerPositionChange,
-  emailViewerPosition = 'right'
+  emailViewerPosition = 'right',
+  filters = {},
+  onFiltersChange,
+  availableCategories = [],
+  availableFolders = [],
+  onExport,
+  totalResults = 0
 }) => {
   const theme = useTheme();
+  const [showAdvancedFilters, setShowAdvancedFilters] = React.useState(false);
+  const [showExportDialog, setShowExportDialog] = React.useState(false);
 
   return (
     <Box
@@ -142,40 +162,25 @@ export const WebmailToolbar: React.FC<WebmailToolbarProps> = ({
         </>
       ) : (
         <>
-          {/* Search Bar */}
-          <TextField
-            size="small"
-            placeholder={`Search in ${folderName || 'folder'}...`}
+          {/* Semantic Search Bar */}
+          <SemanticSearchBar
             value={searchQuery}
-            onChange={(e) => onSearchChange(e.target.value)}
-            sx={{ minWidth: 300 }}
-            InputProps={{
-              startAdornment: (
-                <InputAdornment position="start">
-                  <SearchIcon fontSize="small" />
-                </InputAdornment>
-              ),
-              endAdornment: searchQuery && (
-                <InputAdornment position="end">
-                  <IconButton
-                    size="small"
-                    onClick={() => onSearchChange('')}
-                    edge="end"
-                  >
-                    <CloseIcon fontSize="small" />
-                  </IconButton>
-                </InputAdornment>
-              )
+            onChange={onSearchChange}
+            onSearch={(query) => {
+              onSearchChange(query);
+              // Trigger search immediately for semantic queries
+              // The parent component will handle the actual search
             }}
+            placeholder={`Search in ${folderName || 'folder'}...`}
           />
 
           <Box sx={{ flex: 1 }} />
 
           {/* Filter & Sort */}
-          <Tooltip title="Filter">
+          <Tooltip title="Advanced Filters">
             <IconButton
               size="small"
-              onClick={onFilterClick}
+              onClick={() => setShowAdvancedFilters(!showAdvancedFilters)}
               sx={{
                 color: filterActive ? 'primary.main' : 'inherit',
                 backgroundColor: filterActive ? alpha(theme.palette.primary.main, 0.1) : 'transparent'
@@ -191,7 +196,21 @@ export const WebmailToolbar: React.FC<WebmailToolbarProps> = ({
             </IconButton>
           </Tooltip>
 
-          <Divider orientation="vertical" flexItem />
+          {/* Export */}
+          {onExport && (
+            <>
+              <Tooltip title="Export Results">
+                <IconButton
+                  size="small"
+                  onClick={() => setShowExportDialog(true)}
+                  disabled={!searchQuery && !filterActive}
+                >
+                  <ExportIcon fontSize="small" />
+                </IconButton>
+              </Tooltip>
+              <Divider orientation="vertical" flexItem />
+            </>
+          )}
 
           {/* Layout Selection */}
           {onLayoutChange && (
@@ -281,6 +300,35 @@ export const WebmailToolbar: React.FC<WebmailToolbarProps> = ({
           </Tooltip>
         </>
       )}
+
+      {/* Advanced Filter Panel */}
+      <AdvancedFilterPanel
+        open={showAdvancedFilters}
+        onClose={() => setShowAdvancedFilters(false)}
+        filters={filters}
+        onFiltersChange={onFiltersChange || (() => {})}
+        onApplyFilters={() => {
+          // Trigger search/filter application
+          setShowAdvancedFilters(false);
+        }}
+        onClearFilters={() => {
+          if (onFiltersChange) {
+            onFiltersChange({});
+          }
+          setShowAdvancedFilters(false);
+        }}
+        availableCategories={availableCategories}
+        availableFolders={availableFolders}
+      />
+
+      {/* Export Dialog */}
+      <ExportDialog
+        open={showExportDialog}
+        onClose={() => setShowExportDialog(false)}
+        searchQuery={searchQuery}
+        filters={filters}
+        totalResults={totalResults}
+      />
     </Box>
   );
 };

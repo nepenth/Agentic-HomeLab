@@ -18,22 +18,27 @@ import { FolderSidebar } from '../FolderSidebar';
 import { EmailListPanel } from '../EmailListPanel';
 import { EmailDetailPanel } from '../EmailDetailPanel';
 import { WebmailToolbar } from '../WebmailToolbar';
+import { QuickActionsToolbar } from '../QuickActionsToolbar';
+import { BulkOperationsDialog } from '../BulkOperationsDialog';
+import { WebmailLayout } from '../WebmailLayout';
 
 // Global flag to verify new code is loaded
-console.log('🔵 InboxTasksTab MODULE LOADED - BUILD VERSION: 2024-10-20-v4');
-(window as any).__INBOX_TASKS_TAB_VERSION = '2024-10-20-v4';
+console.log('🔵 InboxTasksTab MODULE LOADED - BUILD VERSION: 2024-10-20-v6-FORCE-REFRESH');
+(window as any).__INBOX_TASKS_TAB_VERSION = '2024-10-20-v6-FORCE-REFRESH';
 
 interface InboxTasksTabProps {
   filters?: any;
   onFiltersChange?: (filters: any) => void;
 }
 
-export const InboxTasksTab: React.FC<InboxTasksTabProps> = ({
+const InboxTasksTabBase: React.FC<InboxTasksTabProps> = ({
   filters: externalFilters,
   onFiltersChange
 }) => {
-  console.log('===== InboxTasksTab COMPONENT MOUNTED ===== VERSION 2.1 - ' + new Date().toISOString());
   const theme = useTheme();
+  const componentId = React.useRef(`inbox-tasks-${Date.now()}`);
+
+  console.log('===== InboxTasksTab COMPONENT MOUNTED =====', componentId.current, '- VERSION 2.1 - ' + new Date().toISOString());
 
   // Pagination state
   const [currentPage, setCurrentPage] = useState(1);
@@ -67,24 +72,28 @@ export const InboxTasksTab: React.FC<InboxTasksTabProps> = ({
   const [error, setError] = useState<string | null>(null);
   const [snackbarOpen, setSnackbarOpen] = useState(false);
 
-  // Resizable columns state
-  const [folderWidth, setFolderWidth] = useState(250);
-  const [emailListWidth, setEmailListWidth] = useState(400);
-  const [isDraggingFolder, setIsDraggingFolder] = useState(false);
-  const [isDraggingList, setIsDraggingList] = useState(false);
+  // Advanced filtering state
+  const [advancedFilters, setAdvancedFilters] = useState<any>({});
+
+  // Bulk operations state
+  const [showBulkDialog, setShowBulkDialog] = useState(false);
+  const [bulkOperationType, setBulkOperationType] = useState<string>('');
+  const [bulkOperations, setBulkOperations] = useState<any[]>([]);
 
   // Collapsible sidebar state
   const [isFolderCollapsed, setIsFolderCollapsed] = useState(false);
 
-  // Layout selection state
+  // Layout selection state with memoization
   const [layoutMode, setLayoutMode] = useState<'three-column' | 'horizontal-split' | 'vertical-split'>('three-column');
   const [emailViewerPosition, setEmailViewerPosition] = useState<'right' | 'below'>('right');
 
-  // Load saved preferences from localStorage
+  // Load saved preferences from localStorage (only once)
   React.useEffect(() => {
     const savedLayout = localStorage.getItem('emailLayoutMode');
     const savedPosition = localStorage.getItem('emailViewerPosition');
     const savedCollapsed = localStorage.getItem('folderSidebarCollapsed');
+
+    console.log('[InboxTasksTab] Loading preferences:', { savedLayout, savedPosition, savedCollapsed });
 
     if (savedLayout && ['three-column', 'horizontal-split', 'vertical-split'].includes(savedLayout)) {
       setLayoutMode(savedLayout as 'three-column' | 'horizontal-split' | 'vertical-split');
@@ -95,18 +104,23 @@ export const InboxTasksTab: React.FC<InboxTasksTabProps> = ({
     if (savedCollapsed) {
       setIsFolderCollapsed(savedCollapsed === 'true');
     }
+
+    console.log('[InboxTasksTab] Preferences loaded - layout:', layoutMode, 'position:', emailViewerPosition, 'collapsed:', isFolderCollapsed);
   }, []);
 
   // Save preferences to localStorage
   React.useEffect(() => {
+    console.log('[InboxTasksTab] Saving layout mode to localStorage:', layoutMode);
     localStorage.setItem('emailLayoutMode', layoutMode);
   }, [layoutMode]);
 
   React.useEffect(() => {
+    console.log('[InboxTasksTab] Saving viewer position to localStorage:', emailViewerPosition);
     localStorage.setItem('emailViewerPosition', emailViewerPosition);
   }, [emailViewerPosition]);
 
   React.useEffect(() => {
+    console.log('[InboxTasksTab] Saving folder collapsed state to localStorage:', isFolderCollapsed);
     localStorage.setItem('folderSidebarCollapsed', isFolderCollapsed.toString());
   }, [isFolderCollapsed]);
 
@@ -135,24 +149,29 @@ export const InboxTasksTab: React.FC<InboxTasksTabProps> = ({
   useEffect(() => {
     if (selectedFolder && selectedAccountId) {
       console.log('[InboxTasksTab] Applying folder filter:', selectedFolder);
-      setFilters((prevFilters) => ({ ...prevFilters, folder_path: selectedFolder, search: searchQuery }));
+      setFilters((prevFilters) => ({
+        ...prevFilters,
+        folder_path: selectedFolder,
+        search: searchQuery,
+        ...advancedFilters // Include advanced filters
+      }));
       setSelectedItems([]); // Clear selection when changing folders
     }
-  }, [selectedFolder, selectedAccountId, searchQuery, setFilters]);
+  }, [selectedFolder, selectedAccountId, searchQuery, advancedFilters, setFilters]);
 
   // Apply search filter
   useEffect(() => {
     const timeoutId = setTimeout(() => {
       setFilters((prevFilters) => {
         if (searchQuery !== prevFilters.search) {
-          return { ...prevFilters, search: searchQuery };
+          return { ...prevFilters, search: searchQuery, ...advancedFilters };
         }
         return prevFilters;
       });
     }, 300); // Debounce search
 
     return () => clearTimeout(timeoutId);
-  }, [searchQuery, setFilters]);
+  }, [searchQuery, advancedFilters, setFilters]);
 
   const handleEmailSelect = useCallback((email: any) => {
     fetchEmailDetail(email.email_id);
@@ -209,26 +228,79 @@ export const InboxTasksTab: React.FC<InboxTasksTabProps> = ({
   };
 
   const handleBulkMarkRead = () => {
-    selectedItems.forEach(id => markAsRead(id));
-    setSelectedItems([]);
+    if (selectedItems.length === 0) return;
+
+    const operations = selectedItems.map(id => {
+      const email = emails.find(e => e.email_id === id);
+      return {
+        id: `mark-read-${id}`,
+        type: 'mark_read' as const,
+        emailId: id,
+        emailSubject: email?.subject || '(No subject)',
+        status: 'pending' as const
+      };
+    });
+
+    setBulkOperations(operations);
+    setBulkOperationType('mark_read');
+    setShowBulkDialog(true);
   };
 
   const handleBulkMarkUnread = () => {
-    selectedItems.forEach(id => markAsRead(id)); // Toggle
-    setSelectedItems([]);
+    if (selectedItems.length === 0) return;
+
+    const operations = selectedItems.map(id => {
+      const email = emails.find(e => e.email_id === id);
+      return {
+        id: `mark-unread-${id}`,
+        type: 'mark_unread' as const,
+        emailId: id,
+        emailSubject: email?.subject || '(No subject)',
+        status: 'pending' as const
+      };
+    });
+
+    setBulkOperations(operations);
+    setBulkOperationType('mark_unread');
+    setShowBulkDialog(true);
   };
 
   const handleBulkDelete = () => {
-    if (window.confirm(`Delete ${selectedItems.length} email(s)?`)) {
-      selectedItems.forEach(id => deleteEmail(id));
-      setSelectedItems([]);
-    }
+    if (selectedItems.length === 0) return;
+
+    const operations = selectedItems.map(id => {
+      const email = emails.find(e => e.email_id === id);
+      return {
+        id: `delete-${id}`,
+        type: 'delete' as const,
+        emailId: id,
+        emailSubject: email?.subject || '(No subject)',
+        status: 'pending' as const
+      };
+    });
+
+    setBulkOperations(operations);
+    setBulkOperationType('delete');
+    setShowBulkDialog(true);
   };
 
   const handleBulkArchive = () => {
-    // TODO: Implement archive functionality
-    console.log('Archive', selectedItems);
-    setSelectedItems([]);
+    if (selectedItems.length === 0) return;
+
+    const operations = selectedItems.map(id => {
+      const email = emails.find(e => e.email_id === id);
+      return {
+        id: `archive-${id}`,
+        type: 'archive' as const,
+        emailId: id,
+        emailSubject: email?.subject || '(No subject)',
+        status: 'pending' as const
+      };
+    });
+
+    setBulkOperations(operations);
+    setBulkOperationType('archive');
+    setShowBulkDialog(true);
   };
 
   const handleToggleFolderCollapse = () => {
@@ -236,28 +308,48 @@ export const InboxTasksTab: React.FC<InboxTasksTabProps> = ({
   };
 
   const handleLayoutChange = (newLayout: 'three-column' | 'horizontal-split' | 'vertical-split') => {
-    setLayoutMode(newLayout);
-    // Auto-adjust email viewer position based on layout
-    if (newLayout === 'vertical-split') {
-      setEmailViewerPosition('below');
-    } else if (newLayout === 'horizontal-split') {
-      setEmailViewerPosition('below');
-    } else {
-      // For three-column, keep current position or default to right
-      if (emailViewerPosition === 'below') {
-        setEmailViewerPosition('right');
+    console.log('[InboxTasksTab] Layout change requested:', newLayout, 'current:', layoutMode);
+
+    // Force a re-render by using functional state updates
+    setLayoutMode(prevLayout => {
+      console.log('[InboxTasksTab] Setting layout from', prevLayout, 'to', newLayout);
+      return newLayout;
+    });
+
+    // Auto-adjust email viewer position based on layout using functional updates
+    setEmailViewerPosition(prevPosition => {
+      let newPosition = prevPosition;
+      if (newLayout === 'vertical-split' || newLayout === 'horizontal-split') {
+        newPosition = 'below';
+      } else if (newLayout === 'three-column' && prevPosition === 'below') {
+        newPosition = 'right';
       }
-    }
+      console.log('[InboxTasksTab] Auto-adjusting viewer position from', prevPosition, 'to', newPosition, 'for layout:', newLayout);
+      return newPosition;
+    });
   };
 
   const handleEmailViewerPositionChange = (position: 'right' | 'below') => {
-    setEmailViewerPosition(position);
-    // Adjust layout mode if needed
-    if (position === 'below' && layoutMode === 'three-column') {
-      setLayoutMode('vertical-split');
-    } else if (position === 'right' && layoutMode === 'vertical-split') {
-      setLayoutMode('three-column');
-    }
+    console.log('[InboxTasksTab] Email viewer position change requested:', position, 'current:', emailViewerPosition, 'layout:', layoutMode);
+
+    setEmailViewerPosition(prevPosition => {
+      console.log('[InboxTasksTab] Setting viewer position from', prevPosition, 'to', position);
+      return position;
+    });
+
+    // Adjust layout mode if needed using functional update
+    setLayoutMode(prevLayout => {
+      let newLayout = prevLayout;
+      if (position === 'below' && prevLayout === 'three-column') {
+        newLayout = 'vertical-split';
+      } else if (position === 'right' && prevLayout === 'vertical-split') {
+        newLayout = 'three-column';
+      }
+      if (newLayout !== prevLayout) {
+        console.log('[InboxTasksTab] Auto-adjusting layout from', prevLayout, 'to', newLayout, 'for position:', position);
+      }
+      return newLayout;
+    });
   };
 
   // Keyboard shortcuts
@@ -366,95 +458,59 @@ export const InboxTasksTab: React.FC<InboxTasksTabProps> = ({
     }
   };
 
-  // Resize handlers
-  const handleFolderResizeStart = React.useCallback((e: React.MouseEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setIsDraggingFolder(true);
-  }, []);
+  const handleBulkOperationConfirm = async () => {
+    // Process bulk operations
+    for (const operation of bulkOperations) {
+      try {
+        switch (operation.type) {
+          case 'delete':
+            await deleteEmail(operation.emailId);
+            break;
+          case 'archive':
+            // TODO: Implement archive API call
+            console.log('Archive email:', operation.emailId);
+            break;
+          case 'mark_read':
+            await markAsRead(operation.emailId);
+            break;
+          case 'mark_unread':
+            // TODO: Implement mark as unread
+            console.log('Mark as unread:', operation.emailId);
+            break;
+          default:
+            console.log('Unknown operation:', operation.type);
+        }
 
-  const handleListResizeStart = React.useCallback((e: React.MouseEvent) => {
-    e.preventDefault();
-    e.stopPropagation();
-    setIsDraggingList(true);
-  }, []);
-
-  React.useEffect(() => {
-    if (!isDraggingFolder && !isDraggingList) return;
-
-    let animationFrameId: number | null = null;
-    let lastMouseX = 0;
-
-    const handleMouseMove = (e: MouseEvent) => {
-      lastMouseX = e.clientX;
-
-      // Use requestAnimationFrame for smooth 60fps updates
-      if (animationFrameId === null) {
-        animationFrameId = requestAnimationFrame(() => {
-          const containerRect = document.querySelector('[data-inbox-container]')?.getBoundingClientRect();
-          const containerLeft = containerRect?.left || 0;
-
-          if (isDraggingFolder) {
-            const newWidth = lastMouseX - containerLeft;
-            if (newWidth >= 200 && newWidth <= 500) {
-              setFolderWidth(newWidth);
-            }
-          }
-          if (isDraggingList) {
-            const newWidth = lastMouseX - containerLeft - folderWidth - 4;
-            if (newWidth >= 300 && newWidth <= 700) {
-              setEmailListWidth(newWidth);
-            }
-          }
-
-          animationFrameId = null;
-        });
+        // Update operation status
+        setBulkOperations(prev =>
+          prev.map(op =>
+            op.id === operation.id
+              ? { ...op, status: 'completed' as const }
+              : op
+          )
+        );
+      } catch (error) {
+        console.error(`Failed to ${operation.type} email ${operation.emailId}:`, error);
+        setBulkOperations(prev =>
+          prev.map(op =>
+            op.id === operation.id
+              ? { ...op, status: 'failed' as const, error: 'Operation failed' }
+              : op
+          )
+        );
       }
-    };
+    }
 
-    const handleMouseUp = () => {
-      if (animationFrameId !== null) {
-        cancelAnimationFrame(animationFrameId);
-      }
-      setIsDraggingFolder(false);
-      setIsDraggingList(false);
-    };
+    setSelectedItems([]);
+  };
 
-    document.addEventListener('mousemove', handleMouseMove, { passive: true });
-    document.addEventListener('mouseup', handleMouseUp);
-    document.body.style.cursor = 'col-resize';
-    document.body.style.userSelect = 'none';
-
-    return () => {
-      if (animationFrameId !== null) {
-        cancelAnimationFrame(animationFrameId);
-      }
-      document.removeEventListener('mousemove', handleMouseMove);
-      document.removeEventListener('mouseup', handleMouseUp);
-      document.body.style.cursor = '';
-      document.body.style.userSelect = '';
-    };
-  }, [isDraggingFolder, isDraggingList, folderWidth]);
+  const handleBulkOperationCancel = () => {
+    setShowBulkDialog(false);
+    setBulkOperations([]);
+    setBulkOperationType('');
+  };
 
   const filterActive = filters.unread || filters.important || filters.hasAttachments;
-
-  // Show error state
-  if (error) {
-    return (
-      <Box sx={{ height: '100%', display: 'flex', flexDirection: 'column', p: 3 }}>
-        <Alert
-          severity="error"
-          action={
-            <Button color="inherit" size="small" onClick={() => setError(null)}>
-              Dismiss
-            </Button>
-          }
-        >
-          {error}
-        </Alert>
-      </Box>
-    );
-  }
 
   return (
     <Box sx={{
@@ -466,6 +522,21 @@ export const InboxTasksTab: React.FC<InboxTasksTabProps> = ({
       borderRadius: 2,
       border: `1px solid ${theme.palette.divider}`
     }}>
+      {/* Error Alert */}
+      {error && (
+        <Alert
+          severity="error"
+          action={
+            <Button color="inherit" size="small" onClick={() => setError(null)}>
+              Dismiss
+            </Button>
+          }
+          sx={{ m: 2 }}
+        >
+          {error}
+        </Alert>
+      )}
+
       {/* Toolbar */}
       <WebmailToolbar
         selectedCount={selectedItems.length}
@@ -487,6 +558,12 @@ export const InboxTasksTab: React.FC<InboxTasksTabProps> = ({
         currentLayout={layoutMode}
         onEmailViewerPositionChange={handleEmailViewerPositionChange}
         emailViewerPosition={emailViewerPosition}
+        filters={advancedFilters}
+        onFiltersChange={setAdvancedFilters}
+        availableCategories={[]} // TODO: Fetch from API
+        availableFolders={[]} // TODO: Fetch from API
+        onExport={() => { }} // TODO: Implement export functionality
+        totalResults={emails.length}
       />
 
       {/* Loading skeleton */}
@@ -505,54 +582,14 @@ export const InboxTasksTab: React.FC<InboxTasksTabProps> = ({
         </Box>
       )}
 
-      {/* Main Content - Dynamic Layout */}
-      <Box sx={{
-        flex: 1,
-        display: 'flex',
-        overflow: 'hidden',
-        minHeight: 0,
-        backgroundColor: theme.palette.background.paper,
-        borderRadius: '0 0 8px 8px',
-        flexDirection: (layoutMode === 'vertical-split' || emailViewerPosition === 'below') ? 'column' : 'row',
-        [theme.breakpoints.down('md')]: {
-          flexDirection: 'column',
-          // On mobile/tablet, always show email viewer below list for better UX
-          '& > *:nth-of-type(2)': {
-            order: 2,
-            height: 'auto !important',
-            minHeight: '300px'
-          },
-          '& > *:nth-of-type(3)': {
-            order: 3,
-            height: 'auto !important',
-            minHeight: '400px'
-          }
-        },
-        [theme.breakpoints.down('sm')]: {
-          // Extra mobile optimizations
-          '& > *:nth-of-type(1)': {
-            width: '100% !important',
-            height: '150px !important'
-          }
-        }
-      }} data-inbox-container>
-        {/* Folder Sidebar */}
-        <Box
-          sx={{
-            width: isFolderCollapsed ? 0 : folderWidth,
-            flexShrink: 0,
-            overflow: 'hidden',
-            backgroundColor: theme.palette.background.paper,
-            position: 'relative',
-            transition: isDraggingFolder ? 'none' : 'width 0.1s ease-out',
-            [theme.breakpoints.down('md')]: {
-              width: '100%',
-              height: '200px',
-              borderBottom: `1px solid ${theme.palette.divider}`
-            }
-          }}
-        >
-          {accountsLoading ? (
+      {/* Main Content - Webmail Layout */}
+      <WebmailLayout
+        layoutMode={layoutMode}
+        emailViewerPosition={emailViewerPosition}
+        isSidebarCollapsed={isFolderCollapsed}
+        onToggleSidebar={handleToggleFolderCollapse}
+        sidebar={
+          accountsLoading ? (
             <Box sx={{ p: 3, textAlign: 'center' }}>
               <Typography variant="body2" color="text.secondary">
                 Loading accounts...
@@ -573,52 +610,9 @@ export const InboxTasksTab: React.FC<InboxTasksTabProps> = ({
               selectedFolder={selectedFolder}
               onFolderSelect={setSelectedFolder}
             />
-          )}
-        </Box>
-
-        {/* Resize Handle for Folder */}
-        {!isFolderCollapsed && (
-          <Box
-            onMouseDown={handleFolderResizeStart}
-            sx={{
-              width: 4,
-              cursor: 'col-resize',
-              backgroundColor: 'transparent',
-              '&:hover': {
-                backgroundColor: theme.palette.primary.main,
-                opacity: 0.3
-              },
-              transition: 'background-color 0.2s',
-              flexShrink: 0
-            }}
-          />
-        )}
-
-        {/* Email List */}
-        <Paper
-          elevation={0}
-          sx={{
-            width: (layoutMode === 'vertical-split' || emailViewerPosition === 'below') ? '100%' : emailListWidth,
-            height: (layoutMode === 'vertical-split' || emailViewerPosition === 'below') ? '50%' : 'auto',
-            flexShrink: 0,
-            overflow: 'hidden',
-            display: 'flex',
-            flexDirection: 'column',
-            position: 'relative',
-            transition: isDraggingList ? 'none' : 'width 0.1s ease-out',
-            borderLeft: `1px solid ${theme.palette.divider}`,
-            borderRight: (layoutMode === 'three-column' && emailViewerPosition === 'right') ? `1px solid ${theme.palette.divider}` : 'none',
-            borderBottom: (layoutMode === 'vertical-split' || emailViewerPosition === 'below') ? `1px solid ${theme.palette.divider}` : 'none',
-            backgroundColor: theme.palette.background.paper,
-            [theme.breakpoints.down('md')]: {
-              width: '100%',
-              height: '300px',
-              borderLeft: 'none',
-              borderRight: 'none',
-              borderBottom: `1px solid ${theme.palette.divider}`
-            }
-          }}
-        >
+          )
+        }
+        emailList={
           <EmailListPanel
             emails={emails}
             selectedEmailId={selectedEmail?.email_id || null}
@@ -629,65 +623,23 @@ export const InboxTasksTab: React.FC<InboxTasksTabProps> = ({
             onMarkAsRead={markAsRead}
             isLoading={false}
           />
-        </Paper>
-
-        {/* Resize Handle for Email List */}
-        {layoutMode === 'three-column' && emailViewerPosition === 'right' && (
-          <Box
-            onMouseDown={handleListResizeStart}
-            sx={{
-              width: 4,
-              cursor: 'col-resize',
-              backgroundColor: 'transparent',
-              '&:hover': {
-                backgroundColor: theme.palette.primary.main,
-                opacity: 0.3
-              },
-              transition: 'background-color 0.2s',
-              flexShrink: 0
+        }
+        emailDetail={
+          <EmailDetailPanel
+            email={selectedEmail}
+            isLoading={isFetchingDetail}
+            onToggleImportant={(important) =>
+              selectedEmail && handleToggleImportant(selectedEmail.email_id, important)
+            }
+            onDelete={() => selectedEmail && deleteEmail(selectedEmail.email_id)}
+            onArchive={() => {
+              // TODO: Implement archive
+              console.log('Archive email');
             }}
+            onCreateTask={handleCreateTask}
           />
-        )}
-
-        {/* Email Detail */}
-        {layoutMode !== 'horizontal-split' && (
-          <Paper
-            elevation={0}
-            sx={{
-              flex: 1,
-              height: (layoutMode === 'vertical-split' || emailViewerPosition === 'below') ? '50%' : 'auto',
-              overflow: 'hidden',
-              display: 'flex',
-              flexDirection: 'column',
-              [theme.breakpoints.down('md')]: {
-                height: 'calc(100vh - 500px)',
-                minHeight: '300px'
-              }
-            }}
-          >
-            <EmailDetailPanel
-              email={selectedEmail}
-              isLoading={isFetchingDetail}
-              onToggleImportant={(important) => {
-                if (selectedEmail) {
-                  handleToggleImportant(selectedEmail.email_id, important);
-                }
-              }}
-              onDelete={() => {
-                if (selectedEmail) {
-                  deleteEmail(selectedEmail.email_id);
-                }
-              }}
-              onArchive={() => {
-                // TODO: Implement archive
-                console.log('Archive email');
-              }}
-              onCreateTask={handleCreateTask}
-            />
-          </Paper>
-        )}
-      </Box>
-
+        }
+      />
       {/* Filter Menu */}
       <Menu
         anchorEl={filterAnchorEl}
@@ -798,8 +750,82 @@ export const InboxTasksTab: React.FC<InboxTasksTabProps> = ({
           Operation completed successfully
         </Alert>
       </Snackbar>
+
+      {/* Bulk Operations Dialog */}
+      {showBulkDialog && (
+        <BulkOperationsDialog
+          open={showBulkDialog}
+          onClose={handleBulkOperationCancel}
+          operations={bulkOperations}
+          operationType={bulkOperationType}
+          totalCount={selectedItems.length}
+          onConfirm={handleBulkOperationConfirm}
+          onCancel={handleBulkOperationCancel}
+        />
+      )}
+
+      {/* Quick Actions Toolbar */}
+      <QuickActionsToolbar
+        selectedEmail={selectedEmail}
+        selectedCount={selectedItems.length}
+        onReply={() => {
+          // TODO: Implement reply functionality
+          console.log('Reply to email:', selectedEmail?.email_id);
+        }}
+        onReplyAll={() => {
+          // TODO: Implement reply all functionality
+          console.log('Reply all to email:', selectedEmail?.email_id);
+        }}
+        onForward={() => {
+          // TODO: Implement forward functionality
+          console.log('Forward email:', selectedEmail?.email_id);
+        }}
+        onDelete={handleBulkDelete}
+        onArchive={handleBulkArchive}
+        onToggleImportant={(important) => {
+          if (selectedEmail) {
+            handleToggleImportant(selectedEmail.email_id, important);
+          }
+        }}
+        onToggleFlag={(flagged) => {
+          // TODO: Implement flag functionality
+          console.log('Toggle flag:', selectedEmail?.email_id, flagged);
+        }}
+        onMarkAsRead={() => {
+          if (selectedEmail) {
+            markAsRead(selectedEmail.email_id);
+          }
+        }}
+        onMarkAsUnread={handleBulkMarkUnread}
+        onCreateTask={handleCreateTask}
+        onMove={() => {
+          // TODO: Implement move functionality
+          console.log('Move emails:', selectedItems);
+        }}
+        onLabel={() => {
+          // TODO: Implement label functionality
+          console.log('Label emails:', selectedItems);
+        }}
+        onDownload={() => {
+          // TODO: Implement download functionality
+          console.log('Download emails:', selectedItems);
+        }}
+        onPrint={() => {
+          // TODO: Implement print functionality
+          console.log('Print email:', selectedEmail?.email_id);
+        }}
+        onBlock={() => {
+          // TODO: Implement block functionality
+          console.log('Block sender:', selectedEmail?.sender_email);
+        }}
+        onSnooze={() => {
+          // TODO: Implement snooze functionality
+          console.log('Snooze email:', selectedEmail?.email_id);
+        }}
+      />
     </Box>
   );
 };
 
+export const InboxTasksTab = React.memo(InboxTasksTabBase);
 export default InboxTasksTab;
