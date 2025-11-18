@@ -95,25 +95,27 @@ export const EmailListPanel: React.FC<EmailListPanelProps> = ({
     return colors[hash % colors.length];
   };
 
-  if (isLoading) {
-    return (
-      <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100%' }}>
-        <CircularProgress />
-      </Box>
-    );
-  }
-
-  if (emails.length === 0) {
-    return (
-      <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100%', p: 4 }}>
-        <Typography variant="body2" color="text.secondary">
-          No emails in this folder
-        </Typography>
-      </Box>
-    );
-  }
-
+  // Conditional rendering within single return statement
   return (
+    <>
+      {/* Loading state */}
+      {isLoading && (
+        <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100%' }}>
+          <CircularProgress />
+        </Box>
+      )}
+
+      {/* Empty state */}
+      {!isLoading && emails.length === 0 && (
+        <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100%', p: 4 }}>
+          <Typography variant="body2" color="text.secondary">
+            No emails in this folder
+          </Typography>
+        </Box>
+      )}
+
+      {/* Email list */}
+      {!isLoading && emails.length > 0 && (
     <List sx={{
       p: 0,
       height: '100%',
@@ -320,6 +322,8 @@ export const EmailListPanel: React.FC<EmailListPanelProps> = ({
         );
       })}
     </List>
+      )}
+    </>
   );
 };
 

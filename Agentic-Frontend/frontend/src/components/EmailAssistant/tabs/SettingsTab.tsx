@@ -72,6 +72,18 @@ export const SettingsTab: React.FC = () => {
     sync_window_days: 90,
     auto_sync_enabled: true,
     sync_interval_minutes: 15,
+    // Auth credentials for updates
+    auth_credentials: {
+      password: '',
+      server: '',
+      port: 993,
+      username: '',
+      use_ssl: true,
+      client_id: '',
+      client_secret: '',
+      access_token: '',
+      refresh_token: '',
+    } as any
   });
 
   // Management function loading states
@@ -158,6 +170,18 @@ export const SettingsTab: React.FC = () => {
       sync_window_days: account.sync_window_days || 90,
       auto_sync_enabled: account.auto_sync_enabled !== undefined ? account.auto_sync_enabled : true,
       sync_interval_minutes: account.sync_interval_minutes || 15,
+      auth_credentials: {
+        // Initialize with placeholders or current values
+        password: '••••••••',
+        server: account.auth_credentials?.server || '[Current Server]',
+        port: account.auth_credentials?.port || 993,
+        username: account.auth_credentials?.username || account.email_address,
+        use_ssl: account.auth_credentials?.use_ssl ?? true,
+        client_id: account.account_type === 'gmail' ? '[Current Client ID]' : '',
+        client_secret: account.account_type === 'gmail' ? '••••••••••••••••' : '',
+        access_token: account.account_type === 'gmail' ? '••••••••••••••••' : '',
+        refresh_token: account.account_type === 'gmail' ? '••••••••••••••••' : '',
+      }
     });
   };
 
@@ -169,7 +193,46 @@ export const SettingsTab: React.FC = () => {
     if (!editingAccount) return;
 
     try {
-      await updateAccount(editingAccount.account_id, editFormData);
+      // Prepare update data
+      const updateData: any = {
+        sync_window_days: editFormData.sync_window_days,
+        auto_sync_enabled: editFormData.auto_sync_enabled,
+        sync_interval_minutes: editFormData.sync_interval_minutes,
+      };
+
+      // Handle auth credentials update
+      const authUpdates: any = {};
+      const currentAuth = editFormData.auth_credentials;
+
+      // Only include fields that have changed from placeholders
+      if (currentAuth.password && currentAuth.password !== '••••••••') {
+        authUpdates.password = currentAuth.password;
+      }
+      if (currentAuth.server && currentAuth.server !== '[Current Server]') {
+        authUpdates.server = currentAuth.server;
+      }
+      if (currentAuth.port) authUpdates.port = currentAuth.port;
+      if (currentAuth.username) authUpdates.username = currentAuth.username;
+      if (currentAuth.use_ssl !== undefined) authUpdates.use_ssl = currentAuth.use_ssl;
+
+      if (currentAuth.client_id && currentAuth.client_id !== '[Current Client ID]') {
+        authUpdates.client_id = currentAuth.client_id;
+      }
+      if (currentAuth.client_secret && currentAuth.client_secret !== '••••••••••••••••') {
+        authUpdates.client_secret = currentAuth.client_secret;
+      }
+      if (currentAuth.access_token && currentAuth.access_token !== '••••••••••••••••') {
+        authUpdates.access_token = currentAuth.access_token;
+      }
+      if (currentAuth.refresh_token && currentAuth.refresh_token !== '••••••••••••••••') {
+        authUpdates.refresh_token = currentAuth.refresh_token;
+      }
+
+      if (Object.keys(authUpdates).length > 0) {
+        updateData.auth_credentials = authUpdates;
+      }
+
+      await updateAccount(editingAccount.account_id, updateData);
       enqueueSnackbar('Account settings updated successfully', { variant: 'success' });
       setEditingAccount(null);
       await refreshAccounts();
@@ -479,7 +542,7 @@ export const SettingsTab: React.FC = () => {
                 <Grid item key={category}>
                   <Chip
                     label={category}
-                    onDelete={() => {}}
+                    onDelete={() => { }}
                     color="primary"
                     variant="outlined"
                   />
@@ -546,166 +609,166 @@ export const SettingsTab: React.FC = () => {
               <Typography sx={{ ml: 2 }}>Loading settings...</Typography>
             </Box>
           ) : (
-          <Grid container spacing={2}>
-            <Grid item xs={12}>
-              <FormControl fullWidth>
-                <InputLabel>Default Model</InputLabel>
-                <Select
-                  value={assistantSettings.defaultModel}
-                  label="Default Model"
-                  onChange={(e) => setAssistantSettings({ ...assistantSettings, defaultModel: e.target.value })}
-                >
-                  {availableModels.length > 0 ? (
-                    availableModels.map((model) => (
-                      <MenuItem key={model} value={model}>
-                        {model}
-                        {model === defaultModelFromServer && ' (Default)'}
+            <Grid container spacing={2}>
+              <Grid item xs={12}>
+                <FormControl fullWidth>
+                  <InputLabel>Default Model</InputLabel>
+                  <Select
+                    value={assistantSettings.defaultModel}
+                    label="Default Model"
+                    onChange={(e) => setAssistantSettings({ ...assistantSettings, defaultModel: e.target.value })}
+                  >
+                    {availableModels.length > 0 ? (
+                      availableModels.map((model) => (
+                        <MenuItem key={model} value={model}>
+                          {model}
+                          {model === defaultModelFromServer && ' (Default)'}
+                        </MenuItem>
+                      ))
+                    ) : (
+                      <MenuItem value={assistantSettings.defaultModel}>
+                        {assistantSettings.defaultModel || 'Loading models...'}
                       </MenuItem>
-                    ))
-                  ) : (
-                    <MenuItem value={assistantSettings.defaultModel}>
-                      {assistantSettings.defaultModel || 'Loading models...'}
-                    </MenuItem>
-                  )}
-                </Select>
-              </FormControl>
-            </Grid>
-            <Grid item xs={12}>
-              <FormControlLabel
-                control={
-                  <Switch
-                    checked={assistantSettings.enableStreaming}
-                    onChange={(e) => setAssistantSettings({ ...assistantSettings, enableStreaming: e.target.checked })}
-                  />
-                }
-                label="Enable streaming responses"
-              />
-            </Grid>
-            <Grid item xs={12}>
-              <FormControlLabel
-                control={
-                  <Switch
-                    checked={assistantSettings.showThinking}
-                    onChange={(e) => setAssistantSettings({ ...assistantSettings, showThinking: e.target.checked })}
-                  />
-                }
-                label="Show thinking process"
-              />
-            </Grid>
-            <Grid item xs={12}>
-              <FormControlLabel
-                control={
-                  <Switch
-                    checked={assistantSettings.autoSave}
-                    onChange={(e) => setAssistantSettings({ ...assistantSettings, autoSave: e.target.checked })}
-                  />
-                }
-                label="Auto-save chat sessions"
-              />
-            </Grid>
-
-            <Grid item xs={12}>
-              <Divider sx={{ my: 1 }} />
-              <Typography variant="subtitle2" sx={{ mb: 2, fontWeight: 600 }}>
-                Connection & Timeout Settings
-              </Typography>
-            </Grid>
-
-            <Grid item xs={12} md={6}>
-              <TextField
-                fullWidth
-                label="Connection Timeout (seconds)"
-                type="number"
-                value={assistantSettings.connectionTimeout}
-                onChange={(e) => setAssistantSettings({
-                  ...assistantSettings,
-                  connectionTimeout: parseInt(e.target.value)
-                })}
-                helperText="Time to wait for initial connection"
-                InputProps={{ inputProps: { min: 5, max: 60 } }}
-              />
-            </Grid>
-
-            <Grid item xs={12} md={6}>
-              <TextField
-                fullWidth
-                label="Response Timeout (seconds)"
-                type="number"
-                value={assistantSettings.responseTimeout}
-                onChange={(e) => setAssistantSettings({
-                  ...assistantSettings,
-                  responseTimeout: parseInt(e.target.value)
-                })}
-                helperText="Max time to wait for AI response (30s - 30min)"
-                InputProps={{ inputProps: { min: 30, max: 1800 } }}
-              />
-            </Grid>
-
-            <Grid item xs={12} md={6}>
-              <TextField
-                fullWidth
-                label="Max Retries"
-                type="number"
-                value={assistantSettings.maxRetries}
-                onChange={(e) => setAssistantSettings({
-                  ...assistantSettings,
-                  maxRetries: parseInt(e.target.value)
-                })}
-                helperText="Number of retry attempts on failure"
-                InputProps={{ inputProps: { min: 0, max: 5 } }}
-              />
-            </Grid>
-
-            <Grid item xs={12} md={6}>
-              <FormControlLabel
-                control={
-                  <Switch
-                    checked={assistantSettings.autoReconnect}
-                    onChange={(e) => setAssistantSettings({
-                      ...assistantSettings,
-                      autoReconnect: e.target.checked
-                    })}
-                  />
-                }
-                label="Auto-reconnect on disconnect"
-              />
-            </Grid>
-
-            <Grid item xs={12}>
-              <Button
-                variant="contained"
-                fullWidth
-                disabled={savingPreferences}
-                onClick={async () => {
-                  try {
-                    setSavingPreferences(true);
-
-                    // Convert frontend camelCase to backend snake_case
-                    // Convert seconds to milliseconds for backend storage
-                    await apiClient.updateUserChatPreferences({
-                      default_model: assistantSettings.defaultModel,
-                      enable_streaming: assistantSettings.enableStreaming,
-                      show_thinking: assistantSettings.showThinking,
-                      auto_save_conversations: assistantSettings.autoSave,
-                      connection_timeout: assistantSettings.connectionTimeout * 1000, // seconds -> ms
-                      response_timeout: assistantSettings.responseTimeout * 1000, // seconds -> ms
-                      max_retries: assistantSettings.maxRetries,
-                      auto_reconnect: assistantSettings.autoReconnect,
-                    });
-
-                    enqueueSnackbar('Assistant settings saved successfully', { variant: 'success' });
-                  } catch (error) {
-                    console.error('Failed to save assistant preferences:', error);
-                    enqueueSnackbar('Failed to save assistant settings', { variant: 'error' });
-                  } finally {
-                    setSavingPreferences(false);
+                    )}
+                  </Select>
+                </FormControl>
+              </Grid>
+              <Grid item xs={12}>
+                <FormControlLabel
+                  control={
+                    <Switch
+                      checked={assistantSettings.enableStreaming}
+                      onChange={(e) => setAssistantSettings({ ...assistantSettings, enableStreaming: e.target.checked })}
+                    />
                   }
-                }}
-              >
-                {savingPreferences ? 'Saving...' : 'Save Assistant Settings'}
-              </Button>
+                  label="Enable streaming responses"
+                />
+              </Grid>
+              <Grid item xs={12}>
+                <FormControlLabel
+                  control={
+                    <Switch
+                      checked={assistantSettings.showThinking}
+                      onChange={(e) => setAssistantSettings({ ...assistantSettings, showThinking: e.target.checked })}
+                    />
+                  }
+                  label="Show thinking process"
+                />
+              </Grid>
+              <Grid item xs={12}>
+                <FormControlLabel
+                  control={
+                    <Switch
+                      checked={assistantSettings.autoSave}
+                      onChange={(e) => setAssistantSettings({ ...assistantSettings, autoSave: e.target.checked })}
+                    />
+                  }
+                  label="Auto-save chat sessions"
+                />
+              </Grid>
+
+              <Grid item xs={12}>
+                <Divider sx={{ my: 1 }} />
+                <Typography variant="subtitle2" sx={{ mb: 2, fontWeight: 600 }}>
+                  Connection & Timeout Settings
+                </Typography>
+              </Grid>
+
+              <Grid item xs={12} md={6}>
+                <TextField
+                  fullWidth
+                  label="Connection Timeout (seconds)"
+                  type="number"
+                  value={assistantSettings.connectionTimeout}
+                  onChange={(e) => setAssistantSettings({
+                    ...assistantSettings,
+                    connectionTimeout: parseInt(e.target.value)
+                  })}
+                  helperText="Time to wait for initial connection"
+                  InputProps={{ inputProps: { min: 5, max: 60 } }}
+                />
+              </Grid>
+
+              <Grid item xs={12} md={6}>
+                <TextField
+                  fullWidth
+                  label="Response Timeout (seconds)"
+                  type="number"
+                  value={assistantSettings.responseTimeout}
+                  onChange={(e) => setAssistantSettings({
+                    ...assistantSettings,
+                    responseTimeout: parseInt(e.target.value)
+                  })}
+                  helperText="Max time to wait for AI response (30s - 30min)"
+                  InputProps={{ inputProps: { min: 30, max: 1800 } }}
+                />
+              </Grid>
+
+              <Grid item xs={12} md={6}>
+                <TextField
+                  fullWidth
+                  label="Max Retries"
+                  type="number"
+                  value={assistantSettings.maxRetries}
+                  onChange={(e) => setAssistantSettings({
+                    ...assistantSettings,
+                    maxRetries: parseInt(e.target.value)
+                  })}
+                  helperText="Number of retry attempts on failure"
+                  InputProps={{ inputProps: { min: 0, max: 5 } }}
+                />
+              </Grid>
+
+              <Grid item xs={12} md={6}>
+                <FormControlLabel
+                  control={
+                    <Switch
+                      checked={assistantSettings.autoReconnect}
+                      onChange={(e) => setAssistantSettings({
+                        ...assistantSettings,
+                        autoReconnect: e.target.checked
+                      })}
+                    />
+                  }
+                  label="Auto-reconnect on disconnect"
+                />
+              </Grid>
+
+              <Grid item xs={12}>
+                <Button
+                  variant="contained"
+                  fullWidth
+                  disabled={savingPreferences}
+                  onClick={async () => {
+                    try {
+                      setSavingPreferences(true);
+
+                      // Convert frontend camelCase to backend snake_case
+                      // Convert seconds to milliseconds for backend storage
+                      await apiClient.updateUserChatPreferences({
+                        default_model: assistantSettings.defaultModel,
+                        enable_streaming: assistantSettings.enableStreaming,
+                        show_thinking: assistantSettings.showThinking,
+                        auto_save_conversations: assistantSettings.autoSave,
+                        connection_timeout: assistantSettings.connectionTimeout * 1000, // seconds -> ms
+                        response_timeout: assistantSettings.responseTimeout * 1000, // seconds -> ms
+                        max_retries: assistantSettings.maxRetries,
+                        auto_reconnect: assistantSettings.autoReconnect,
+                      });
+
+                      enqueueSnackbar('Assistant settings saved successfully', { variant: 'success' });
+                    } catch (error) {
+                      console.error('Failed to save assistant preferences:', error);
+                      enqueueSnackbar('Failed to save assistant settings', { variant: 'error' });
+                    } finally {
+                      setSavingPreferences(false);
+                    }
+                  }}
+                >
+                  {savingPreferences ? 'Saving...' : 'Save Assistant Settings'}
+                </Button>
+              </Grid>
             </Grid>
-          </Grid>
           )}
         </AccordionDetails>
       </Accordion>
@@ -979,6 +1042,119 @@ export const SettingsTab: React.FC = () => {
                   }
                   label="Auto-sync enabled"
                 />
+
+                <Divider sx={{ my: 2 }} />
+
+                <Typography variant="subtitle2" sx={{ fontWeight: 600 }}>
+                  Authentication Settings
+                </Typography>
+
+                {editingAccount.account_type === 'imap' && (
+                  <>
+                    <TextField
+                      label="IMAP Server"
+                      fullWidth
+                      value={editFormData.auth_credentials.server}
+                      onChange={(e) => setEditFormData({
+                        ...editFormData,
+                        auth_credentials: { ...editFormData.auth_credentials, server: e.target.value }
+                      })}
+                      helperText="Update if server address changed"
+                    />
+                    <Grid container spacing={2}>
+                      <Grid item xs={8}>
+                        <TextField
+                          label="Username"
+                          fullWidth
+                          value={editFormData.auth_credentials.username}
+                          onChange={(e) => setEditFormData({
+                            ...editFormData,
+                            auth_credentials: { ...editFormData.auth_credentials, username: e.target.value }
+                          })}
+                        />
+                      </Grid>
+                      <Grid item xs={4}>
+                        <TextField
+                          label="Port"
+                          type="number"
+                          fullWidth
+                          value={editFormData.auth_credentials.port}
+                          onChange={(e) => setEditFormData({
+                            ...editFormData,
+                            auth_credentials: { ...editFormData.auth_credentials, port: parseInt(e.target.value) || 993 }
+                          })}
+                        />
+                      </Grid>
+                    </Grid>
+                    <TextField
+                      label="Password"
+                      type="password"
+                      fullWidth
+                      value={editFormData.auth_credentials.password}
+                      onChange={(e) => setEditFormData({
+                        ...editFormData,
+                        auth_credentials: { ...editFormData.auth_credentials, password: e.target.value }
+                      })}
+                      helperText={editFormData.auth_credentials.password === '••••••••'
+                        ? "Password set. Change to update."
+                        : "Enter new password to update"}
+                    />
+                    <FormControlLabel
+                      control={
+                        <Switch
+                          checked={editFormData.auth_credentials.use_ssl}
+                          onChange={(e) => setEditFormData({
+                            ...editFormData,
+                            auth_credentials: { ...editFormData.auth_credentials, use_ssl: e.target.checked }
+                          })}
+                        />
+                      }
+                      label="Use SSL/TLS"
+                    />
+                  </>
+                )}
+
+                {editingAccount.account_type === 'gmail' && (
+                  <>
+                    <TextField
+                      label="Client ID"
+                      fullWidth
+                      value={editFormData.auth_credentials.client_id}
+                      onChange={(e) => setEditFormData({
+                        ...editFormData,
+                        auth_credentials: { ...editFormData.auth_credentials, client_id: e.target.value }
+                      })}
+                    />
+                    <TextField
+                      label="Client Secret"
+                      type="password"
+                      fullWidth
+                      value={editFormData.auth_credentials.client_secret}
+                      onChange={(e) => setEditFormData({
+                        ...editFormData,
+                        auth_credentials: { ...editFormData.auth_credentials, client_secret: e.target.value }
+                      })}
+                    />
+                    <TextField
+                      label="Access Token"
+                      fullWidth
+                      value={editFormData.auth_credentials.access_token}
+                      onChange={(e) => setEditFormData({
+                        ...editFormData,
+                        auth_credentials: { ...editFormData.auth_credentials, access_token: e.target.value }
+                      })}
+                    />
+                    <TextField
+                      label="Refresh Token"
+                      fullWidth
+                      value={editFormData.auth_credentials.refresh_token}
+                      onChange={(e) => setEditFormData({
+                        ...editFormData,
+                        auth_credentials: { ...editFormData.auth_credentials, refresh_token: e.target.value }
+                      })}
+                    />
+                  </>
+                )}
 
                 <Alert severity="info">
                   Changing sync window will trigger a full resync on the next sync cycle.

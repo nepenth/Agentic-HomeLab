@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useCallback } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
 import { RootState } from '../store';
@@ -256,6 +256,12 @@ export const useEmail = (pagination?: { currentPage: number; emailsPerPage: numb
     },
   });
 
+  // Memoize action functions to prevent infinite re-renders
+  const setSelectedEmailCallback = useCallback((email: any) => dispatch(setSelectedEmail(email)), [dispatch]);
+  const setSelectedAccountCallback = useCallback((account: any) => dispatch(setSelectedAccount(account)), [dispatch]);
+  const setFiltersCallback = useCallback((newFilters: any) => dispatch(setFilters(newFilters)), [dispatch]);
+  const setSortCallback = useCallback((newSort: any) => dispatch(setSort(newSort)), [dispatch]);
+
   return {
     // State
     emails,
@@ -267,11 +273,11 @@ export const useEmail = (pagination?: { currentPage: number; emailsPerPage: numb
     loading: loading || accountsLoading || emailsLoading,
     error,
 
-    // Actions
-    setSelectedEmail: (email: any) => dispatch(setSelectedEmail(email)),
-    setSelectedAccount: (account: any) => dispatch(setSelectedAccount(account)),
-    setFilters: (newFilters: any) => dispatch(setFilters(newFilters)),
-    setSort: (newSort: any) => dispatch(setSort(newSort)),
+    // Actions - now memoized
+    setSelectedEmail: setSelectedEmailCallback,
+    setSelectedAccount: setSelectedAccountCallback,
+    setFilters: setFiltersCallback,
+    setSort: setSortCallback,
 
     // Mutations
     syncEmails: syncMutation.mutate,

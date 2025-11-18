@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState } from 'react';
 import {
   Box,
   Typography,
@@ -29,6 +29,15 @@ import {
   GetApp as DownloadIcon
 } from '@mui/icons-material';
 import { decodeMimeHeader } from '../../utils/emailUtils';
+import { AttachmentPreview } from './AttachmentPreview';
+
+interface Attachment {
+  id: string;
+  filename: string;
+  content_type: string;
+  size_bytes: number;
+  is_inline: boolean;
+}
 
 interface EmailDetail {
   email_id: string;
@@ -50,13 +59,7 @@ interface EmailDetail {
   is_deleted: boolean;
   has_attachments: boolean;
   attachment_count?: number;
-  attachments?: Array<{
-    id: string;
-    filename: string;
-    content_type: string;
-    size_bytes: number;
-    is_inline: boolean;
-  }>;
+  attachments?: Attachment[];
   category?: string;
   folder_path?: string;
 }
@@ -79,6 +82,8 @@ export const EmailDetailPanel: React.FC<EmailDetailPanelProps> = ({
   onCreateTask
 }) => {
   const theme = useTheme();
+  const [previewAttachment, setPreviewAttachment] = useState<Attachment | null>(null);
+  const [showPreview, setShowPreview] = useState(false);
 
   // Sanitize HTML to remove external resources that cause mixed content errors
   const sanitizeEmailHtml = (html: string): string => {
@@ -182,28 +187,30 @@ export const EmailDetailPanel: React.FC<EmailDetailPanelProps> = ({
     return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
   };
 
-  if (isLoading) {
-    return (
-      <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100%' }}>
-        <CircularProgress />
-      </Box>
-    );
-  }
-
-  if (!email) {
-    return (
-      <Box sx={{ display: 'flex', flexDirection: 'column', justifyContent: 'center', alignItems: 'center', height: '100%', p: 4 }}>
-        <Typography variant="h6" color="text.secondary" gutterBottom>
-          No email selected
-        </Typography>
-        <Typography variant="body2" color="text.secondary">
-          Select an email from the list to view its contents
-        </Typography>
-      </Box>
-    );
-  }
-
+  // Conditional rendering within single return statement
   return (
+    <>
+      {/* Loading state */}
+      {isLoading && (
+        <Box sx={{ display: 'flex', justifyContent: 'center', alignItems: 'center', height: '100%' }}>
+          <CircularProgress />
+        </Box>
+      )}
+
+      {/* No email selected */}
+      {!isLoading && !email && (
+        <Box sx={{ display: 'flex', flexDirection: 'column', justifyContent: 'center', alignItems: 'center', height: '100%', p: 4 }}>
+          <Typography variant="h6" color="text.secondary" gutterBottom>
+            No email selected
+          </Typography>
+          <Typography variant="body2" color="text.secondary">
+            Select an email from the list to view its contents
+          </Typography>
+        </Box>
+      )}
+
+      {/* Email content */}
+      {!isLoading && email && (
     <Box sx={{
       height: '100%',
       display: 'flex',
@@ -413,8 +420,8 @@ export const EmailDetailPanel: React.FC<EmailDetailPanelProps> = ({
                   }}
                   onClick={() => {
                     if (isPreviewable) {
-                      // TODO: Implement preview functionality
-                      console.log('Preview attachment:', attachment.filename);
+                      setPreviewAttachment(attachment);
+                      setShowPreview(true);
                     }
                   }}
                 >
@@ -455,7 +462,20 @@ export const EmailDetailPanel: React.FC<EmailDetailPanelProps> = ({
       <Box sx={{ flex: 1, overflow: 'auto', p: 3 }}>
         {renderEmailContent(email)}
       </Box>
+
+      {/* Attachment Preview Dialog */}
+      <AttachmentPreview
+        open={showPreview}
+        onClose={() => {
+          setShowPreview(false);
+          setPreviewAttachment(null);
+        }}
+        attachment={previewAttachment}
+        emailId={email.email_id}
+      />
     </Box>
+      )}
+    </>
   );
 };
 

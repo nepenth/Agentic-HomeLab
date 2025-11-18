@@ -136,6 +136,7 @@ class EmailAccountUpdateRequest(BaseModel):
     sync_days_back: Optional[int] = Field(None, description="Days back to sync")
     max_emails_limit: Optional[int] = Field(None, description="Maximum emails to sync")
     sync_settings: Optional[Dict[str, Any]] = Field(None, description="Additional sync configuration")
+    auth_credentials: Optional[Dict[str, Any]] = Field(None, description="Updated authentication credentials")
 
 
 class EmbeddingRequest(BaseModel):
@@ -370,6 +371,8 @@ async def update_email_account(
             update_data["sync_interval_minutes"] = request.sync_interval_minutes
         if request.auto_sync_enabled is not None:
             update_data["auto_sync_enabled"] = request.auto_sync_enabled
+        if request.auth_credentials is not None:
+            update_data["auth_credentials"] = request.auth_credentials
 
         # Handle sync settings updates (merge with existing settings)
         if any(field is not None for field in [request.sync_days_back, request.max_emails_limit, request.sync_settings]):
