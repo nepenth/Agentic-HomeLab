@@ -83,8 +83,8 @@ class ApiClient {
   private loadAuthToken() {
     // Check for auth_token first, then fallback to access_token for compatibility
     this.authToken = localStorage.getItem('auth_token') ||
-                     localStorage.getItem('access_token') ||
-                     sessionStorage.getItem('access_token');
+      localStorage.getItem('access_token') ||
+      sessionStorage.getItem('access_token');
   }
 
   setAuthToken(token: string) {
@@ -258,7 +258,13 @@ class ApiClient {
     return response.data;
   }
 
-  async runTask(taskData: { agent_id: string; input: Record<string, any> }): Promise<Task> {
+  async runTask(taskData: {
+    agent_id: string;
+    input: Record<string, any>;
+    email_id?: string;
+    email_sender?: string;
+    email_subject?: string;
+  }): Promise<Task> {
     const response = await this.client.post('/api/v1/tasks/run', taskData);
     return response.data;
   }
@@ -1984,7 +1990,7 @@ class ApiClient {
     };
     model_name?: string;
     max_days_back?: number;
-    conversation_history?: Array<{role: string; content: string}>;
+    conversation_history?: Array<{ role: string; content: string }>;
     stream?: boolean;
   }) {
     // No need for user_id - it's extracted from JWT token by backend
@@ -2004,7 +2010,7 @@ class ApiClient {
     };
     model_name?: string;
     max_days_back?: number;
-    conversation_history?: Array<{role: string; content: string}>;
+    conversation_history?: Array<{ role: string; content: string }>;
   }): AsyncGenerator<any, void, unknown> {
     const requestData = { ...messageData, stream: true };
 

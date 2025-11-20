@@ -54,6 +54,11 @@ celery_app.conf.beat_schedule = {
         'options': {'queue': 'email_sync'},
         'kwargs': {'days_threshold': 60}  # 60-day retention policy
     },
+    'process-pending-embeddings': {
+        'task': 'app.tasks.email_sync_tasks.process_pending_embeddings',
+        'schedule': 900.0,  # Run every 15 minutes
+        'options': {'queue': 'email_sync'}
+    },
 }
 
 if __name__ == "__main__":

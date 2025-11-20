@@ -7,7 +7,7 @@ WORKDIR /app
 COPY package.json package-lock.json* ./
 
 # Install dependencies
-RUN npm ci --silent
+RUN --mount=type=cache,target=/root/.npm npm ci --silent
 
 # Copy source code
 COPY . .

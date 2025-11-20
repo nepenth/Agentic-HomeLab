@@ -68,8 +68,26 @@ export interface DashboardMetrics {
   avg_response_time: number;
   sync_status: {
     active_accounts: number;
+    running_syncs: number;
     last_sync: string | null;
     next_sync: string | null;
+    active_sync_details?: {
+      account_id: string;
+      started_at: string;
+      duration_seconds: number;
+      emails_processed: number;
+      emails_added: number;
+    }[];
+  };
+  embedding_stats?: {
+    total_emails: number;
+    emails_with_embeddings: number;
+    pending_embeddings: number;
+    coverage_percent: number;
+    status: string;
+    status_message: string | null;
+    is_generating: boolean;
+    estimated_time_remaining?: string | null;
   };
 }
 

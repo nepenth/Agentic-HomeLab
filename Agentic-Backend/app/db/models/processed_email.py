@@ -59,7 +59,7 @@ class ProcessedEmail(Base):
     
     # Relationships
     user = relationship("User", back_populates="processed_emails")
-    tasks = relationship("Task", back_populates="processed_email")
+    # tasks = relationship("Task", back_populates="processed_email")
     
     # Indexes for efficient querying
     __table_args__ = (

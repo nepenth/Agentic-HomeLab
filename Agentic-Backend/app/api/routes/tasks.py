@@ -19,6 +19,9 @@ router = APIRouter()
 class TaskCreate(BaseModel):
     agent_id: UUID
     input: Dict[str, Any] = Field(default_factory=dict)
+    email_id: Optional[UUID] = None
+    email_sender: Optional[str] = None
+    email_subject: Optional[str] = None
 
 
 class TaskResponse(BaseModel):
@@ -33,6 +36,9 @@ class TaskResponse(BaseModel):
     created_at: str
     started_at: Optional[str]
     completed_at: Optional[str]
+    email_id: Optional[str] = None
+    email_sender: Optional[str] = None
+    email_subject: Optional[str] = None
 
 
 @router.post("/run", response_model=TaskResponse, dependencies=[Depends(verify_api_key)])
@@ -46,7 +52,10 @@ async def run_task(
         task = Task(
             agent_id=task_data.agent_id,
             input=task_data.input,
-            status=TaskStatus.PENDING
+            status=TaskStatus.PENDING,
+            email_id=task_data.email_id,
+            email_sender=task_data.email_sender,
+            email_subject=task_data.email_subject
         )
         
         db.add(task)
