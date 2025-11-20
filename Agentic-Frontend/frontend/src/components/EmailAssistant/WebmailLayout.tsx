@@ -23,8 +23,8 @@ export const WebmailLayout: React.FC<WebmailLayoutProps> = ({
     const theme = useTheme();
 
     // Resizable columns state
-    const [sidebarWidth, setSidebarWidth] = useState(250);
-    const [listWidth, setListWidth] = useState(400);
+    const [sidebarWidth, setSidebarWidth] = useState(260);
+    const [listWidth, setListWidth] = useState(450);
     const [isDraggingSidebar, setIsDraggingSidebar] = useState(false);
     const [isDraggingList, setIsDraggingList] = useState(false);
     const containerRef = useRef<HTMLDivElement>(null);
@@ -58,14 +58,14 @@ export const WebmailLayout: React.FC<WebmailLayoutProps> = ({
 
                     if (isDraggingSidebar) {
                         const newWidth = lastMouseX - containerLeft;
-                        if (newWidth >= 200 && newWidth <= 500) {
+                        if (newWidth >= 200 && newWidth <= 400) {
                             setSidebarWidth(newWidth);
                         }
                     }
                     if (isDraggingList) {
                         // Calculate width relative to sidebar
-                        const newWidth = lastMouseX - containerLeft - sidebarWidth - 4; // 4px for handle
-                        if (newWidth >= 300 && newWidth <= 800) {
+                        const newWidth = lastMouseX - containerLeft - sidebarWidth;
+                        if (newWidth >= 350 && newWidth <= 800) {
                             setListWidth(newWidth);
                         }
                     }
@@ -110,12 +110,16 @@ export const WebmailLayout: React.FC<WebmailLayoutProps> = ({
                 display: 'flex',
                 overflow: 'hidden',
                 minHeight: 0,
-                backgroundColor: theme.palette.background.paper,
-                borderRadius: '0 0 8px 8px',
+                backgroundColor: theme.palette.background.default,
+                borderRadius: 3,
                 flexDirection: isVerticalLayout ? 'column' : 'row',
                 position: 'relative',
+                boxShadow: theme.shadows[1],
+                border: `1px solid ${theme.palette.divider}`,
                 [theme.breakpoints.down('md')]: {
                     flexDirection: 'column',
+                    borderRadius: 0,
+                    border: 'none',
                 }
             }}
         >
@@ -125,9 +129,10 @@ export const WebmailLayout: React.FC<WebmailLayoutProps> = ({
                     width: isSidebarCollapsed ? 0 : sidebarWidth,
                     flexShrink: 0,
                     overflow: 'hidden',
-                    backgroundColor: theme.palette.background.paper,
-                    borderRight: `1px solid ${theme.palette.divider}`,
-                    transition: isDraggingSidebar ? 'none' : 'width 0.2s ease',
+                    backgroundColor: alpha(theme.palette.background.paper, 0.8),
+                    backdropFilter: 'blur(10px)',
+                    borderRight: `1px solid ${alpha(theme.palette.divider, 0.6)}`,
+                    transition: isDraggingSidebar ? 'none' : 'width 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
                     display: 'flex',
                     flexDirection: 'column',
                     [theme.breakpoints.down('md')]: {
@@ -147,12 +152,21 @@ export const WebmailLayout: React.FC<WebmailLayoutProps> = ({
                 <Box
                     onMouseDown={handleSidebarResizeStart}
                     sx={{
-                        width: 4,
+                        width: '1px',
                         cursor: 'col-resize',
                         backgroundColor: 'transparent',
+                        position: 'relative',
+                        '&::after': {
+                            content: '""',
+                            position: 'absolute',
+                            top: 0,
+                            bottom: 0,
+                            left: -2,
+                            width: 5,
+                            zIndex: 10,
+                        },
                         '&:hover': {
                             backgroundColor: theme.palette.primary.main,
-                            opacity: 0.5
                         },
                         transition: 'background-color 0.2s',
                         flexShrink: 0,
@@ -171,7 +185,8 @@ export const WebmailLayout: React.FC<WebmailLayoutProps> = ({
                     display: 'flex',
                     flexDirection: isVerticalLayout ? 'column' : 'row',
                     overflow: 'hidden',
-                    minWidth: 0,
+                    minWidth: 0, // Critical for flexbox text truncation
+                    height: '100%',
                     [theme.breakpoints.down('md')]: {
                         flexDirection: 'column',
                     }
@@ -187,9 +202,10 @@ export const WebmailLayout: React.FC<WebmailLayoutProps> = ({
                         overflow: 'hidden',
                         display: 'flex',
                         flexDirection: 'column',
-                        borderRight: isVerticalLayout ? 'none' : `1px solid ${theme.palette.divider}`,
-                        borderBottom: isVerticalLayout ? `1px solid ${theme.palette.divider}` : 'none',
-                        transition: isDraggingList ? 'none' : 'all 0.2s ease',
+                        backgroundColor: theme.palette.background.paper,
+                        borderRight: isVerticalLayout ? 'none' : `1px solid ${alpha(theme.palette.divider, 0.6)}`,
+                        borderBottom: isVerticalLayout ? `1px solid ${alpha(theme.palette.divider, 0.6)}` : 'none',
+                        transition: isDraggingList ? 'none' : 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)',
                         [theme.breakpoints.down('md')]: {
                             width: '100%',
                             height: '300px',
@@ -206,12 +222,21 @@ export const WebmailLayout: React.FC<WebmailLayoutProps> = ({
                     <Box
                         onMouseDown={handleListResizeStart}
                         sx={{
-                            width: 4,
+                            width: '1px',
                             cursor: 'col-resize',
                             backgroundColor: 'transparent',
+                            position: 'relative',
+                            '&::after': {
+                                content: '""',
+                                position: 'absolute',
+                                top: 0,
+                                bottom: 0,
+                                left: -2,
+                                width: 5,
+                                zIndex: 10,
+                            },
                             '&:hover': {
                                 backgroundColor: theme.palette.primary.main,
-                                opacity: 0.5
                             },
                             transition: 'background-color 0.2s',
                             flexShrink: 0,
@@ -230,8 +255,9 @@ export const WebmailLayout: React.FC<WebmailLayoutProps> = ({
                         overflow: 'hidden',
                         display: 'flex',
                         flexDirection: 'column',
-                        minWidth: 0,
-                        backgroundColor: alpha(theme.palette.background.default, 0.3),
+                        minWidth: 0, // Critical for flexbox text truncation
+                        height: '100%',
+                        backgroundColor: alpha(theme.palette.background.default, 0.6),
                         [theme.breakpoints.down('md')]: {
                             flex: 1,
                             minHeight: '400px'

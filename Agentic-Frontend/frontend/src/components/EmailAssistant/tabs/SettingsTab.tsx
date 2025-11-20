@@ -83,7 +83,10 @@ export const SettingsTab: React.FC = () => {
       client_secret: '',
       access_token: '',
       refresh_token: '',
-    } as any
+    } as any,
+    // Folder sync settings
+    sync_folders: [] as string[],
+    available_folders: [] as string[],
   });
 
   // Management function loading states
@@ -173,7 +176,7 @@ export const SettingsTab: React.FC = () => {
       auth_credentials: {
         // Initialize with placeholders or current values
         password: '••••••••',
-        server: account.auth_credentials?.server || '[Current Server]',
+        server: account.auth_credentials?.server || '',
         port: account.auth_credentials?.port || 993,
         username: account.auth_credentials?.username || account.email_address,
         use_ssl: account.auth_credentials?.use_ssl ?? true,
@@ -181,7 +184,9 @@ export const SettingsTab: React.FC = () => {
         client_secret: account.account_type === 'gmail' ? '••••••••••••••••' : '',
         access_token: account.account_type === 'gmail' ? '••••••••••••••••' : '',
         refresh_token: account.account_type === 'gmail' ? '••••••••••••••••' : '',
-      }
+      },
+      sync_folders: account.sync_folders || ['INBOX'],
+      available_folders: account.available_folders || ['INBOX', 'Sent', 'Drafts', 'Trash', 'Spam'], // Fallback or actual list
     });
   };
 
@@ -195,9 +200,7 @@ export const SettingsTab: React.FC = () => {
     try {
       // Prepare update data
       const updateData: any = {
-        sync_window_days: editFormData.sync_window_days,
-        auto_sync_enabled: editFormData.auto_sync_enabled,
-        sync_interval_minutes: editFormData.sync_interval_minutes,
+        sync_folders: editFormData.sync_folders,
       };
 
       // Handle auth credentials update
@@ -208,7 +211,7 @@ export const SettingsTab: React.FC = () => {
       if (currentAuth.password && currentAuth.password !== '••••••••') {
         authUpdates.password = currentAuth.password;
       }
-      if (currentAuth.server && currentAuth.server !== '[Current Server]') {
+      if (currentAuth.server) {
         authUpdates.server = currentAuth.server;
       }
       if (currentAuth.port) authUpdates.port = currentAuth.port;
@@ -232,7 +235,7 @@ export const SettingsTab: React.FC = () => {
         updateData.auth_credentials = authUpdates;
       }
 
-      await updateAccount(editingAccount.account_id, updateData);
+      await updateAccount({ accountId: editingAccount.account_id, data: updateData });
       enqueueSnackbar('Account settings updated successfully', { variant: 'success' });
       setEditingAccount(null);
       await refreshAccounts();
@@ -338,7 +341,7 @@ export const SettingsTab: React.FC = () => {
                         <Chip
                           label={account.sync_status}
                           size="small"
-                          color={account.sync_status === 'active' ? 'success' : 'default'}
+                          color={account.sync_status === 'active' ? 'success' : account.sync_status === 'error' ? 'error' : 'default'}
                         />
                       </Box>
                     }
@@ -347,10 +350,17 @@ export const SettingsTab: React.FC = () => {
                         <Typography variant="body2" sx={{ color: theme.palette.text.secondary }}>
                           {account.email_address}
                         </Typography>
-                        <Typography variant="caption" sx={{ color: theme.palette.text.secondary }}>
+                        <Typography variant="caption" sx={{ color: theme.palette.text.secondary, display: 'block' }}>
                           {account.account_type} • {account.total_emails_synced} emails • Auto-sync:{' '}
                           {account.auto_sync_enabled ? 'On' : 'Off'}
                         </Typography>
+                        {account.sync_status === 'error' && account.last_error && (
+                          <Alert severity="error" variant="standard" sx={{ mt: 1, py: 0, px: 2 }}>
+                            <Typography variant="caption">
+                              {account.last_error}
+                            </Typography>
+                          </Alert>
+                        )}
                       </Box>
                     }
                   />
@@ -999,58 +1009,60 @@ export const SettingsTab: React.FC = () => {
         fullWidth
       >
         <DialogTitle>Edit Email Account Settings</DialogTitle>
-        <DialogContent>
+        <DialogContent dividers>
           {editingAccount && (
-            <Box sx={{ pt: 2 }}>
-              <Typography variant="body2" sx={{ mb: 3, color: theme.palette.text.secondary }}>
-                Editing settings for <strong>{editingAccount.email_address}</strong>
-              </Typography>
-
-              <Stack spacing={3}>
-                <TextField
-                  label="Sync Window (Days)"
-                  type="number"
-                  fullWidth
-                  value={editFormData.sync_window_days}
-                  onChange={(e) =>
-                    setEditFormData({ ...editFormData, sync_window_days: parseInt(e.target.value) || 90 })
-                  }
-                  helperText="How many days back to sync emails (applies to initial sync only)"
-                  inputProps={{ min: 1, max: 3650 }}
-                />
-
-                <TextField
-                  label="Sync Interval (Minutes)"
-                  type="number"
-                  fullWidth
-                  value={editFormData.sync_interval_minutes}
-                  onChange={(e) =>
-                    setEditFormData({ ...editFormData, sync_interval_minutes: parseInt(e.target.value) || 15 })
-                  }
-                  helperText="How often to check for new emails"
-                  inputProps={{ min: 5, max: 1440 }}
-                />
-
-                <FormControlLabel
-                  control={
-                    <Switch
-                      checked={editFormData.auto_sync_enabled}
-                      onChange={(e) =>
-                        setEditFormData({ ...editFormData, auto_sync_enabled: e.target.checked })
-                      }
-                    />
-                  }
-                  label="Auto-sync enabled"
-                />
-
-                <Divider sx={{ my: 2 }} />
-
-                <Typography variant="subtitle2" sx={{ fontWeight: 600 }}>
-                  Authentication Settings
+            <Grid container spacing={2}>
+              <Grid item xs={12}>
+                <Typography variant="subtitle2" sx={{ mb: 1, fontWeight: 600 }}>
+                  Account Settings
                 </Typography>
+              </Grid>
 
-                {editingAccount.account_type === 'imap' && (
-                  <>
+              {/* Folder Sync Selection */}
+              <Grid item xs={12}>
+                <FormControl fullWidth>
+                  <InputLabel>Folders to Sync</InputLabel>
+                  <Select
+                    multiple
+                    value={editFormData.sync_folders}
+                    label="Folders to Sync"
+                    onChange={(e) => {
+                      const value = e.target.value;
+                      setEditFormData({
+                        ...editFormData,
+                        sync_folders: typeof value === 'string' ? value.split(',') : value,
+                      });
+                    }}
+                    renderValue={(selected) => (
+                      <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 0.5 }}>
+                        {selected.map((value: string) => (
+                          <Chip key={value} label={value} size="small" />
+                        ))}
+                      </Box>
+                    )}
+                  >
+                    {editFormData.available_folders.map((folder: string) => (
+                      <MenuItem key={folder} value={folder}>
+                        {folder}
+                      </MenuItem>
+                    ))}
+                  </Select>
+                </FormControl>
+              </Grid>
+
+              <Grid item xs={12}>
+                <Divider sx={{ my: 1 }} />
+                <Typography variant="subtitle2" sx={{ mb: 1, fontWeight: 600 }}>
+                  Authentication Credentials
+                </Typography>
+                <Alert severity="info" sx={{ mb: 2 }}>
+                  Only enter values for fields you want to update. Leave password blank to keep current one.
+                </Alert>
+              </Grid>
+
+              {editingAccount.account_type === 'imap' && (
+                <>
+                  <Grid item xs={12}>
                     <TextField
                       label="IMAP Server"
                       fullWidth
@@ -1111,56 +1123,10 @@ export const SettingsTab: React.FC = () => {
                       }
                       label="Use SSL/TLS"
                     />
-                  </>
-                )}
-
-                {editingAccount.account_type === 'gmail' && (
-                  <>
-                    <TextField
-                      label="Client ID"
-                      fullWidth
-                      value={editFormData.auth_credentials.client_id}
-                      onChange={(e) => setEditFormData({
-                        ...editFormData,
-                        auth_credentials: { ...editFormData.auth_credentials, client_id: e.target.value }
-                      })}
-                    />
-                    <TextField
-                      label="Client Secret"
-                      type="password"
-                      fullWidth
-                      value={editFormData.auth_credentials.client_secret}
-                      onChange={(e) => setEditFormData({
-                        ...editFormData,
-                        auth_credentials: { ...editFormData.auth_credentials, client_secret: e.target.value }
-                      })}
-                    />
-                    <TextField
-                      label="Access Token"
-                      fullWidth
-                      value={editFormData.auth_credentials.access_token}
-                      onChange={(e) => setEditFormData({
-                        ...editFormData,
-                        auth_credentials: { ...editFormData.auth_credentials, access_token: e.target.value }
-                      })}
-                    />
-                    <TextField
-                      label="Refresh Token"
-                      fullWidth
-                      value={editFormData.auth_credentials.refresh_token}
-                      onChange={(e) => setEditFormData({
-                        ...editFormData,
-                        auth_credentials: { ...editFormData.auth_credentials, refresh_token: e.target.value }
-                      })}
-                    />
-                  </>
-                )}
-
-                <Alert severity="info">
-                  Changing sync window will trigger a full resync on the next sync cycle.
-                </Alert>
-              </Stack>
-            </Box>
+                  </Grid>
+                </>
+              )}
+            </Grid>
           )}
         </DialogContent>
         <DialogActions>

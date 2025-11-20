@@ -13,7 +13,9 @@ from sqlalchemy import select, update
 
 from app.celery_app import celery_app
 from app.db.database import get_sync_session
+from app.db.database import get_sync_session
 from app.services.email_sync_service import email_sync_service
+from app.services.email_embedding_service import email_embedding_service
 from app.services.email_connectors.base_connector import SyncType
 from app.utils.logging import get_logger
 from app.db.models.email import EmailAccount
@@ -648,3 +650,72 @@ def _periodic_sync_scheduler_sync():
         raise
     finally:
         db.close()
+
+
+@celery_app.task(base=EmailSyncTask, bind=True, max_retries=2, default_retry_delay=300)
+def process_pending_embeddings(self, user_id: Optional[int] = None):
+    """
+    Process pending email embeddings.
+
+    This task scans for emails that don't have embeddings generated yet
+    and processes them. It can be run periodically or triggered after sync.
+    """
+    try:
+        return _process_pending_embeddings_sync(user_id)
+    except Exception as exc:
+        logger.error(f"Embedding processing failed: {exc}")
+        if self.request.retries < self.max_retries:
+            logger.info(f"Retrying embedding processing, attempt {self.request.retries + 1}")
+            raise self.retry(countdown=300, exc=exc)
+        raise
+
+
+def _process_pending_embeddings_sync(user_id: Optional[int] = None):
+    """Synchronous wrapper for processing pending embeddings."""
+    logger.info(f"Starting processing of pending embeddings (user_id: {user_id})")
+
+    try:
+        import asyncio
+        
+        # Use async context but isolated from the main async engine pool
+        async def _run_processing():
+            from app.db.database import get_session_context
+            
+            async with get_session_context() as db:
+                return await email_embedding_service.process_pending_emails(
+                    db, user_id
+                )
+
+        # Try to get existing loop first
+        try:
+            loop = asyncio.get_event_loop()
+            if loop.is_closed():
+                loop = asyncio.new_event_loop()
+                asyncio.set_event_loop(loop)
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+
+        try:
+            result = loop.run_until_complete(_run_processing())
+        finally:
+            # Don't close the loop - let Celery manage it
+            # Just clean up pending tasks
+            try:
+                pending = asyncio.all_tasks(loop)
+                if pending:
+                    for task in pending:
+                        task.cancel()
+                    try:
+                        loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+                    except:
+                        pass
+            except Exception as cleanup_error:
+                logger.warning(f"Error during cleanup: {cleanup_error}")
+
+        logger.info(f"Completed embedding processing: {result}")
+        return result
+
+    except Exception as e:
+        logger.error(f"Error processing pending embeddings: {e}")
+        raise

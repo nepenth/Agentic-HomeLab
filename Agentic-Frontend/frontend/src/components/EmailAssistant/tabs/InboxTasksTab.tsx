@@ -21,6 +21,7 @@ import { WebmailToolbar } from '../WebmailToolbar';
 import { QuickActionsToolbar } from '../QuickActionsToolbar';
 import { BulkOperationsDialog } from '../BulkOperationsDialog';
 import { WebmailLayout } from '../WebmailLayout';
+import { CreateTaskDialog } from '../CreateTaskDialog';
 
 // Global flag to verify new code is loaded
 console.log('🔵 InboxTasksTab MODULE LOADED - BUILD VERSION: 2024-10-20-v6-FORCE-REFRESH');
@@ -518,9 +519,6 @@ const InboxTasksTabBase: React.FC<InboxTasksTabProps> = ({
       display: 'flex',
       flexDirection: 'column',
       overflow: 'hidden',
-      backgroundColor: theme.palette.background.default,
-      borderRadius: 2,
-      border: `1px solid ${theme.palette.divider}`
     }}>
       {/* Error Alert */}
       {error && (
@@ -621,7 +619,7 @@ const InboxTasksTabBase: React.FC<InboxTasksTabProps> = ({
             onToggleSelection={handleToggleSelection}
             onToggleImportant={handleToggleImportant}
             onMarkAsRead={markAsRead}
-            isLoading={false}
+            isLoading={loading || accountsLoading}
           />
         }
         emailDetail={

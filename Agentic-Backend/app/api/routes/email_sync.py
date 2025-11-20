@@ -265,6 +265,13 @@ async def get_email_accounts(
                     "sync_attachments": sync_settings.get("sync_attachments", True),
                     "include_spam": sync_settings.get("include_spam", False),
                     "include_trash": sync_settings.get("include_trash", False)
+                },
+                "auth_credentials": {
+                    "server": account.auth_credentials.get("server") if account.auth_credentials else None,
+                    "port": account.auth_credentials.get("port") if account.auth_credentials else None,
+                    "username": account.auth_credentials.get("username") if account.auth_credentials else None,
+                    "use_ssl": account.auth_credentials.get("use_ssl") if account.auth_credentials else None,
+                    # Do not return sensitive fields like password, client_secret, tokens
                 }
             }
             account_list.append(account_data)
@@ -1606,8 +1613,9 @@ async def get_dashboard_metrics(
         )
         tasks_completed_today = tasks_completed_today_result.scalar() or 0
 
-        # Get embedding statistics
-        emails_with_embeddings_result = await db.execute(
+        # --- Enhanced Embedding Stats ---
+        # Count emails with embeddings
+        embeddings_count_result = await db.execute(
             select(func.count(Email.id))
             .join(EmailAccount, Email.account_id == EmailAccount.id)
             .where(
@@ -1617,15 +1625,19 @@ async def get_dashboard_metrics(
                 )
             )
         )
-        emails_with_embeddings = emails_with_embeddings_result.scalar() or 0
-        emails_without_embeddings = total_emails - emails_with_embeddings
+        emails_with_embeddings = embeddings_count_result.scalar() or 0
+        
+        pending_embeddings = total_emails - emails_with_embeddings
         embedding_coverage = round((emails_with_embeddings / total_emails * 100), 2) if total_emails > 0 else 0
+        
+        # Estimate time remaining (assuming ~0.5s per email)
+        est_seconds_remaining = pending_embeddings * 0.5
+        est_time_remaining_str = str(timedelta(seconds=int(est_seconds_remaining))) if pending_embeddings > 0 else None
 
-        # Check if embedding generation is currently running
-        # We use a simple heuristic: check if there are any emails that were recently updated
-        # with embeddings_generated status change
-        from datetime import timedelta
-
+        # Determine embedding generation status
+        # We assume if there are pending embeddings, the periodic task will pick them up
+        # So status is "generating" if pending > 0, but we can be more specific if we check recent activity
+        
         # Check for emails that had embeddings generated in last 2 minutes
         two_minutes_ago = datetime.utcnow() - timedelta(minutes=2)
         recent_embedding_activity = await db.execute(
@@ -1642,19 +1654,45 @@ async def get_dashboard_metrics(
         )
         has_recent_activity = recent_embedding_activity.scalar_one_or_none() is not None
 
-        # Determine embedding generation status
         embedding_status = "idle"
         embedding_status_message = None
 
-        if has_recent_activity and emails_without_embeddings > 0:
+        if has_recent_activity and pending_embeddings > 0:
             embedding_status = "generating"
-            embedding_status_message = f"Generating embeddings ({emails_without_embeddings} remaining)"
-        elif emails_without_embeddings > 0:
+            embedding_status_message = f"Generating embeddings ({pending_embeddings} remaining)"
+        elif pending_embeddings > 0:
             embedding_status = "pending"
-            embedding_status_message = f"{emails_without_embeddings} emails need embeddings"
+            embedding_status_message = f"{pending_embeddings} emails waiting for embeddings"
         else:
             embedding_status = "complete"
             embedding_status_message = "All emails have embeddings"
+
+        # --- Enhanced Sync Stats ---
+        from app.db.models.email import EmailSyncHistory
+        
+        # Get active syncs
+        active_syncs_result = await db.execute(
+            select(EmailSyncHistory)
+            .join(EmailAccount, EmailSyncHistory.account_id == EmailAccount.id)
+            .where(
+                and_(
+                    EmailAccount.user_id == current_user.id,
+                    EmailSyncHistory.status == 'running'
+                )
+            )
+        )
+        active_syncs = active_syncs_result.scalars().all()
+        
+        active_sync_details = []
+        for sync in active_syncs:
+            duration = datetime.utcnow() - sync.started_at.replace(tzinfo=None)
+            active_sync_details.append({
+                "account_id": str(sync.account_id),
+                "started_at": sync.started_at.isoformat(),
+                "duration_seconds": int(duration.total_seconds()),
+                "emails_processed": sync.emails_processed,
+                "emails_added": sync.emails_added
+            })
 
         return {
             "total_emails": total_emails,
@@ -1663,21 +1701,23 @@ async def get_dashboard_metrics(
             "high_priority_tasks": high_priority_tasks,
             "emails_today": emails_today,
             "tasks_completed_today": tasks_completed_today,
-            "avg_response_time": 0,  # TODO: Calculate if needed
+            "avg_response_time": 0,
             "sync_status": {
                 "active_accounts": active_accounts,
                 "running_syncs": running_syncs,
                 "last_sync": last_sync.isoformat() if last_sync else None,
-                "next_sync": next_sync.isoformat() if next_sync else None
+                "next_sync": next_sync.isoformat() if next_sync else None,
+                "active_sync_details": active_sync_details
             },
             "embedding_stats": {
                 "total_emails": total_emails,
                 "emails_with_embeddings": emails_with_embeddings,
-                "emails_without_embeddings": emails_without_embeddings,
+                "pending_embeddings": pending_embeddings,
                 "coverage_percent": embedding_coverage,
                 "status": embedding_status,
                 "status_message": embedding_status_message,
-                "is_generating": embedding_status == "generating"
+                "is_generating": embedding_status == "generating",
+                "estimated_time_remaining": est_time_remaining_str
             }
         }
     except Exception as e:

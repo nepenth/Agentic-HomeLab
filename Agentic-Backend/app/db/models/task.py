@@ -36,7 +36,7 @@ class Task(Base):
     celery_task_id = Column(String(255), nullable=True, index=True)
     
     # Email task linking - for tasks created from emails
-    email_id = Column(UUID(as_uuid=True), ForeignKey("processed_emails.id", ondelete="SET NULL"), nullable=True, index=True)
+    email_id = Column(UUID(as_uuid=True), ForeignKey("emails.id", ondelete="SET NULL"), nullable=True, index=True)
     email_sender = Column(String(500), nullable=True)  # Denormalized for quick access
     email_subject = Column(Text, nullable=True)  # Denormalized for quick access
     
@@ -48,7 +48,7 @@ class Task(Base):
     agent = relationship("Agent", back_populates="tasks")
     logs = relationship("TaskLog", back_populates="task", cascade="all, delete-orphan")
     embeddings = relationship("Embedding", back_populates="task", cascade="all, delete-orphan")
-    processed_email = relationship("ProcessedEmail", back_populates="tasks")
+    email = relationship("Email")
     
     def __repr__(self):
         return f"<Task(id={self.id}, agent_id={self.agent_id}, status='{self.status}')>"

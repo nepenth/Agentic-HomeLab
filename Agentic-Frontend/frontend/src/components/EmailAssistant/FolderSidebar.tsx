@@ -8,13 +8,13 @@ import {
   ListItemText,
   Typography,
   Badge,
-  Divider,
   IconButton,
   Tooltip,
   Collapse,
   alpha,
   useTheme,
-  Button
+  Button,
+  Divider
 } from '@mui/material';
 import {
   Inbox,
@@ -25,11 +25,9 @@ import {
   Star,
   Label,
   ExpandMore,
-  ExpandLess,
-  Folder,
-  FolderOpen,
-  Refresh,
-  ChevronRight
+  ChevronRight,
+  Edit as EditIcon,
+  Add as AddIcon
 } from '@mui/icons-material';
 import { useQuery } from '@tanstack/react-query';
 import apiClient from '../../services/api';
@@ -53,16 +51,17 @@ interface FolderData {
 const getFolderIcon = (folderName: string, isSelected: boolean) => {
   const name = folderName.toLowerCase();
   const color = isSelected ? 'primary' : 'inherit';
+  const sx = { fontSize: 20, color: isSelected ? 'primary.main' : 'text.secondary' };
 
-  if (name === 'inbox') return <Inbox color={color as any} />;
-  if (name === 'sent' || name === 'sent items') return <Send color={color as any} />;
-  if (name === 'drafts') return <Drafts color={color as any} />;
-  if (name === 'trash' || name === 'deleted items' || name === 'bin') return <Delete color={color as any} />;
-  if (name === 'archive') return <Archive color={color as any} />;
-  if (name === 'starred' || name === 'flagged' || name === 'important') return <Star color={color as any} />;
-  if (name === 'junk' || name === 'spam') return <Label color={color as any} />;
+  if (name === 'inbox') return <Inbox sx={sx} />;
+  if (name === 'sent' || name === 'sent items') return <Send sx={sx} />;
+  if (name === 'drafts') return <Drafts sx={sx} />;
+  if (name === 'trash' || name === 'deleted items' || name === 'bin') return <Delete sx={sx} />;
+  if (name === 'archive') return <Archive sx={sx} />;
+  if (name === 'starred' || name === 'flagged' || name === 'important') return <Star sx={sx} />;
+  if (name === 'junk' || name === 'spam') return <Label sx={sx} />;
 
-  return isSelected ? <FolderOpen color="primary" /> : <Folder />;
+  return <Label sx={sx} />;
 };
 
 export const FolderSidebar: React.FC<FolderSidebarProps> = ({
@@ -70,9 +69,6 @@ export const FolderSidebar: React.FC<FolderSidebarProps> = ({
   selectedFolder,
   onFolderSelect
 }) => {
-  // Cache-busting timestamp
-  const forceRefresh = React.useMemo(() => Date.now(), []);
-  
   const theme = useTheme();
   const [expandedFolders, setExpandedFolders] = React.useState<Set<string>>(new Set(['root']));
 
@@ -81,10 +77,8 @@ export const FolderSidebar: React.FC<FolderSidebarProps> = ({
     queryKey: ['folder-status', accountId],
     queryFn: async () => {
       if (!accountId) return null;
-      console.log('[FolderSidebar] Fetching folder status for account:', accountId);
       try {
         const result = await apiClient.getFolderSyncStatus(accountId);
-        console.log('[FolderSidebar] Folder status result:', result);
         return result;
       } catch (error) {
         console.error('[FolderSidebar] Error fetching folder status:', error);
@@ -94,7 +88,6 @@ export const FolderSidebar: React.FC<FolderSidebarProps> = ({
     enabled: !!accountId,
     refetchInterval: 30000,
     retry: 3,
-    retryDelay: attemptIndex => Math.min(1000 * 2 ** attemptIndex, 30000),
   });
 
   // Fetch available folders
@@ -102,10 +95,8 @@ export const FolderSidebar: React.FC<FolderSidebarProps> = ({
     queryKey: ['folders', accountId],
     queryFn: async () => {
       if (!accountId) return null;
-      console.log('[FolderSidebar] Fetching folders for account:', accountId);
       try {
         const result = await apiClient.getAccountFolders(accountId);
-        console.log('[FolderSidebar] Folders result:', result);
         return result;
       } catch (error) {
         console.error('[FolderSidebar] Error fetching folders:', error);
@@ -114,28 +105,7 @@ export const FolderSidebar: React.FC<FolderSidebarProps> = ({
     },
     enabled: !!accountId,
     retry: 3,
-    retryDelay: attemptIndex => Math.min(1000 * 2 ** attemptIndex, 30000),
   });
-
-  // Debug logging
-  React.useEffect(() => {
-    console.log('[FolderSidebar] State:', {
-      accountId,
-      foldersData,
-      folderStatus,
-      loadingFolders,
-      loadingStatus,
-      foldersError,
-      statusError
-    });
-
-    if (foldersError) {
-      console.error('[FolderSidebar] Folders error details:', foldersError);
-    }
-    if (statusError) {
-      console.error('[FolderSidebar] Status error details:', statusError);
-    }
-  }, [accountId, foldersData, folderStatus, loadingFolders, loadingStatus, foldersError, statusError]);
 
   const handleRefresh = () => {
     refetchStatus();
@@ -154,35 +124,22 @@ export const FolderSidebar: React.FC<FolderSidebarProps> = ({
 
   // Organize folders into hierarchical structure
   const organizeFolders = (): FolderData[] => {
-    console.log('[FolderSidebar] organizeFolders called:', {
-      hasFoldersData: !!foldersData,
-      hasFolderStatus: !!folderStatus,
-      hasFoldersError: !!foldersError,
-      hasStatusError: !!statusError,
-      foldersLength: folderStatus?.folders?.length || 0
-    });
-
     // ALWAYS use folderStatus data as primary source - it's the most reliable
     if (folderStatus && folderStatus.folders && folderStatus.folders.length > 0) {
-      console.log('[FolderSidebar] Using FOLDER STATUS data as primary - folders:', folderStatus.folders.length);
       return organizeFoldersFromStatus(folderStatus.folders || []);
     }
 
     // Fallback to foldersData if available and working
     if (foldersData && !foldersError) {
-      console.log('[FolderSidebar] Using primary folders data as fallback');
       return organizeFoldersFromApi(foldersData.folders || [], folderStatus?.folders || []);
     }
 
-    console.log('[FolderSidebar] organizeFolders: No usable data available');
     return [];
   };
 
   const organizeFoldersFromApi = (folders: any[], folderStatuses: any[]): FolderData[] => {
     const folderList: FolderData[] = [];
     const folderMap = new Map<string, FolderData>();
-
-    console.log('[FolderSidebar] Processing', folders.length, 'API folders and', folderStatuses.length, 'statuses');
 
     folders.forEach((folder: any) => {
       const folderName = folder.name;
@@ -220,11 +177,12 @@ export const FolderSidebar: React.FC<FolderSidebarProps> = ({
   };
 
   const organizeFoldersFromStatus = (folderStatuses: any[]): FolderData[] => {
-    console.log('[FolderSidebar] Processing', folderStatuses.length, 'status-only folders');
-    console.log('[FolderSidebar] Folder names:', folderStatuses.map(f => f.folder_name));
+    const folderList: FolderData[] = [];
+    const folderMap = new Map<string, FolderData>();
 
-    const result = folderStatuses.map((status: any) => {
-      const folderData = {
+    // First pass: Create all folder objects
+    folderStatuses.forEach((status: any) => {
+      const folderData: FolderData = {
         name: status.folder_name,
         path: status.folder_name,
         emailCount: status.email_count || 0,
@@ -232,12 +190,40 @@ export const FolderSidebar: React.FC<FolderSidebarProps> = ({
         children: [],
         isExpanded: expandedFolders.has(status.folder_name)
       };
-      console.log('[FolderSidebar] Mapped folder:', folderData.name, 'emails:', folderData.emailCount);
-      return folderData;
+      folderMap.set(status.folder_name, folderData);
     });
 
-    console.log('[FolderSidebar] Final organized folders count:', result.length);
-    return result;
+    // Second pass: Build hierarchy
+    // We need to handle cases where parent folders might not exist in the status list
+    // but are implied by the path structure (e.g. "INBOX/Work" implies "INBOX")
+
+    // Sort keys to ensure parents are processed before children if possible, 
+    // though the map lookup handles out-of-order processing too.
+    const sortedPaths = Array.from(folderMap.keys()).sort();
+
+    sortedPaths.forEach((path) => {
+      const folder = folderMap.get(path)!;
+
+      if (path.includes('/')) {
+        // It's a subfolder
+        const parentPath = path.substring(0, path.lastIndexOf('/'));
+        const parent = folderMap.get(parentPath);
+
+        if (parent) {
+          parent.children = parent.children || [];
+          parent.children.push(folder);
+        } else {
+          // Parent doesn't exist in our map (maybe not returned by API?)
+          // For now, treat as root level to ensure it's visible
+          folderList.push(folder);
+        }
+      } else {
+        // It's a root folder
+        folderList.push(folder);
+      }
+    });
+
+    return sortFolders(folderList);
   };
 
   const sortFolders = (folderList: FolderData[]): FolderData[] => {
@@ -259,31 +245,29 @@ export const FolderSidebar: React.FC<FolderSidebarProps> = ({
     const isSelected = selectedFolder === folder.path;
     const hasChildren = folder.children && folder.children.length > 0;
     const isExpanded = expandedFolders.has(folder.path);
+    const folderName = folder.name.split('/').pop() || folder.name;
 
     return (
       <React.Fragment key={folder.path}>
-        <ListItem
-          disablePadding
-          sx={{
-            pl: depth * 2,
-            borderLeft: isSelected ? `3px solid ${theme.palette.primary.main}` : 'none'
-          }}
-        >
+        <ListItem disablePadding sx={{ mb: 0.5 }}>
           <ListItemButton
             selected={isSelected}
             onClick={() => onFolderSelect(folder.path)}
             sx={{
+              pl: 2 + depth * 2,
+              pr: 2,
               py: 0.75,
-              px: 1.5,
-              minHeight: 40,
+              mx: 1,
+              borderRadius: 2,
+              minHeight: 36,
               '&.Mui-selected': {
-                backgroundColor: alpha(theme.palette.primary.main, 0.08),
+                backgroundColor: alpha(theme.palette.primary.main, 0.1),
                 '&:hover': {
-                  backgroundColor: alpha(theme.palette.primary.main, 0.12)
+                  backgroundColor: alpha(theme.palette.primary.main, 0.15)
                 }
               },
               '&:hover': {
-                backgroundColor: alpha(theme.palette.primary.main, 0.04)
+                backgroundColor: alpha(theme.palette.text.primary, 0.04)
               }
             }}
           >
@@ -294,23 +278,33 @@ export const FolderSidebar: React.FC<FolderSidebarProps> = ({
                   e.stopPropagation();
                   toggleFolder(folder.path);
                 }}
-                sx={{ mr: 0.5, p: 0.25 }}
+                sx={{
+                  mr: 0.5,
+                  p: 0.25,
+                  ml: -1,
+                  color: 'text.secondary',
+                  transform: isExpanded ? 'rotate(90deg)' : 'none',
+                  transition: 'transform 0.2s'
+                }}
               >
-                {isExpanded ? <ExpandMore fontSize="small" /> : <ChevronRight fontSize="small" />}
+                <ChevronRight fontSize="small" />
               </IconButton>
             )}
 
-            <ListItemIcon sx={{ minWidth: 36 }}>
+            <ListItemIcon sx={{ minWidth: 32, ml: hasChildren ? 0 : 2.5 }}>
               {getFolderIcon(folder.name, isSelected)}
             </ListItemIcon>
 
             <ListItemText
-              primary={folder.name.split('/').pop()}
+              primary={folderName}
               primaryTypographyProps={{
                 sx: {
                   fontSize: '0.875rem',
-                  fontWeight: isSelected ? 600 : 400,
-                  color: isSelected ? 'primary.main' : 'text.primary'
+                  fontWeight: isSelected ? 600 : 500,
+                  color: isSelected ? 'text.primary' : 'text.secondary',
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                  whiteSpace: 'nowrap'
                 }
               }}
             />
@@ -319,15 +313,14 @@ export const FolderSidebar: React.FC<FolderSidebarProps> = ({
             {folder.unreadCount !== undefined && folder.unreadCount > 0 && (
               <Badge
                 badgeContent={folder.unreadCount}
-                color={isSelected ? 'primary' : 'default'}
+                color="primary"
                 sx={{
                   '& .MuiBadge-badge': {
-                    fontSize: '0.65rem',
+                    fontSize: '0.7rem',
                     height: 18,
                     minWidth: 18,
                     fontWeight: 600,
-                    backgroundColor: isSelected ? theme.palette.primary.main : theme.palette.primary.light,
-                    color: 'white'
+                    boxShadow: `0 0 0 2px ${theme.palette.background.paper}`,
                   }
                 }}
               />
@@ -335,7 +328,7 @@ export const FolderSidebar: React.FC<FolderSidebarProps> = ({
           </ListItemButton>
         </ListItem>
 
-        {hasChildren && isExpanded && (
+        {hasChildren && (
           <Collapse in={isExpanded} timeout="auto" unmountOnExit>
             {folder.children!.map(child => renderFolder(child, depth + 1))}
           </Collapse>
@@ -346,18 +339,35 @@ export const FolderSidebar: React.FC<FolderSidebarProps> = ({
 
   const folders = organizeFolders();
 
-  console.log('[FolderSidebar] Final folders array length:', folders.length, 'folders:', folders.map(f => f.name));
-
-  // Conditional rendering within single return statement
   return (
     <Box sx={{
       height: '100%',
       display: 'flex',
       flexDirection: 'column',
-      borderRight: `1px solid ${theme.palette.divider}`,
-      backgroundColor: theme.palette.background.paper,
-      borderRadius: '8px 0 0 8px'
+      backgroundColor: 'transparent',
     }}>
+      {/* Compose Button Area */}
+      <Box sx={{ p: 2 }}>
+        <Button
+          variant="contained"
+          fullWidth
+          startIcon={<EditIcon />}
+          sx={{
+            py: 1.5,
+            borderRadius: 3,
+            textTransform: 'none',
+            fontWeight: 600,
+            boxShadow: theme.shadows[2],
+            background: `linear-gradient(45deg, ${theme.palette.primary.main}, ${theme.palette.primary.dark})`,
+            '&:hover': {
+              boxShadow: theme.shadows[4],
+            }
+          }}
+        >
+          Compose
+        </Button>
+      </Box>
+
       {/* Show "no account" message */}
       {!accountId && (
         <Box sx={{ p: 3, textAlign: 'center' }}>
@@ -376,62 +386,38 @@ export const FolderSidebar: React.FC<FolderSidebarProps> = ({
         </Box>
       )}
 
-      {/* Show folders when loaded - ALWAYS show if we have account and not loading */}
+      {/* Show folders when loaded */}
       {accountId && !loadingFolders && !loadingStatus && folders.length > 0 && (
         <>
-          {/* Header */}
-          <Box sx={{
-            p: 2,
-            display: 'flex',
-            justifyContent: 'space-between',
-            alignItems: 'center',
-            borderBottom: `1px solid ${theme.palette.divider}`,
-            backgroundColor: alpha(theme.palette.primary.main, 0.02),
-            borderRadius: '8px 0 0 0'
-          }}>
-            <Typography variant="subtitle2" sx={{ fontWeight: 700, fontSize: '0.875rem', textTransform: 'uppercase', letterSpacing: 0.5 }}>
-              Folders{foldersError ? ' (Fallback)' : ''}
+          <Box sx={{ px: 2, py: 1 }}>
+            <Typography variant="caption" sx={{ fontWeight: 700, color: 'text.secondary', textTransform: 'uppercase', letterSpacing: 1 }}>
+              Folders
             </Typography>
-            <Tooltip title="Refresh folders">
-              <IconButton size="small" onClick={handleRefresh}>
-                <Refresh fontSize="small" />
-              </IconButton>
-            </Tooltip>
           </Box>
 
-          {/* Folder List */}
           <List sx={{ flex: 1, overflow: 'auto', py: 0.5 }}>
             {folders.map(folder => renderFolder(folder))}
           </List>
 
-          {/* Footer Stats */}
-          <Box sx={{
-            p: 1.5,
-            borderTop: `1px solid ${theme.palette.divider}`,
-            backgroundColor: alpha(theme.palette.background.default, 0.5)
-          }}>
-            <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>
-              {folders.length} folder{folders.length !== 1 ? 's' : ''}
-              {foldersError ? ' (using fallback)' : ''}
+          {/* Smart Views / Categories Section (Future) */}
+          <Divider sx={{ my: 1, mx: 2 }} />
+
+          <Box sx={{ px: 2, py: 1, display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+            <Typography variant="caption" sx={{ fontWeight: 700, color: 'text.secondary', textTransform: 'uppercase', letterSpacing: 1 }}>
+              Smart Views
             </Typography>
-            <Typography variant="caption" color="text.secondary">
-              {folders.reduce((sum, f) => sum + f.emailCount + (f.children?.reduce((s, c) => s + c.emailCount, 0) || 0), 0)} emails total
-            </Typography>
+            <IconButton size="small" sx={{ p: 0.5 }}>
+              <AddIcon fontSize="small" />
+            </IconButton>
           </Box>
         </>
       )}
 
-      {/* Show fallback error state when we have no folders but have tried to load */}
+      {/* Show fallback error state */}
       {accountId && !loadingFolders && !loadingStatus && folders.length === 0 && !foldersError && (
         <Box sx={{ p: 2, textAlign: 'center' }}>
           <Typography variant="body2" color="text.secondary">
             No folders found
-          </Typography>
-          <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mt: 1 }}>
-            Try refreshing or check your account settings
-          </Typography>
-          <Typography variant="caption" color="error" sx={{ display: 'block', mt: 1 }}>
-            Debug: folders.length = {folders.length}, foldersError = {foldersError ? 'present' : 'none'}
           </Typography>
         </Box>
       )}
@@ -442,10 +428,7 @@ export const FolderSidebar: React.FC<FolderSidebarProps> = ({
           <Typography variant="body2" color="error" sx={{ mb: 1 }}>
             Failed to load folders
           </Typography>
-          <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 2 }}>
-            {foldersError.message || 'Unknown error occurred'}
-          </Typography>
-          <Button size="small" onClick={handleRefresh} variant="outlined">
+          <Button size="small" onClick={handleRefresh} variant="outlined" color="error">
             Retry
           </Button>
         </Box>

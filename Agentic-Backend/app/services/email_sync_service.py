@@ -985,8 +985,12 @@ class EmailSyncService:
     ):
         """Schedule embedding generation for newly synced emails."""
         try:
-            stats = await email_embedding_service.process_pending_emails(db, user_id)
-            self.logger.info(f"Embedding generation completed: {stats}")
+            # Import here to avoid circular imports
+            from app.tasks.email_sync_tasks import process_pending_embeddings
+            
+            # Schedule as background task
+            process_pending_embeddings.delay(user_id)
+            self.logger.info(f"Scheduled embedding generation task for user {user_id}")
         except Exception as e:
             self.logger.error(f"Error scheduling embedding generation: {e}")
 
