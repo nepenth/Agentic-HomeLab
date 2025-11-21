@@ -311,6 +311,7 @@ class EmailSyncHistory(Base):
     # Sync details
     sync_type = Column(String(50), nullable=False)  # full, incremental, manual
     started_at = Column(TIMESTAMP(timezone=True), server_default=func.now())
+    last_updated = Column(TIMESTAMP(timezone=True), server_default=func.now(), onupdate=func.now())
     completed_at = Column(TIMESTAMP(timezone=True))
     status = Column(String(50), nullable=False)  # running, success, error, cancelled
 

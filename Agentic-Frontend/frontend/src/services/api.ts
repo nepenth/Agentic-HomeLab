@@ -471,8 +471,8 @@ class ApiClient {
   }
 
   async getChatModels(): Promise<ChatModelsResponse> {
-    // Use email-assistant endpoint which filters out embedding models
-    const response = await this.client.get('/api/v1/email-assistant/models');
+    // Use rich email-assistant endpoint which provides comprehensive model information
+    const response = await this.client.get('/api/v1/email-assistant/models/rich');
     return response.data;
   }
 

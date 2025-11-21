@@ -1684,15 +1684,67 @@ async def get_dashboard_metrics(
         active_syncs = active_syncs_result.scalars().all()
         
         active_sync_details = []
+        stuck_sync_ids = []
+        
         for sync in active_syncs:
             duration = datetime.utcnow() - sync.started_at.replace(tzinfo=None)
+            duration_seconds = int(duration.total_seconds())
+            
+            # Check for stuck syncs using last_updated if available
+            is_stuck = False
+            if sync.last_updated:
+                time_since_update = datetime.utcnow() - sync.last_updated.replace(tzinfo=None)
+                if time_since_update.total_seconds() > 300: # 5 minutes without update
+                    is_stuck = True
+            elif duration_seconds > 3600: # Fallback to 1 hour if no last_updated (e.g. early crash)
+                is_stuck = True
+            
+            if is_stuck:
+                stuck_sync_ids.append(sync.id)
+                continue
+                
             active_sync_details.append({
                 "account_id": str(sync.account_id),
                 "started_at": sync.started_at.isoformat(),
-                "duration_seconds": int(duration.total_seconds()),
+                "duration_seconds": duration_seconds,
                 "emails_processed": sync.emails_processed,
                 "emails_added": sync.emails_added
             })
+            
+        # Trigger cleanup for stuck syncs (fire and forget)
+        if stuck_sync_ids:
+            # We can't easily call async service method here without awaiting
+            # For now, we just update them in the DB directly to 'error' status
+            # so they stop showing up as running.
+            try:
+                await db.execute(
+                    update(EmailSyncHistory)
+                    .where(EmailSyncHistory.id.in_(stuck_sync_ids))
+                    .values(
+                        status='error',
+                        error_message='Sync timed out (stuck)',
+                        completed_at=datetime.utcnow()
+                    )
+                )
+                await db.commit()
+                
+                # Also update the account status if it was 'syncing'
+                # This is a bit rough but necessary to self-heal
+                stuck_account_ids = [s.account_id for s in active_syncs if s.id in stuck_sync_ids]
+                if stuck_account_ids:
+                    await db.execute(
+                        update(EmailAccount)
+                        .where(
+                            and_(
+                                EmailAccount.id.in_(stuck_account_ids),
+                                EmailAccount.sync_status == 'running'
+                            )
+                        )
+                        .values(sync_status='error', last_error='Sync timed out')
+                    )
+                    await db.commit()
+            except Exception as e:
+                logger.error(f"Failed to cleanup stuck syncs: {e}")
 
         return {
             "total_emails": total_emails,

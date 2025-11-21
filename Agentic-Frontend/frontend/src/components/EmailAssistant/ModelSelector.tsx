@@ -32,7 +32,8 @@ import {
 } from '@mui/icons-material';
 import { useQuery, useMutation } from '@tanstack/react-query';
 import apiClient from '../../services/api';
-import { getEnhancedModelInfo, ModelInfo } from '../../utils/modelIntelligence';
+import { getEnhancedModelInfo } from '../../utils/modelIntelligence';
+import type { ModelInfo } from '../../utils/modelIntelligence';
 import { HybridModelIntelligence } from '../../utils/dynamicModelIntelligence';
 
 interface ModelSelectorProps {
@@ -44,15 +45,53 @@ interface ModelSelectorProps {
 
 interface OllamaModel {
   name: string;
-  size?: number;
-  modified_at?: string;
-  details?: {
-    format?: string;
-    family?: string;
-    families?: string[];
-    parameter_size?: string;
-    quantization_level?: string;
+  display_name?: string;
+  description?: string;
+  category?: string;
+  recommended?: boolean;
+  size?: string;
+  capabilities?: string[];
+  performance?: {
+    reasoning?: number;
+    coding?: number;
+    speed?: number;
+    efficiency?: number;
   };
+  use_cases?: string[];
+  strengths?: string[];
+  limitations?: string[];
+  runtime_data?: {
+    size_bytes?: number;
+    family?: string;
+    quantization?: string;
+    parameter_count?: string;
+    last_modified?: string;
+  };
+  benchmarks?: {
+    average_score?: number;
+    mmlu_score?: number;
+    gpqa_score?: number;
+    math_score?: number;
+    humaneval_score?: number;
+    bbh_score?: number;
+    last_updated?: string;
+  };
+  ranking_score?: number;
+}
+
+interface ModelGroup {
+  [familyName: string]: OllamaModel[];
+}
+
+interface GroupedModelsResponse {
+  model_groups: ModelGroup;
+  ungrouped_models: OllamaModel[];
+  default_model: string;
+  total_available: number;
+  filtered_out: number;
+  groups_count: number;
+  ungrouped_count: number;
+  last_updated: string;
 }
 
 
@@ -68,21 +107,28 @@ const ModelSelector: React.FC<ModelSelectorProps> = ({
   const [detailsExpanded, setDetailsExpanded] = useState(false);
   const [autoCollapseTimer, setAutoCollapseTimer] = useState<NodeJS.Timeout | null>(null);
   const [runtimeModelInfo, setRuntimeModelInfo] = useState<Map<string, any>>(new Map());
+  const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set(['Qwen', 'DeepSeek'])); // Default expanded groups
 
-  // Fetch available models from chat endpoint which includes default model
+  // Fetch available models with rich data
   const {
     data: modelsData,
     isLoading,
     error,
     refetch
   } = useQuery({
-    queryKey: ['chat-models'],
+    queryKey: ['chat-models-rich'],
     queryFn: async () => {
-      const response = await apiClient.getChatModels();
-      return response;
+      try {
+        const response = await apiClient.get('/api/v1/email-assistant/models/rich');
+        return response.data; // Return the data, not the full response
+      } catch (error) {
+        console.warn('Rich models endpoint failed, falling back to basic models');
+        // Fallback to basic models endpoint
+        return await apiClient.getChatModels();
+      }
     },
     refetchOnWindowFocus: false,
-    staleTime: 5 * 60 * 1000, // 5 minutes
+    staleTime: 10 * 60 * 1000, // 10 minutes
     retry: 2
   });
 
@@ -117,17 +163,15 @@ const ModelSelector: React.FC<ModelSelectorProps> = ({
     loadRuntimeModelData();
   }, [modelsData?.models, hybridIntelligence]);
 
-  // Get current model info (runtime if available, enhanced for selected, fallback to static)
+  // Get current model info from rich data
   const getModelInfo = (modelName: string) => {
-    // If this is the selected model and we have enhanced info with web research, use it
-    if (enhancedModelInfo && enhancedModelInfo.name === modelName) {
-      return enhancedModelInfo;
+    // Use rich data from API if available
+    if (modelsData?.models) {
+      const richModel = modelsData.models.find((m: any) => m.name === modelName);
+      if (richModel) return richModel;
     }
-    // Otherwise use runtime info (includes parameter_size from Ollama API)
-    if (runtimeModelInfo.has(modelName)) {
-      return runtimeModelInfo.get(modelName);
-    }
-    // Final fallback to static info
+
+    // Fallback to static info if rich data not available
     return getEnhancedModelInfo(modelName);
   };
 
@@ -191,6 +235,19 @@ const ModelSelector: React.FC<ModelSelectorProps> = ({
     setDetailsExpanded(!detailsExpanded);
   };
 
+  // Toggle group expansion
+  const toggleGroupExpansion = (groupName: string) => {
+    setExpandedGroups(prev => {
+      const newSet = new Set(prev);
+      if (newSet.has(groupName)) {
+        newSet.delete(groupName);
+      } else {
+        newSet.add(groupName);
+      }
+      return newSet;
+    });
+  };
+
   // Cleanup timer on unmount
   React.useEffect(() => {
     return () => {
@@ -247,7 +304,18 @@ const ModelSelector: React.FC<ModelSelectorProps> = ({
     );
   }
 
-  const availableModels = modelsData?.models || [];
+  // Handle both grouped and flat responses for backward compatibility
+  const modelGroups = modelsData?.model_groups || {};
+  const ungroupedModels = modelsData?.ungrouped_models || [];
+  const availableModels = modelsData?.models || modelsData?.data?.models || [];
+
+  // Use grouped structure if available, otherwise fall back to flat list
+  const hasGroupedData = Object.keys(modelGroups).length > 0 || ungroupedModels.length > 0;
+  const allModels = hasGroupedData ? [
+    ...Object.values(modelGroups).flat(),
+    ...ungroupedModels
+  ] : availableModels;
+
   const currentModelInfo = getModelInfo(selectedModel || '');
 
   return (
@@ -306,30 +374,217 @@ const ModelSelector: React.FC<ModelSelectorProps> = ({
               }
               sx={{ fontSize: '0.9rem' }}
             >
-            {availableModels.map((model: string) => {
-              const modelInfo = getModelInfo(model);
-              return (
-                <MenuItem key={model} value={model}>
+            {/* Render grouped models */}
+            {Object.entries(modelGroups).map(([familyName, models]) => (
+              <Box key={familyName}>
+                {/* Family header */}
+                <MenuItem
+                  onClick={() => toggleGroupExpansion(familyName)}
+                  sx={{
+                    backgroundColor: 'rgba(0, 122, 255, 0.05)',
+                    borderBottom: '1px solid rgba(0, 122, 255, 0.2)',
+                    '&:hover': { backgroundColor: 'rgba(0, 122, 255, 0.1)' }
+                  }}
+                >
                   <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, width: '100%' }}>
-                    <span>{getCategoryIcon(modelInfo.category)}</span>
-                    <Typography variant="body2" sx={{ fontSize: '0.85rem' }}>
-                      {modelInfo.displayName}
+                    {expandedGroups.has(familyName) ? (
+                      <ExpandLess sx={{ fontSize: '1rem', color: '#007AFF' }} />
+                    ) : (
+                      <ExpandMore sx={{ fontSize: '1rem', color: '#007AFF' }} />
+                    )}
+                    <Typography variant="body2" sx={{ fontWeight: 600, color: '#007AFF' }}>
+                      {familyName} ({(models as any[]).length})
                     </Typography>
-                    {modelInfo.size && (
-                      <Chip
-                        label={modelInfo.size}
-                        size="small"
-                        variant="outlined"
-                        sx={{ fontSize: '0.65rem', height: 16 }}
-                      />
+                  </Box>
+                </MenuItem>
+
+                {/* Family models (only if expanded) */}
+                {expandedGroups.has(familyName) && (models as any[]).map((model: any) => {
+                  const modelInfo = getModelInfo(model.name);
+                  return (
+                    <MenuItem key={model.name} value={model.name} sx={{ pl: 4 }}>
+                      <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, width: '100%' }}>
+                        {/* Ranking indicator */}
+                        <Box sx={{
+                          width: 4,
+                          height: 20,
+                          backgroundColor: model.ranking_score > 80 ? '#34C759' :
+                                          model.ranking_score > 60 ? '#FF9500' : '#FF3B30',
+                          borderRadius: 1
+                        }} />
+
+                        <Box sx={{ flex: 1 }}>
+                          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                            <Typography variant="body2" sx={{ fontSize: '0.85rem', fontWeight: 600 }}>
+                              {model.display_name || modelInfo.displayName}
+                            </Typography>
+                            {model.recommended && (
+                              <Chip label="★" size="small" color="primary" sx={{ height: 16, fontSize: '0.6rem' }} />
+                            )}
+                          </Box>
+
+                          <Box sx={{ display: 'flex', gap: 0.5, mt: 0.25, flexWrap: 'wrap' }}>
+                            {model.size && (
+                              <Chip label={model.size} size="small" variant="outlined" sx={{ fontSize: '0.6rem', height: 16 }} />
+                            )}
+                            {model.runtime_data?.quantization && (
+                              <Chip label={model.runtime_data.quantization} size="small" variant="outlined" sx={{ fontSize: '0.6rem', height: 16 }} />
+                            )}
+                            {model.benchmarks?.average_score && (
+                              <Chip
+                                label={`Score: ${model.benchmarks.average_score.toFixed(1)}`}
+                                size="small"
+                                color="secondary"
+                                sx={{ fontSize: '0.6rem', height: 16 }}
+                              />
+                            )}
+                          </Box>
+
+                          <Typography variant="caption" sx={{
+                            color: 'text.secondary',
+                            fontSize: '0.7rem',
+                            display: 'block',
+                            mt: 0.25
+                          }}>
+                            {model.description || modelInfo.description}
+                          </Typography>
+                        </Box>
+                      </Box>
+                    </MenuItem>
+                  );
+                })}
+              </Box>
+            ))}
+
+            {/* Render ungrouped models */}
+            {ungroupedModels.length > 0 && (
+              <Box>
+                <MenuItem
+                  onClick={() => toggleGroupExpansion('Other')}
+                  sx={{
+                    backgroundColor: 'rgba(142, 142, 147, 0.05)',
+                    borderBottom: '1px solid rgba(142, 142, 147, 0.2)',
+                    '&:hover': { backgroundColor: 'rgba(142, 142, 147, 0.1)' }
+                  }}
+                >
+                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, width: '100%' }}>
+                    {expandedGroups.has('Other') ? (
+                      <ExpandLess sx={{ fontSize: '1rem', color: '#8E8E93' }} />
+                    ) : (
+                      <ExpandMore sx={{ fontSize: '1rem', color: '#8E8E93' }} />
                     )}
-                    <Box sx={{ flexGrow: 1 }} />
-                    {modelInfo.recommended && (
-                      <CheckCircle
-                        fontSize="small"
-                        sx={{ color: '#34C759' }}
-                      />
-                    )}
+                    <Typography variant="body2" sx={{ fontWeight: 600, color: '#8E8E93' }}>
+                      Other ({ungroupedModels.length})
+                    </Typography>
+                  </Box>
+                </MenuItem>
+
+                {expandedGroups.has('Other') && ungroupedModels.map((model: any) => {
+                  const modelInfo = getModelInfo(model.name);
+                  return (
+                    <MenuItem key={model.name} value={model.name} sx={{ pl: 4 }}>
+                      <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, width: '100%' }}>
+                        <Box sx={{
+                          width: 4,
+                          height: 20,
+                          backgroundColor: model.ranking_score > 80 ? '#34C759' :
+                                          model.ranking_score > 60 ? '#FF9500' : '#FF3B30',
+                          borderRadius: 1
+                        }} />
+
+                        <Box sx={{ flex: 1 }}>
+                          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                            <Typography variant="body2" sx={{ fontSize: '0.85rem', fontWeight: 600 }}>
+                              {model.display_name || modelInfo.displayName}
+                            </Typography>
+                            {model.recommended && (
+                              <Chip label="★" size="small" color="primary" sx={{ height: 16, fontSize: '0.6rem' }} />
+                            )}
+                          </Box>
+
+                          <Box sx={{ display: 'flex', gap: 0.5, mt: 0.25, flexWrap: 'wrap' }}>
+                            {model.size && (
+                              <Chip label={model.size} size="small" variant="outlined" sx={{ fontSize: '0.6rem', height: 16 }} />
+                            )}
+                            {model.runtime_data?.quantization && (
+                              <Chip label={model.runtime_data.quantization} size="small" variant="outlined" sx={{ fontSize: '0.6rem', height: 16 }} />
+                            )}
+                            {model.benchmarks?.average_score && (
+                              <Chip
+                                label={`Score: ${model.benchmarks.average_score.toFixed(1)}`}
+                                size="small"
+                                color="secondary"
+                                sx={{ fontSize: '0.6rem', height: 16 }}
+                              />
+                            )}
+                          </Box>
+
+                          <Typography variant="caption" sx={{
+                            color: 'text.secondary',
+                            fontSize: '0.7rem',
+                            display: 'block',
+                            mt: 0.25
+                          }}>
+                            {model.description || modelInfo.description}
+                          </Typography>
+                        </Box>
+                      </Box>
+                    </MenuItem>
+                  );
+                })}
+              </Box>
+            )}
+
+            {/* Fallback for old flat structure */}
+            {availableModels.length > 0 && Object.keys(modelGroups).length === 0 && ungroupedModels.length === 0 && availableModels.map((model: any) => {
+              const modelInfo = getModelInfo(model.name || model);
+              return (
+                <MenuItem key={model.name || model} value={model.name || model}>
+                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, width: '100%' }}>
+                    <Box sx={{
+                      width: 4,
+                      height: 20,
+                      backgroundColor: model.ranking_score > 80 ? '#34C759' :
+                                      model.ranking_score > 60 ? '#FF9500' : '#FF3B30',
+                      borderRadius: 1
+                    }} />
+
+                    <Box sx={{ flex: 1 }}>
+                      <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                        <Typography variant="body2" sx={{ fontSize: '0.85rem', fontWeight: 600 }}>
+                          {model.display_name || modelInfo.displayName}
+                        </Typography>
+                        {model.recommended && (
+                          <Chip label="★" size="small" color="primary" sx={{ height: 16, fontSize: '0.6rem' }} />
+                        )}
+                      </Box>
+
+                      <Box sx={{ display: 'flex', gap: 0.5, mt: 0.25, flexWrap: 'wrap' }}>
+                        {model.size && (
+                          <Chip label={model.size} size="small" variant="outlined" sx={{ fontSize: '0.6rem', height: 16 }} />
+                        )}
+                        {model.runtime_data?.quantization && (
+                          <Chip label={model.runtime_data.quantization} size="small" variant="outlined" sx={{ fontSize: '0.6rem', height: 16 }} />
+                        )}
+                        {model.benchmarks?.average_score && (
+                          <Chip
+                            label={`Score: ${model.benchmarks.average_score.toFixed(1)}`}
+                            size="small"
+                            color="secondary"
+                            sx={{ fontSize: '0.6rem', height: 16 }}
+                          />
+                        )}
+                      </Box>
+
+                      <Typography variant="caption" sx={{
+                        color: 'text.secondary',
+                        fontSize: '0.7rem',
+                        display: 'block',
+                        mt: 0.25
+                      }}>
+                        {model.description || modelInfo.description}
+                      </Typography>
+                    </Box>
                   </Box>
                 </MenuItem>
               );
@@ -539,6 +794,53 @@ const ModelSelector: React.FC<ModelSelectorProps> = ({
                 ))}
               </Box>
             </Box>
+
+            {/* Benchmark Scores */}
+            {currentModelInfo.benchmarks && (
+              <Box sx={{ mb: 1.5 }}>
+                <Typography variant="caption" sx={{ fontWeight: 600, color: 'text.primary', mb: 0.5, display: 'block' }}>
+                  Benchmark Scores
+                </Typography>
+                <Box sx={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 1 }}>
+                  {currentModelInfo.benchmarks.average_score && (
+                    <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
+                      <Typography variant="caption" color="text.secondary">Average:</Typography>
+                      <Typography variant="caption" sx={{ fontWeight: 600 }}>{currentModelInfo.benchmarks.average_score.toFixed(1)}</Typography>
+                    </Box>
+                  )}
+                  {currentModelInfo.benchmarks.mmlu_score && (
+                    <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
+                      <Typography variant="caption" color="text.secondary">MMLU:</Typography>
+                      <Typography variant="caption" sx={{ fontWeight: 600 }}>{currentModelInfo.benchmarks.mmlu_score.toFixed(1)}</Typography>
+                    </Box>
+                  )}
+                  {currentModelInfo.benchmarks.gpqa_score && (
+                    <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
+                      <Typography variant="caption" color="text.secondary">GPQA:</Typography>
+                      <Typography variant="caption" sx={{ fontWeight: 600 }}>{currentModelInfo.benchmarks.gpqa_score.toFixed(1)}</Typography>
+                    </Box>
+                  )}
+                  {currentModelInfo.benchmarks.math_score && (
+                    <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
+                      <Typography variant="caption" color="text.secondary">Math:</Typography>
+                      <Typography variant="caption" sx={{ fontWeight: 600 }}>{currentModelInfo.benchmarks.math_score.toFixed(1)}</Typography>
+                    </Box>
+                  )}
+                  {currentModelInfo.benchmarks.humaneval_score && (
+                    <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
+                      <Typography variant="caption" color="text.secondary">HumanEval:</Typography>
+                      <Typography variant="caption" sx={{ fontWeight: 600 }}>{currentModelInfo.benchmarks.humaneval_score.toFixed(1)}</Typography>
+                    </Box>
+                  )}
+                  {currentModelInfo.benchmarks.bbh_score && (
+                    <Box sx={{ display: 'flex', justifyContent: 'space-between' }}>
+                      <Typography variant="caption" color="text.secondary">BBH:</Typography>
+                      <Typography variant="caption" sx={{ fontWeight: 600 }}>{currentModelInfo.benchmarks.bbh_score.toFixed(1)}</Typography>
+                    </Box>
+                  )}
+                </Box>
+              </Box>
+            )}
 
             {/* Use Cases */}
             {currentModelInfo.useCases && currentModelInfo.useCases.length > 0 && (

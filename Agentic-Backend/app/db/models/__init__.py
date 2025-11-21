@@ -8,6 +8,7 @@ from .user import User
 from .agent_type import AgentType, DynamicTable, AgentBuilderSession, RegisteredTool, AgentDeletionLog
 from .secret import AgentSecret
 from .chat_session import ChatSession, ChatMessage, UserChatPreferences, MessageType
+from .model_benchmark import ModelBenchmark
 from .model_performance import ModelPerformanceMetrics, ModelUsageLog, ModelRegistry
 from .http_request_log import HttpRequestLog, HttpClientMetrics, HttpClientConfig
 from .content import (
@@ -86,6 +87,7 @@ __all__ = [
     "ChatMessage",
     "UserChatPreferences",
     "MessageType",
+    "ModelBenchmark",
     "ModelPerformanceMetrics",
     "ModelUsageLog",
     "ModelRegistry",
