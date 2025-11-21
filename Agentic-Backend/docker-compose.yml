@@ -61,6 +61,7 @@ services:
       redis:
         condition: service_healthy
     volumes:
+      - ./:/app
       - ./logs:/app/logs
       - knowledge_base_media:/app/media_cache
       - knowledge_base_models:/app/models_cache
