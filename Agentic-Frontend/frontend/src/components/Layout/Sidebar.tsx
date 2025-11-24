@@ -223,6 +223,11 @@ const Sidebar: React.FC<SidebarProps> = ({ drawerWidth = 280 }) => {
           icon: <Email />,
         },
         {
+          path: '/workflows/ocr-workflow',
+          label: 'OCR Workflow',
+          icon: <Description />,
+        },
+        {
           path: '/workflows/document-analyzer',
           label: 'Document Analyzer',
           icon: <Description />,

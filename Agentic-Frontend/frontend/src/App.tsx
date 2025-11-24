@@ -40,6 +40,7 @@ import UserManagement from './pages/UserManagement';
 
 // Workflow modules
 import EmailAssistant from './pages/EmailAssistant';
+import OCRWorkflow from './pages/OCRWorkflow';
 import DocumentAnalyzer from './modules/document-analyzer/DocumentAnalyzer';
 // Email Assistant Component
 import { EmailAssistantComponent } from './components/EmailAssistant/EmailAssistantComponent';
@@ -315,6 +316,16 @@ const ThemedAppRoutes: React.FC = () => {
                   <PrivateRoute>
                     <Layout>
                       <EmailAssistant />
+                    </Layout>
+                  </PrivateRoute>
+                }
+              />
+              <Route
+                path="/workflows/ocr-workflow"
+                element={
+                  <PrivateRoute>
+                    <Layout>
+                      <OCRWorkflow />
                     </Layout>
                   </PrivateRoute>
                 }

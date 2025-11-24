@@ -2607,6 +2607,65 @@ class ApiClient {
     });
     return response.data;
   }
+
+  // ==========================================
+  // OCR WORKFLOW ENDPOINTS
+  // ==========================================
+
+  async getOCRAvailableModels() {
+    const response = await this.client.get('/api/v1/ocr/models');
+    return response.data;
+  }
+
+  async createOCRWorkflow(workflowData: {
+    workflow_name?: string;
+    ocr_model?: string;
+    processing_options?: Record<string, any>;
+  }) {
+    const response = await this.client.post('/api/v1/ocr/workflows', workflowData);
+    return response.data;
+  }
+
+  async uploadOCRBatch(workflowId: string, batchData: {
+    batch_name?: string;
+    images: File[];
+  }) {
+    const formData = new FormData();
+    formData.append('batch_name', batchData.batch_name || 'New Batch');
+    batchData.images.forEach((image) => {
+      formData.append('images', image);
+    });
+
+    const response = await this.client.post(`/api/v1/ocr/workflows/${workflowId}/batches`, formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    });
+    return response.data;
+  }
+
+  async processOCRWorkflow(workflowId: string, processData: {
+    batch_id: string;
+  }) {
+    const response = await this.client.post(`/api/v1/ocr/workflows/${workflowId}/process`, processData);
+    return response.data;
+  }
+
+  async getOCRWorkflowStatus(workflowId: string) {
+    const response = await this.client.get(`/api/v1/ocr/workflows/${workflowId}/status`);
+    return response.data;
+  }
+
+  async getOCRWorkflowResults(workflowId: string, batchId?: string) {
+    const params = batchId ? { batch_id: batchId } : undefined;
+    const response = await this.client.get(`/api/v1/ocr/workflows/${workflowId}/results`, { params });
+    return response.data;
+  }
+
+  async exportOCRResults(workflowId: string, exportData: {
+    format?: 'markdown' | 'pdf' | 'docx';
+  }) {
+    const response = await this.client.post(`/api/v1/ocr/workflows/${workflowId}/export`, exportData);
+    return response.data;
+  }
 }
 
 export const apiClient = new ApiClient();

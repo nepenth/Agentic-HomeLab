@@ -1,64 +1,151 @@
+
 import React from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Grid, Card, CardContent, Typography, Box, Button, Chip } from '@mui/material';
-import { Email, Description } from '@mui/icons-material';
+import {
+  Grid,
+  Card,
+  CardContent,
+  CardActions,
+  Typography,
+  Button,
+  Chip,
+  Box,
+  Avatar,
+} from '@mui/material';
+import {
+  Psychology,
+  Email,
+  Description,
+  SmartToy,
+} from '@mui/icons-material';
 
 const WorkflowList: React.FC = () => {
   const navigate = useNavigate();
 
+  const workflows = [
+    {
+      id: 'knowledge-base',
+      title: 'Knowledge Base',
+      description: 'Build and manage your AI knowledge base with advanced content processing and semantic search.',
+      icon: <Psychology />,
+      path: '/workflows/knowledge-base',
+      status: 'active',
+      color: '#007AFF',
+    },
+    {
+      id: 'email-assistant',
+      title: 'Email Assistant',
+      description: 'AI-powered email analysis, task creation, and automated follow-ups.',
+      icon: <Email />,
+      path: '/workflows/email-assistant',
+      status: 'active',
+      color: '#34C759',
+    },
+    {
+      id: 'ocr-workflow',
+      title: 'OCR Workflow',
+      description: 'Convert images and screenshots to editable markdown documents using advanced OCR models.',
+      icon: <Description />,
+      path: '/workflows/ocr-workflow',
+      status: 'active',
+      color: '#FF9500',
+    },
+    {
+      id: 'document-analyzer',
+      title: 'Document Analyzer',
+      description: 'Advanced document processing and analysis capabilities.',
+      icon: <SmartToy />,
+      path: '/workflows/document-analyzer',
+      status: 'coming-soon',
+      color: '#8E8E93',
+    },
+  ];
+
+  const handleWorkflowClick = (path: string) => {
+    navigate(path);
+  };
+
   return (
-    <Grid container spacing={3}>
-      <Grid item xs={12} md={6}>
-        <Card elevation={0} sx={{ cursor: 'pointer' }}>
-          <CardContent>
-            <Box sx={{ display: 'flex', alignItems: 'center', mb: 2 }}>
-              <Email sx={{ fontSize: 40, color: 'primary.main', mr: 2 }} />
-              <Box>
-                <Typography variant="h6" sx={{ fontWeight: 600 }}>
-                  Email Assistant
-                </Typography>
-                <Chip label="Coming Soon" color="info" size="small" />
-              </Box>
-            </Box>
-            <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-              AI-powered email management and response generation
-            </Typography>
-            <Button 
-              variant="outlined" 
-              onClick={() => navigate('/workflows/email-assistant')}
-              disabled
+    <Box sx={{ p: 3 }}>
+      <Typography variant="h4" gutterBottom sx={{ mb: 4 }}>
+        AI Workflows
+      </Typography>
+      <Typography variant="body1" color="text.secondary" sx={{ mb: 4 }}>
+        Choose from our collection of AI-powered workflows to automate your tasks and boost productivity.
+      </Typography>
+
+      <Grid container spacing={3}>
+        {workflows.map((workflow) => (
+          <Grid item xs={12} sm={6} md={4} key={workflow.id}>
+            <Card
+              sx={{
+                height: '100%',
+                display: 'flex',
+                flexDirection: 'column',
+                transition: 'transform 0.2s ease-in-out, box-shadow 0.2s ease-in-out',
+                '&:hover': {
+                  transform: 'translateY(-4px)',
+                  boxShadow: (theme) => theme.shadows[8],
+                },
+                opacity: workflow.status === 'coming-soon' ? 0.7 : 1,
+              }}
             >
-              Launch Workflow
-            </Button>
-          </CardContent>
-        </Card>
-      </Grid>
-      <Grid item xs={12} md={6}>
-        <Card elevation={0} sx={{ cursor: 'pointer' }}>
-          <CardContent>
-            <Box sx={{ display: 'flex', alignItems: 'center', mb: 2 }}>
-              <Description sx={{ fontSize: 40, color: 'primary.main', mr: 2 }} />
-              <Box>
-                <Typography variant="h6" sx={{ fontWeight: 600 }}>
-                  Document Analyzer
+              <CardContent sx={{ flexGrow: 1 }}>
+                <Box sx={{ display: 'flex', alignItems: 'center', mb: 2 }}>
+                  <Avatar
+                    sx={{
+                      bgcolor: workflow.color,
+                      mr: 2,
+                      width: 48,
+                      height: 48,
+                    }}
+                  >
+                    {workflow.icon}
+                  </Avatar>
+                  <Box>
+                    <Typography variant="h6" component="h2">
+                      {workflow.title}
+                    </Typography>
+                    {workflow.status === 'coming-soon' && (
+                      <Chip
+                        label="Coming Soon"
+                        size="small"
+                        sx={{
+                          mt: 0.5,
+                          bgcolor: 'warning.light',
+                          color: 'warning.contrastText',
+                        }}
+                      />
+                    )}
+                  </Box>
+                </Box>
+                <Typography variant="body2" color="text.secondary">
+                  {workflow.description}
                 </Typography>
-                <Chip label="Coming Soon" color="info" size="small" />
-              </Box>
-            </Box>
-            <Typography variant="body2" color="text.secondary" sx={{ mb: 2 }}>
-              AI-powered document analysis and insights extraction
-            </Typography>
-            <Button 
-              variant="outlined" 
-              onClick={() => navigate('/workflows/document-analyzer')}
-              disabled
-            >
-              Launch Workflow
-            </Button>
-          </CardContent>
-        </Card>
+              </CardContent>
+              <CardActions>
+                <Button
+                  size="small"
+                  variant="contained"
+                  fullWidth
+                  onClick={() => handleWorkflowClick(workflow.path)}
+                  disabled={workflow.status === 'coming-soon'}
+                  sx={{
+                    bgcolor: workflow.color,
+                    '&:hover': {
+                      bgcolor: workflow.color,
+                      opacity: 0.9,
+                    },
+                  }}
+                >
+                  {workflow.status === 'coming-soon' ? 'Coming Soon' : 'Launch Workflow'}
+                </Button>
+              </CardActions>
+            </Card>
+          </Grid>
+        ))}
       </Grid>
-    </Grid>
+    </Box>
   );
 };
 
