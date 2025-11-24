@@ -68,6 +68,16 @@ from .email import (
     EmailSyncHistory
 )
 from .embedding_task import EmbeddingTask, EmbeddingTaskStatus
+from .ocr_workflow import (
+    OCRWorkflow,
+    OCRBatch,
+    OCRImage,
+    OCRDocument,
+    OCRWorkflowStats,
+    OCRWorkflowLog,
+    OCRWorkflowStatus,
+    OCRBatchStatus
+)
 
 __all__ = [
     "Agent",
@@ -143,4 +153,12 @@ __all__ = [
     "EmailTask",
     "EmailSyncHistory",
     "EmbeddingTask",
+    "OCRWorkflow",
+    "OCRBatch",
+    "OCRImage",
+    "OCRDocument",
+    "OCRWorkflowStats",
+    "OCRWorkflowLog",
+    "OCRWorkflowStatus",
+    "OCRBatchStatus",
 ]
