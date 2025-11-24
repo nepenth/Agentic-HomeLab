@@ -67,6 +67,7 @@ from .email import (
     EmailTask,
     EmailSyncHistory
 )
+from .embedding_task import EmbeddingTask, EmbeddingTaskStatus
 
 __all__ = [
     "Agent",
@@ -141,4 +142,5 @@ __all__ = [
     "EmailAttachment",
     "EmailTask",
     "EmailSyncHistory",
+    "EmbeddingTask",
 ]

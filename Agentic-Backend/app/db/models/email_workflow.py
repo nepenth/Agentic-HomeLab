@@ -113,7 +113,7 @@ class EmailAnalysisResult(Base):
     # Indexes for performance
     __table_args__ = (
         Index('idx_email_analysis_content_workflow', 'content_item_id', 'workflow_id'),
-        Index('idx_email_analysis_importance', 'importance_score'),
+        # Index('idx_email_analysis_importance', 'importance_score'),  # Cannot index JSON with btree
         Index('idx_email_analysis_analyzed_at', 'analyzed_at'),
     )
 
