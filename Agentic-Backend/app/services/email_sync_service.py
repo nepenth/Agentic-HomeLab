@@ -28,6 +28,7 @@ from app.services.email_connectors.base_connector import SyncType, EmailSyncResu
 from app.services.email_embedding_service import email_embedding_service
 from app.services.unified_log_service import unified_log_service, WorkflowType, LogScope
 from app.utils.logging import get_logger
+from app.config import settings
 
 logger = get_logger("email_sync_service")
 
@@ -47,6 +48,7 @@ class EmailSyncService:
 
     def __init__(self):
         self.logger = get_logger("email_sync_service")
+        self.config = settings
         self.connector_factory = EmailConnectorFactory()
         self.max_concurrent_folders = 5  # Sync up to 5 folders concurrently
         self.sync_timeout_minutes = 30
@@ -327,15 +329,119 @@ class EmailSyncService:
         ) as task_context:
 
             try:
-                # ... (omitted lines) ...
+                await unified_log_service.log(
+                    context=task_context,
+                    level=LogLevel.INFO,
+                    message=f"Starting sync for folder: {folder_name}",
+                    component="folder_sync"
+                )
+
+                # Step 1: Get folder status from server
+                folder_status = connector.get_folder_status(folder_name)
+
+                await unified_log_service.log(
+                    context=task_context,
+                    level=LogLevel.INFO,
+                    message=f"Server folder status retrieved",
+                    component="folder_sync",
+                    extra_metadata=folder_status
+                )
+
+                # Step 2: Get or create local sync state
+                local_state = await self._get_or_create_folder_sync_state(
+                    db, account.id, folder_name
+                )
+
+                # Step 3: Check UIDVALIDITY
+                server_uidvalidity = folder_status.get('uidvalidity')
+
+                if local_state.uid_validity is None:
+                    # First sync for this folder
+                    await unified_log_service.log(
+                        context=task_context,
+                        level=LogLevel.INFO,
+                        message=f"First sync for folder {folder_name}",
+                        component="folder_sync"
+                    )
+                    local_state.uid_validity = server_uidvalidity
+
+                elif local_state.uid_validity != server_uidvalidity:
+                    # Mailbox reset detected!
+                    await unified_log_service.log(
+                        context=task_context,
+                        level=LogLevel.WARNING,
+                        message=f"UIDVALIDITY changed for {folder_name} - mailbox was reset",
+                        component="folder_sync",
+                        extra_metadata={
+                            "old_uidvalidity": local_state.uid_validity,
+                            "new_uidvalidity": server_uidvalidity
+                        }
+                    )
+                    await self._handle_mailbox_reset(
+                        db, account, folder_name, server_uidvalidity, task_context
+                    )
+                    local_state.uid_validity = server_uidvalidity
+                    local_state.last_synced_uid = None
+                    force_full_sync = True
+
+                # Step 4: Determine UID range to fetch
+                if force_full_sync or local_state.last_synced_uid is None:
+                    # Full sync with date window
+                    since_date = account.created_at - timedelta(days=account.sync_window_days)
+                    uids_to_fetch = connector.fetch_uids_since_date(folder_name, since_date)
+
+                    await unified_log_service.log(
+                        context=task_context,
+                        level=LogLevel.INFO,
+                        message=f"Full sync: fetching UIDs since {since_date.date()}",
+                        component="folder_sync",
+                        extra_metadata={
+                            "since_date": since_date.isoformat(),
+                            "uids_found": len(uids_to_fetch)
+                        }
+                    )
+                else:
+                    # Incremental sync - fetch UIDs greater than last synced
+                    last_uid = local_state.last_synced_uid
+                    uids_to_fetch = connector.fetch_uids_in_range(folder_name, last_uid + 1, '*')
+
+                    await unified_log_service.log(
+                        context=task_context,
+                        level=LogLevel.INFO,
+                        message=f"Incremental sync: fetching UIDs after {last_uid}",
+                        component="folder_sync",
+                        extra_metadata={
+                            "last_synced_uid": last_uid,
+                            "new_uids_found": len(uids_to_fetch)
+                        }
+                    )
 
                 # Step 5: Fetch emails for new UIDs (in batches for better performance)
                 for batch_start in range(0, len(uids_to_fetch), self.batch_size):
-                    # ... (omitted lines) ...
+                    batch_uids = uids_to_fetch[batch_start:batch_start + self.batch_size]
+
+                    await unified_log_service.log(
+                        context=task_context,
+                        level=LogLevel.INFO,
+                        message=f"Processing UID batch {batch_start//self.batch_size + 1}/{(len(uids_to_fetch)-1)//self.batch_size + 1}",
+                        component="folder_sync",
+                        extra_metadata={"batch_size": len(batch_uids)}
+                    )
 
                     for uid in batch_uids:
                         try:
-                            # ... (omitted lines) ...
+                            email_message = connector.fetch_email_by_uid(folder_name, uid)
+
+                            if email_message:
+                                # Check if email exists by message_id
+                                existing_query = select(Email).where(
+                                    and_(
+                                        Email.account_id == account.id,
+                                        Email.message_id == email_message.message_id
+                                    )
+                                )
+                                result = await db.execute(existing_query)
+                                existing_email = result.scalar_one_or_none()
 
                                 if existing_email:
                                     # Update existing email (folder, flags, UID)
