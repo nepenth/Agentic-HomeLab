@@ -149,7 +149,7 @@ async def get_ocr_models(
 async def create_ocr_workflow(
     workflow_data: OCRWorkflowCreate,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db_session)
 ) -> OCRWorkflowResponse:
     """
     Create a new OCR workflow.

@@ -89,16 +89,8 @@ const OCRModelSelector: React.FC<OCRModelSelectorProps> = ({
     try {
       setLoading(true);
       const response = await apiClient.getOCRAvailableModels();
-      // Transform raw Ollama models to expected format
-      const transformedModels = response.map((model: any) => ({
-        name: model.name,
-        display_name: model.name.split(':')[0].replace(/-/g, ' ').replace(/\b\w/g, l => l.toUpperCase()),
-        description: `Vision-capable AI model for OCR processing (${(model.size / 1024 / 1024 / 1024).toFixed(1)}GB)`,
-        capabilities: ['ocr', 'vision', 'text-extraction'],
-        recommended: model.name.includes('deepseek') || model.name.includes('llava'),
-        size: `${(model.size / 1024 / 1024 / 1024).toFixed(1)}GB`
-      }));
-      setModels(transformedModels);
+      // The API already returns properly formatted models
+      setModels(response.models);
       setError('');
     } catch (err: any) {
       console.error('Failed to load OCR models:', err);
