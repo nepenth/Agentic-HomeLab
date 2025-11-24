@@ -2646,7 +2646,12 @@ class ApiClient {
   async processOCRWorkflow(workflowId: string, processData: {
     batch_id: string;
   }) {
-    const response = await this.client.post(`/api/v1/ocr/workflows/${workflowId}/process`, processData);
+    const formData = new FormData();
+    formData.append('batch_id', processData.batch_id);
+
+    const response = await this.client.post(`/api/v1/ocr/workflows/${workflowId}/process`, formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    });
     return response.data;
   }
 
@@ -2664,7 +2669,12 @@ class ApiClient {
   async exportOCRResults(workflowId: string, exportData: {
     format?: 'markdown' | 'pdf' | 'docx';
   }) {
-    const response = await this.client.post(`/api/v1/ocr/workflows/${workflowId}/export`, exportData);
+    const formData = new FormData();
+    formData.append('format', exportData.format || 'markdown');
+
+    const response = await this.client.post(`/api/v1/ocr/workflows/${workflowId}/export`, formData, {
+      headers: { 'Content-Type': 'multipart/form-data' },
+    });
     return response.data;
   }
 }

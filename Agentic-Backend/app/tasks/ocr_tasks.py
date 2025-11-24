@@ -37,9 +37,9 @@ class OCRTask(Task):
 
 
 @celery_app.task(base=OCRTask, bind=True, max_retries=3, default_retry_delay=60)
-def process_ocr_workflow_task(self, workflow_id: str, ocr_model: str, image_paths: List[str], batch_name: str = "Default Batch"):
+def process_ocr_workflow_task(self, workflow_id: str, ocr_model: str, image_paths: List[str], batch_name: str = "Default Batch", user_id: str = "system"):
     """Celery task for processing OCR workflow."""
-    return asyncio.run(_process_ocr_workflow_async(self, workflow_id, ocr_model, image_paths, batch_name))
+    return asyncio.run(_process_ocr_workflow_async(self, workflow_id, ocr_model, image_paths, batch_name, user_id))
 
 
 async def _process_ocr_workflow_async(
@@ -47,7 +47,8 @@ async def _process_ocr_workflow_async(
     workflow_id: str,
     ocr_model: str,
     image_paths: List[str],
-    batch_name: str
+    batch_name: str,
+    user_id: str
 ) -> Dict[str, Any]:
     """Async implementation of OCR workflow processing."""
     workflow_uuid = UUID(workflow_id)
@@ -58,7 +59,7 @@ async def _process_ocr_workflow_async(
         if not workflow:
             workflow = OCRWorkflow(
                 id=workflow_uuid,
-                user_id="current_user",  # TODO: Get from context
+                user_id=user_id,
                 workflow_name="OCR Workflow",
                 ocr_model=ocr_model,
                 status="running"
@@ -143,7 +144,7 @@ async def _process_ocr_workflow_async(
 
                 # Log progress
                 await _log_workflow_progress(session, workflow_uuid, batch.id, None,
-                                           f"Processed image {i+1}/{len(image_paths)}", "info")
+                                           f"Processed image {i+1}/{len(image_paths)}", "info", user_id)
 
             except Exception as e:
                 logger.error(f"Failed to process image {image_path}: {e}")
@@ -161,7 +162,7 @@ async def _process_ocr_workflow_async(
                 session.add(image_record)
 
                 await _log_workflow_progress(session, workflow_uuid, batch.id, None,
-                                           f"Failed to process image {os.path.basename(image_path)}: {e}", "error")
+                                           f"Failed to process image {os.path.basename(image_path)}: {e}", "error", user_id)
 
         # Update batch completion
         batch.status = "completed"
@@ -179,10 +180,20 @@ async def _process_ocr_workflow_async(
 
         # Log completion
         await _log_workflow_progress(session, workflow_uuid, batch.id, None,
-                                   f"OCR workflow completed: {processed_count} images processed", "info")
+                                   f"OCR workflow completed: {processed_count} images processed", "info", user_id)
 
         # Send notification
         await _send_completion_notification(session, workflow.user_id, workflow_uuid, batch.id, processed_count)
+
+        # Clean up uploaded images after processing to prevent storage accumulation
+        # Note: Only the processed results (markdown) are stored in the database
+        try:
+            for image_path in image_paths:
+                if os.path.exists(image_path):
+                    os.remove(image_path)
+                    logger.info(f"Cleaned up temporary image file: {image_path}")
+        except Exception as e:
+            logger.warning(f"Failed to clean up some image files: {e}")
 
         return {
             "workflow_id": str(workflow_uuid),
@@ -200,14 +211,15 @@ async def _log_workflow_progress(
     batch_id: UUID,
     image_id: UUID = None,
     message: str = "",
-    level: str = "info"
+    level: str = "info",
+    user_id: str = "system"
 ):
     """Log workflow progress."""
     log_entry = OCRWorkflowLog(
         workflow_id=workflow_id,
         batch_id=batch_id,
         image_id=image_id,
-        user_id="system",  # TODO: Get actual user
+        user_id=user_id,
         level=level,
         message=message,
         workflow_phase="processing"
@@ -222,7 +234,7 @@ async def _send_completion_notification(
     workflow_id: UUID,
     batch_id: UUID,
     processed_count: int
-):
+) -> None:
     """Send completion notification."""
     try:
         notification = Notification(

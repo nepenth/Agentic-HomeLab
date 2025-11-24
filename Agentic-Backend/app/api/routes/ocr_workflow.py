@@ -329,7 +329,8 @@ async def process_ocr_workflow(
             workflow_id,
             workflow.ocr_model,
             image_paths,
-            batch.batch_name
+            batch.batch_name,
+            current_user.username
         )
 
         logger.info(f"Started OCR processing for workflow {workflow_id}, batch {batch_id}")
