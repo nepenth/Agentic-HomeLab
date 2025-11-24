@@ -12,7 +12,16 @@ import {
   CircularProgress,
   Alert,
   LinearProgress,
-  Button
+  Button,
+  Popover,
+  Paper,
+  Divider,
+  InputBase,
+  List,
+  ListItem,
+  ListItemButton,
+  ListItemText,
+  Fade
 } from '@mui/material';
 import {
   Psychology,
@@ -108,6 +117,8 @@ const ModelSelector: React.FC<ModelSelectorProps> = ({
   const [autoCollapseTimer, setAutoCollapseTimer] = useState<NodeJS.Timeout | null>(null);
   const [runtimeModelInfo, setRuntimeModelInfo] = useState<Map<string, any>>(new Map());
   const [expandedGroups, setExpandedGroups] = useState<Set<string>>(new Set(['Qwen', 'DeepSeek'])); // Default expanded groups
+  const [popoverAnchor, setPopoverAnchor] = useState<null | HTMLElement>(null);
+  const [searchQuery, setSearchQuery] = useState('');
 
   // Fetch available models with rich data
   const {
@@ -248,6 +259,49 @@ const ModelSelector: React.FC<ModelSelectorProps> = ({
     });
   };
 
+  // Popover handlers
+  const handlePopoverOpen = (event: React.MouseEvent<HTMLElement>) => {
+    setPopoverAnchor(event.currentTarget);
+  };
+
+  const handlePopoverClose = () => {
+    setPopoverAnchor(null);
+    setSearchQuery('');
+  };
+
+  // Filter models based on search query
+  const getFilteredModels = () => {
+    if (!searchQuery.trim()) {
+      return { modelGroups, ungroupedModels };
+    }
+
+    const query = searchQuery.toLowerCase();
+    const filteredGroups: ModelGroup = {};
+    const filteredUngrouped: OllamaModel[] = [];
+
+    // Filter grouped models
+    Object.entries(modelGroups).forEach(([familyName, models]) => {
+      const filteredModels = (models as any[]).filter((model: any) =>
+        model.name.toLowerCase().includes(query) ||
+        model.display_name?.toLowerCase().includes(query) ||
+        familyName.toLowerCase().includes(query) ||
+        model.description?.toLowerCase().includes(query)
+      );
+      if (filteredModels.length > 0) {
+        filteredGroups[familyName] = filteredModels;
+      }
+    });
+
+    // Filter ungrouped models
+    filteredUngrouped.push(...ungroupedModels.filter((model: any) =>
+      model.name.toLowerCase().includes(query) ||
+      model.display_name?.toLowerCase().includes(query) ||
+      model.description?.toLowerCase().includes(query)
+    ));
+
+    return { modelGroups: filteredGroups, ungroupedModels: filteredUngrouped };
+  };
+
   // Cleanup timer on unmount
   React.useEffect(() => {
     return () => {
@@ -317,6 +371,8 @@ const ModelSelector: React.FC<ModelSelectorProps> = ({
   ] : availableModels;
 
   const currentModelInfo = getModelInfo(selectedModel || '');
+  const filteredData = getFilteredModels();
+  const isOpen = Boolean(popoverAnchor);
 
   return (
     <Box sx={{ minWidth: 200 }}>
@@ -336,324 +392,351 @@ const ModelSelector: React.FC<ModelSelectorProps> = ({
           gap: 1,
           p: 1.5
         }}>
-          <FormControl
+          <Button
             fullWidth
-            size="small"
+            onClick={handlePopoverOpen}
             disabled={disabled}
+            startIcon={
+              <Box sx={{ display: 'flex', alignItems: 'center' }}>
+                {modelStatus === 'switching' ? (
+                  <CircularProgress size={16} />
+                ) : modelStatus === 'error' ? (
+                  <Error sx={{ color: '#FF3B30' }} fontSize="small" />
+                ) : (
+                  <Psychology sx={{ color: '#007AFF' }} fontSize="small" />
+                )}
+              </Box>
+            }
+            endIcon={
+              <ExpandMore sx={{
+                transform: isOpen ? 'rotate(180deg)' : 'rotate(0deg)',
+                transition: 'transform 0.2s ease'
+              }} />
+            }
             sx={{
-              flexGrow: 1,
-              '& .MuiOutlinedInput-root': {
-                '& fieldset': { border: 'none' },
-                backgroundColor: 'transparent',
-              },
-              '& .MuiInputLabel-root': {
-                transform: 'translate(8px, 9px) scale(1)',
-                '&.Mui-focused, &.MuiFormLabel-filled': {
-                  transform: 'translate(8px, -6px) scale(0.75)',
-                }
+              justifyContent: 'space-between',
+              textTransform: 'none',
+              fontSize: '0.9rem',
+              fontWeight: 500,
+              color: 'text.primary',
+              border: '1px solid rgba(0, 0, 0, 0.12)',
+              borderRadius: 2,
+              py: 1,
+              px: 2,
+              backgroundColor: 'background.paper',
+              '&:hover': {
+                backgroundColor: 'action.hover',
+                borderColor: 'rgba(0, 0, 0, 0.24)'
               }
             }}
           >
-            <InputLabel id="model-select-label" sx={{ fontSize: '0.85rem' }}>
-              AI Model
-            </InputLabel>
-            <Select
-              labelId="model-select-label"
-              value={selectedModel || ''}
-              onChange={(e) => handleModelChange(e.target.value)}
-              startAdornment={
-                <Box sx={{ display: 'flex', alignItems: 'center', mr: 1 }}>
-                  {modelStatus === 'switching' ? (
-                    <CircularProgress size={16} />
-                  ) : modelStatus === 'error' ? (
-                    <Error sx={{ color: '#FF3B30' }} fontSize="small" />
-                  ) : (
-                    <Psychology sx={{ color: '#007AFF' }} fontSize="small" />
-                  )}
-                </Box>
-              }
-              sx={{ fontSize: '0.9rem' }}
-            >
-            {/* Render grouped models */}
-            {Object.entries(modelGroups).map(([familyName, models]) => (
-              <Box key={familyName}>
-                {/* Family header */}
-                <MenuItem
-                  onClick={() => toggleGroupExpansion(familyName)}
-                  sx={{
-                    backgroundColor: 'rgba(0, 122, 255, 0.05)',
-                    borderBottom: '1px solid rgba(0, 122, 255, 0.2)',
-                    '&:hover': { backgroundColor: 'rgba(0, 122, 255, 0.1)' }
-                  }}
-                >
-                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, width: '100%' }}>
-                    {expandedGroups.has(familyName) ? (
-                      <ExpandLess sx={{ fontSize: '1rem', color: '#007AFF' }} />
-                    ) : (
-                      <ExpandMore sx={{ fontSize: '1rem', color: '#007AFF' }} />
-                    )}
-                    <Typography variant="body2" sx={{ fontWeight: 600, color: '#007AFF' }}>
-                      {familyName} ({(models as any[]).length})
-                    </Typography>
-                  </Box>
-                </MenuItem>
-
-                {/* Family models (only if expanded) */}
-                {expandedGroups.has(familyName) && (models as any[]).map((model: any) => {
-                  const modelInfo = getModelInfo(model.name);
-                  return (
-                    <MenuItem key={model.name} value={model.name} sx={{ pl: 4 }}>
-                      <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, width: '100%' }}>
-                        {/* Ranking indicator */}
-                        <Box sx={{
-                          width: 4,
-                          height: 20,
-                          backgroundColor: model.ranking_score > 80 ? '#34C759' :
-                                          model.ranking_score > 60 ? '#FF9500' : '#FF3B30',
-                          borderRadius: 1
-                        }} />
-
-                        <Box sx={{ flex: 1 }}>
-                          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                            <Typography variant="body2" sx={{ fontSize: '0.85rem', fontWeight: 600 }}>
-                              {model.display_name || modelInfo.displayName}
-                            </Typography>
-                            {model.recommended && (
-                              <Chip label="★" size="small" color="primary" sx={{ height: 16, fontSize: '0.6rem' }} />
-                            )}
-                          </Box>
-
-                          <Box sx={{ display: 'flex', gap: 0.5, mt: 0.25, flexWrap: 'wrap' }}>
-                            {model.size && (
-                              <Chip label={model.size} size="small" variant="outlined" sx={{ fontSize: '0.6rem', height: 16 }} />
-                            )}
-                            {model.runtime_data?.quantization && (
-                              <Chip label={model.runtime_data.quantization} size="small" variant="outlined" sx={{ fontSize: '0.6rem', height: 16 }} />
-                            )}
-                            {model.benchmarks?.average_score && (
-                              <Chip
-                                label={`Score: ${model.benchmarks.average_score.toFixed(1)}`}
-                                size="small"
-                                color="secondary"
-                                sx={{ fontSize: '0.6rem', height: 16 }}
-                              />
-                            )}
-                          </Box>
-
-                          <Typography variant="caption" sx={{
-                            color: 'text.secondary',
-                            fontSize: '0.7rem',
-                            display: 'block',
-                            mt: 0.25
-                          }}>
-                            {model.description || modelInfo.description}
-                          </Typography>
-                        </Box>
-                      </Box>
-                    </MenuItem>
-                  );
-                })}
-              </Box>
-            ))}
-
-            {/* Render ungrouped models */}
-            {ungroupedModels.length > 0 && (
-              <Box>
-                <MenuItem
-                  onClick={() => toggleGroupExpansion('Other')}
-                  sx={{
-                    backgroundColor: 'rgba(142, 142, 147, 0.05)',
-                    borderBottom: '1px solid rgba(142, 142, 147, 0.2)',
-                    '&:hover': { backgroundColor: 'rgba(142, 142, 147, 0.1)' }
-                  }}
-                >
-                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, width: '100%' }}>
-                    {expandedGroups.has('Other') ? (
-                      <ExpandLess sx={{ fontSize: '1rem', color: '#8E8E93' }} />
-                    ) : (
-                      <ExpandMore sx={{ fontSize: '1rem', color: '#8E8E93' }} />
-                    )}
-                    <Typography variant="body2" sx={{ fontWeight: 600, color: '#8E8E93' }}>
-                      Other ({ungroupedModels.length})
-                    </Typography>
-                  </Box>
-                </MenuItem>
-
-                {expandedGroups.has('Other') && ungroupedModels.map((model: any) => {
-                  const modelInfo = getModelInfo(model.name);
-                  return (
-                    <MenuItem key={model.name} value={model.name} sx={{ pl: 4 }}>
-                      <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, width: '100%' }}>
-                        <Box sx={{
-                          width: 4,
-                          height: 20,
-                          backgroundColor: model.ranking_score > 80 ? '#34C759' :
-                                          model.ranking_score > 60 ? '#FF9500' : '#FF3B30',
-                          borderRadius: 1
-                        }} />
-
-                        <Box sx={{ flex: 1 }}>
-                          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                            <Typography variant="body2" sx={{ fontSize: '0.85rem', fontWeight: 600 }}>
-                              {model.display_name || modelInfo.displayName}
-                            </Typography>
-                            {model.recommended && (
-                              <Chip label="★" size="small" color="primary" sx={{ height: 16, fontSize: '0.6rem' }} />
-                            )}
-                          </Box>
-
-                          <Box sx={{ display: 'flex', gap: 0.5, mt: 0.25, flexWrap: 'wrap' }}>
-                            {model.size && (
-                              <Chip label={model.size} size="small" variant="outlined" sx={{ fontSize: '0.6rem', height: 16 }} />
-                            )}
-                            {model.runtime_data?.quantization && (
-                              <Chip label={model.runtime_data.quantization} size="small" variant="outlined" sx={{ fontSize: '0.6rem', height: 16 }} />
-                            )}
-                            {model.benchmarks?.average_score && (
-                              <Chip
-                                label={`Score: ${model.benchmarks.average_score.toFixed(1)}`}
-                                size="small"
-                                color="secondary"
-                                sx={{ fontSize: '0.6rem', height: 16 }}
-                              />
-                            )}
-                          </Box>
-
-                          <Typography variant="caption" sx={{
-                            color: 'text.secondary',
-                            fontSize: '0.7rem',
-                            display: 'block',
-                            mt: 0.25
-                          }}>
-                            {model.description || modelInfo.description}
-                          </Typography>
-                        </Box>
-                      </Box>
-                    </MenuItem>
-                  );
-                })}
-              </Box>
-            )}
-
-            {/* Fallback for old flat structure */}
-            {availableModels.length > 0 && Object.keys(modelGroups).length === 0 && ungroupedModels.length === 0 && availableModels.map((model: any) => {
-              const modelInfo = getModelInfo(model.name || model);
-              return (
-                <MenuItem key={model.name || model} value={model.name || model}>
-                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, width: '100%' }}>
-                    <Box sx={{
-                      width: 4,
-                      height: 20,
-                      backgroundColor: model.ranking_score > 80 ? '#34C759' :
-                                      model.ranking_score > 60 ? '#FF9500' : '#FF3B30',
-                      borderRadius: 1
-                    }} />
-
-                    <Box sx={{ flex: 1 }}>
-                      <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                        <Typography variant="body2" sx={{ fontSize: '0.85rem', fontWeight: 600 }}>
-                          {model.display_name || modelInfo.displayName}
-                        </Typography>
-                        {model.recommended && (
-                          <Chip label="★" size="small" color="primary" sx={{ height: 16, fontSize: '0.6rem' }} />
-                        )}
-                      </Box>
-
-                      <Box sx={{ display: 'flex', gap: 0.5, mt: 0.25, flexWrap: 'wrap' }}>
-                        {model.size && (
-                          <Chip label={model.size} size="small" variant="outlined" sx={{ fontSize: '0.6rem', height: 16 }} />
-                        )}
-                        {model.runtime_data?.quantization && (
-                          <Chip label={model.runtime_data.quantization} size="small" variant="outlined" sx={{ fontSize: '0.6rem', height: 16 }} />
-                        )}
-                        {model.benchmarks?.average_score && (
-                          <Chip
-                            label={`Score: ${model.benchmarks.average_score.toFixed(1)}`}
-                            size="small"
-                            color="secondary"
-                            sx={{ fontSize: '0.6rem', height: 16 }}
-                          />
-                        )}
-                      </Box>
-
-                      <Typography variant="caption" sx={{
-                        color: 'text.secondary',
-                        fontSize: '0.7rem',
-                        display: 'block',
-                        mt: 0.25
-                      }}>
-                        {model.description || modelInfo.description}
-                      </Typography>
-                    </Box>
-                  </Box>
-                </MenuItem>
-              );
-            })}
-          </Select>
-          </FormControl>
-
-          {/* Action Buttons */}
-          {showStatus && (
-            <Box sx={{ display: 'flex', gap: 0.5 }}>
-              <Tooltip title="Expand model details">
-                <IconButton
-                  size="small"
-                  onClick={handleDetailsToggle}
-                  sx={{
-                    width: 32,
-                    height: 32,
-                    color: detailsExpanded ? '#007AFF' : '#666',
-                    '&:hover': { backgroundColor: 'rgba(0, 122, 255, 0.1)' }
-                  }}
-                >
-                  <ExpandMore
-                    sx={{
-                      transform: detailsExpanded ? 'rotate(180deg)' : 'rotate(0deg)',
-                      transition: 'transform 0.3s ease',
-                      fontSize: '1.2rem'
-                    }}
-                  />
-                </IconButton>
-              </Tooltip>
-              <Tooltip title="Research this model online">
-                <IconButton
-                  size="small"
-                  onClick={() => webResearchMutation.mutate(selectedModel)}
-                  disabled={disabled || !selectedModel || webResearchMutation.isPending}
-                  sx={{
-                    width: 32,
-                    height: 32,
-                    color: enhancedModelInfo?.name === selectedModel ? '#007AFF' : '#666',
-                    '&:hover': { backgroundColor: 'rgba(0, 122, 255, 0.1)' }
-                  }}
-                >
-                  {webResearchMutation.isPending ? (
-                    <CircularProgress size={14} />
-                  ) : enhancedModelInfo?.name === selectedModel ? (
-                    <CloudDownload fontSize="small" />
-                  ) : (
-                    <Search fontSize="small" />
-                  )}
-                </IconButton>
-              </Tooltip>
-              <Tooltip title="Refresh models">
-                <IconButton
-                  size="small"
-                  onClick={() => refetch()}
-                  disabled={disabled}
-                  sx={{
-                    width: 32,
-                    height: 32,
-                    color: '#666',
-                    '&:hover': { backgroundColor: 'rgba(0, 0, 0, 0.05)' }
-                  }}
-                >
-                  <Refresh fontSize="small" />
-                </IconButton>
-              </Tooltip>
+            <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, flex: 1 }}>
+              <Typography variant="body2" sx={{ fontSize: '0.9rem', fontWeight: 500 }}>
+                {currentModelInfo.displayName || selectedModel || 'Select AI Model'}
+              </Typography>
+              {currentModelInfo.recommended && (
+                <Chip label="★" size="small" color="primary" sx={{ height: 16, fontSize: '0.6rem' }} />
+              )}
             </Box>
-          )}
+          </Button>
+
+          {/* Model Selection Popover */}
+          <Popover
+            open={isOpen}
+            anchorEl={popoverAnchor}
+            onClose={handlePopoverClose}
+            anchorOrigin={{
+              vertical: 'bottom',
+              horizontal: 'left',
+            }}
+            transformOrigin={{
+              vertical: 'top',
+              horizontal: 'left',
+            }}
+            PaperProps={{
+              sx: {
+                mt: 1,
+                borderRadius: 2,
+                boxShadow: '0 8px 32px rgba(0, 0, 0, 0.12)',
+                border: '1px solid rgba(0, 0, 0, 0.08)',
+                maxWidth: 600,
+                width: 500,
+                maxHeight: 600,
+              }
+            }}
+          >
+            <Paper sx={{ width: '100%', maxHeight: 600 }}>
+              {/* Search Header */}
+              <Box sx={{ p: 2, borderBottom: '1px solid rgba(0, 0, 0, 0.08)' }}>
+                <InputBase
+                  placeholder="Search models..."
+                  value={searchQuery}
+                  onChange={(e) => setSearchQuery(e.target.value)}
+                  fullWidth
+                  startAdornment={<Search sx={{ color: 'action.disabled', mr: 1 }} />}
+                  sx={{
+                    '& .MuiInputBase-input': {
+                      fontSize: '0.9rem',
+                      py: 1
+                    }
+                  }}
+                />
+              </Box>
+
+              {/* Models List */}
+              <Box sx={{ maxHeight: 500, overflow: 'auto' }}>
+                {/* Render grouped models */}
+                {Object.entries(filteredData.modelGroups).map(([familyName, models]) => (
+                  <Box key={familyName}>
+                    {/* Family header */}
+                    <ListItemButton
+                      onClick={() => toggleGroupExpansion(familyName)}
+                      sx={{
+                        backgroundColor: 'rgba(0, 122, 255, 0.05)',
+                        borderBottom: '1px solid rgba(0, 122, 255, 0.2)',
+                        '&:hover': { backgroundColor: 'rgba(0, 122, 255, 0.1)' },
+                        py: 1.5
+                      }}
+                    >
+                      <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, width: '100%' }}>
+                        {expandedGroups.has(familyName) ? (
+                          <ExpandLess sx={{ fontSize: '1rem', color: '#007AFF' }} />
+                        ) : (
+                          <ExpandMore sx={{ fontSize: '1rem', color: '#007AFF' }} />
+                        )}
+                        <Typography variant="body2" sx={{ fontWeight: 600, color: '#007AFF' }}>
+                          {familyName} ({(models as any[]).length})
+                        </Typography>
+                      </Box>
+                    </ListItemButton>
+
+                    {/* Family models (only if expanded) */}
+                    {expandedGroups.has(familyName) && (models as any[]).map((model: any) => {
+                      const modelInfo = getModelInfo(model.name);
+                      return (
+                        <ListItemButton
+                          key={model.name}
+                          onClick={() => {
+                            handleModelChange(model.name);
+                            handlePopoverClose();
+                          }}
+                          sx={{ pl: 4, py: 1 }}
+                        >
+                          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, width: '100%' }}>
+                            {/* Ranking indicator */}
+                            <Box sx={{
+                              width: 4,
+                              height: 20,
+                              backgroundColor: model.ranking_score > 80 ? '#34C759' :
+                                               model.ranking_score > 60 ? '#FF9500' : '#FF3B30',
+                              borderRadius: 1
+                            }} />
+
+                            <Box sx={{ flex: 1 }}>
+                              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                                <Typography variant="body2" sx={{ fontSize: '0.85rem', fontWeight: 600 }}>
+                                  {model.display_name || modelInfo.displayName}
+                                </Typography>
+                                {model.recommended && (
+                                  <Chip label="★" size="small" color="primary" sx={{ height: 16, fontSize: '0.6rem' }} />
+                                )}
+                              </Box>
+
+                              <Box sx={{ display: 'flex', gap: 0.5, mt: 0.25, flexWrap: 'wrap' }}>
+                                {model.size && (
+                                  <Chip label={model.size} size="small" variant="outlined" sx={{ fontSize: '0.6rem', height: 16 }} />
+                                )}
+                                {model.runtime_data?.quantization && (
+                                  <Chip label={model.runtime_data.quantization} size="small" variant="outlined" sx={{ fontSize: '0.6rem', height: 16 }} />
+                                )}
+                                {model.benchmarks?.average_score && (
+                                  <Chip
+                                    label={`Score: ${model.benchmarks.average_score.toFixed(1)}`}
+                                    size="small"
+                                    color="secondary"
+                                    sx={{ fontSize: '0.6rem', height: 16 }}
+                                  />
+                                )}
+                              </Box>
+
+                              <Typography variant="caption" sx={{
+                                color: 'text.secondary',
+                                fontSize: '0.7rem',
+                                display: 'block',
+                                mt: 0.25
+                              }}>
+                                {model.description || modelInfo.description}
+                              </Typography>
+                            </Box>
+                          </Box>
+                        </ListItemButton>
+                      );
+                    })}
+                  </Box>
+                ))}
+
+                {/* Render ungrouped models */}
+                {filteredData.ungroupedModels.length > 0 && (
+                  <Box>
+                    <ListItemButton
+                      onClick={() => toggleGroupExpansion('Other')}
+                      sx={{
+                        backgroundColor: 'rgba(142, 142, 147, 0.05)',
+                        borderBottom: '1px solid rgba(142, 142, 147, 0.2)',
+                        '&:hover': { backgroundColor: 'rgba(142, 142, 147, 0.1)' },
+                        py: 1.5
+                      }}
+                    >
+                      <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, width: '100%' }}>
+                        {expandedGroups.has('Other') ? (
+                          <ExpandLess sx={{ fontSize: '1rem', color: '#8E8E93' }} />
+                        ) : (
+                          <ExpandMore sx={{ fontSize: '1rem', color: '#8E8E93' }} />
+                        )}
+                        <Typography variant="body2" sx={{ fontWeight: 600, color: '#8E8E93' }}>
+                          Other ({filteredData.ungroupedModels.length})
+                        </Typography>
+                      </Box>
+                    </ListItemButton>
+
+                    {expandedGroups.has('Other') && filteredData.ungroupedModels.map((model: any) => {
+                      const modelInfo = getModelInfo(model.name);
+                      return (
+                        <ListItemButton
+                          key={model.name}
+                          onClick={() => {
+                            handleModelChange(model.name);
+                            handlePopoverClose();
+                          }}
+                          sx={{ pl: 4, py: 1 }}
+                        >
+                          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, width: '100%' }}>
+                            <Box sx={{
+                              width: 4,
+                              height: 20,
+                              backgroundColor: model.ranking_score > 80 ? '#34C759' :
+                                               model.ranking_score > 60 ? '#FF9500' : '#FF3B30',
+                              borderRadius: 1
+                            }} />
+
+                            <Box sx={{ flex: 1 }}>
+                              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                                <Typography variant="body2" sx={{ fontSize: '0.85rem', fontWeight: 600 }}>
+                                  {model.display_name || modelInfo.displayName}
+                                </Typography>
+                                {model.recommended && (
+                                  <Chip label="★" size="small" color="primary" sx={{ height: 16, fontSize: '0.6rem' }} />
+                                )}
+                              </Box>
+
+                              <Box sx={{ display: 'flex', gap: 0.5, mt: 0.25, flexWrap: 'wrap' }}>
+                                {model.size && (
+                                  <Chip label={model.size} size="small" variant="outlined" sx={{ fontSize: '0.6rem', height: 16 }} />
+                                )}
+                                {model.runtime_data?.quantization && (
+                                  <Chip label={model.runtime_data.quantization} size="small" variant="outlined" sx={{ fontSize: '0.6rem', height: 16 }} />
+                                )}
+                                {model.benchmarks?.average_score && (
+                                  <Chip
+                                    label={`Score: ${model.benchmarks.average_score.toFixed(1)}`}
+                                    size="small"
+                                    color="secondary"
+                                    sx={{ fontSize: '0.6rem', height: 16 }}
+                                  />
+                                )}
+                              </Box>
+
+                              <Typography variant="caption" sx={{
+                                color: 'text.secondary',
+                                fontSize: '0.7rem',
+                                display: 'block',
+                                mt: 0.25
+                              }}>
+                                {model.description || modelInfo.description}
+                              </Typography>
+                            </Box>
+                          </Box>
+                        </ListItemButton>
+                      );
+                    })}
+                  </Box>
+                )}
+
+                {/* No results message */}
+                {Object.keys(filteredData.modelGroups).length === 0 && filteredData.ungroupedModels.length === 0 && (
+                  <Box sx={{ p: 3, textAlign: 'center' }}>
+                    <Typography variant="body2" color="text.secondary">
+                      No models found matching "{searchQuery}"
+                    </Typography>
+                  </Box>
+                )}
+              </Box>
+            </Paper>
+          </Popover>
+
         </Box>
+
+        {/* Action Buttons Row */}
+        {showStatus && (
+          <Box sx={{ display: 'flex', gap: 0.5, px: 1.5, pb: 1.5 }}>
+            <Tooltip title="Expand model details">
+              <IconButton
+                size="small"
+                onClick={handleDetailsToggle}
+                sx={{
+                  width: 32,
+                  height: 32,
+                  color: detailsExpanded ? '#007AFF' : '#666',
+                  '&:hover': { backgroundColor: 'rgba(0, 122, 255, 0.1)' }
+                }}
+              >
+                <ExpandMore
+                  sx={{
+                    transform: detailsExpanded ? 'rotate(180deg)' : 'rotate(0deg)',
+                    transition: 'transform 0.3s ease',
+                    fontSize: '1.2rem'
+                  }}
+                />
+              </IconButton>
+            </Tooltip>
+            <Tooltip title="Research this model online">
+              <IconButton
+                size="small"
+                onClick={() => webResearchMutation.mutate(selectedModel)}
+                disabled={disabled || !selectedModel || webResearchMutation.isPending}
+                sx={{
+                  width: 32,
+                  height: 32,
+                  color: enhancedModelInfo?.name === selectedModel ? '#007AFF' : '#666',
+                  '&:hover': { backgroundColor: 'rgba(0, 122, 255, 0.1)' }
+                }}
+              >
+                {webResearchMutation.isPending ? (
+                  <CircularProgress size={14} />
+                ) : enhancedModelInfo?.name === selectedModel ? (
+                  <CloudDownload fontSize="small" />
+                ) : (
+                  <Search fontSize="small" />
+                )}
+              </IconButton>
+            </Tooltip>
+            <Tooltip title="Refresh models">
+              <IconButton
+                size="small"
+                onClick={() => refetch()}
+                disabled={disabled}
+                sx={{
+                  width: 32,
+                  height: 32,
+                  color: '#666',
+                  '&:hover': { backgroundColor: 'rgba(0, 0, 0, 0.05)' }
+                }}
+              >
+                <Refresh fontSize="small" />
+              </IconButton>
+            </Tooltip>
+          </Box>
+        )}
 
         {/* Abbreviated Model Info (when collapsed) */}
         {showStatus && !detailsExpanded && selectedModel && (

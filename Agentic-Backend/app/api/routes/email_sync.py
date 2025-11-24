@@ -14,11 +14,11 @@ from uuid import UUID
 
 from app.api.dependencies import get_db_session, get_current_user
 from app.services.email_sync_service import email_sync_service
-from app.services.email_sync_service import email_sync_service
 from app.services.email_connectors.base_connector import SyncType
 from app.services.email_embedding_service import email_embedding_service
 from app.utils.logging import get_logger
 from app.db.models.user import User
+from sqlalchemy import select, and_, or_, func, desc, update
 
 logger = get_logger("email_sync_api")
 router = APIRouter()
