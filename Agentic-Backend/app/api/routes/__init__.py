@@ -49,6 +49,9 @@ from .email_search import router as email_search_router
 from .email_assistant import router as email_assistant_router
 from .email_sync import router as email_sync_router
 
+# OCR Workflow System
+from .ocr_workflow import router as ocr_workflow_router
+
 # Phase 3: Monitoring & Observability
 from .monitoring import router as monitoring_router
 
@@ -106,6 +109,9 @@ api_router.include_router(email_chat_router, prefix="/email", tags=["Email Chat"
 api_router.include_router(email_search_router, prefix="/email", tags=["Email Search"])
 api_router.include_router(email_assistant_router, prefix="/email-assistant", tags=["Email Assistant"])
 api_router.include_router(email_sync_router, prefix="/email-sync", tags=["Email Synchronization"])
+
+# OCR Workflow System
+api_router.include_router(ocr_workflow_router, prefix="/ocr", tags=["OCR Workflow"])
 
 # Phase 3: Monitoring & Observability
 api_router.include_router(monitoring_router, prefix="/monitoring", tags=["Monitoring & Observability"])

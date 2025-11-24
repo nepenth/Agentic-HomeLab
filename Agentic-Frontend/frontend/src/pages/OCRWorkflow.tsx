@@ -175,4 +175,141 @@ const OCRWorkflow: React.FC = () => {
                 <TextField
                   fullWidth
                   label="Batch Name"
-                  value={batchName
+                  value={batchName}
+                  onChange={(e) => setBatchName(e.target.value)}
+                  margin="normal"
+                />
+                <Box sx={{ mt: 2 }}>
+                  <input
+                    accept="image/*"
+                    style={{ display: 'none' }}
+                    id="image-upload"
+                    multiple
+                    type="file"
+                    onChange={handleFileUpload}
+                  />
+                  <label htmlFor="image-upload">
+                    <Button
+                      variant="outlined"
+                      component="span"
+                      startIcon={<UploadIcon />}
+                      fullWidth
+                    >
+                      Upload Images
+                    </Button>
+                  </label>
+                  {images.length > 0 && (
+                    <Typography variant="body2" sx={{ mt: 1 }}>
+                      {images.length} image(s) selected
+                    </Typography>
+                  )}
+                </Box>
+              </CardContent>
+            </Card>
+          </Grid>
+
+          <Grid item xs={12}>
+            <Card>
+              <CardHeader
+                title="Processing"
+                action={
+                  <Button
+                    variant="contained"
+                    onClick={startOCRWorkflow}
+                    disabled={isProcessing || images.length === 0}
+                    startIcon={isProcessing ? <CircularProgress size={20} /> : <ModelIcon />}
+                  >
+                    {isProcessing ? 'Processing...' : 'Start OCR'}
+                  </Button>
+                }
+              />
+              <CardContent>
+                {error && (
+                  <Alert severity="error" sx={{ mb: 2 }}>
+                    {error}
+                  </Alert>
+                )}
+                {status === 'processing' && (
+                  <Box sx={{ display: 'flex', alignItems: 'center', mb: 2 }}>
+                    <CircularProgress size={20} sx={{ mr: 2 }} />
+                    <Typography>Processing images...</Typography>
+                  </Box>
+                )}
+                {status === 'completed' && (
+                  <Alert severity="success" sx={{ mb: 2 }}>
+                    OCR processing completed successfully!
+                  </Alert>
+                )}
+              </CardContent>
+            </Card>
+          </Grid>
+
+          {results && (
+            <Grid item xs={12}>
+              <Card>
+                <CardHeader
+                  title="OCR Results"
+                  action={
+                    <Box>
+                      <Button
+                        variant="outlined"
+                        startIcon={<PdfIcon />}
+                        onClick={() => exportResult('pdf')}
+                        sx={{ mr: 1 }}
+                      >
+                        Export PDF
+                      </Button>
+                      <Button
+                        variant="outlined"
+                        startIcon={<DocxIcon />}
+                        onClick={() => exportResult('docx')}
+                      >
+                        Export DOCX
+                      </Button>
+                    </Box>
+                  }
+                />
+                <CardContent>
+                  <Box sx={{
+                    maxHeight: 600,
+                    overflow: 'auto',
+                    border: '1px solid #e0e0e0',
+                    borderRadius: 1,
+                    p: 2,
+                    backgroundColor: '#f5f5f5'
+                  }}>
+                    <ReactMarkdown
+                      components={{
+                        code: ({ node, inline, className, children, ...props }) => {
+                          const match = /language-(\w+)/.exec(className || '');
+                          return !inline && match ? (
+                            <SyntaxHighlighter
+                              style={vscDarkPlus}
+                              language={match[1]}
+                              PreTag="div"
+                              {...props}
+                            >
+                              {String(children).replace(/\n$/, '')}
+                            </SyntaxHighlighter>
+                          ) : (
+                            <code className={className} {...props}>
+                              {children}
+                            </code>
+                          );
+                        },
+                      }}
+                    >
+                      {results}
+                    </ReactMarkdown>
+                  </Box>
+                </CardContent>
+              </Card>
+            </Grid>
+          )}
+        </Grid>
+      </Paper>
+    </Container>
+  );
+};
+
+export default OCRWorkflow;

@@ -2089,3 +2089,115 @@ export interface AgentTypeDocumentation {
   best_practices: string[];
   limitations?: string[];
 }
+
+// ==========================================
+// OCR WORKFLOW TYPES
+// ==========================================
+
+export interface OCRWorkflow {
+  id: string;
+  user_id: string;
+  workflow_name: string;
+  ocr_model: string;
+  status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
+  processing_options?: Record<string, any>;
+  total_images: number;
+  processed_images: number;
+  total_pages: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface OCRBatch {
+  id: string;
+  workflow_id: string;
+  batch_name?: string;
+  document_title?: string;
+  status: 'pending' | 'processing' | 'completed' | 'failed';
+  total_images: number;
+  processed_images: number;
+  combined_markdown?: string;
+  page_count: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface OCRImage {
+  id: string;
+  batch_id: string;
+  workflow_id: string;
+  original_filename: string;
+  file_path: string;
+  file_size?: number;
+  mime_type?: string;
+  status: 'pending' | 'processing' | 'completed' | 'failed';
+  processing_order: number;
+  ocr_model_used?: string;
+  raw_markdown?: string;
+  processed_markdown?: string;
+  confidence_score?: number;
+  image_width?: number;
+  image_height?: number;
+  image_dpi?: number;
+  uploaded_at: string;
+  processed_at?: string;
+}
+
+export interface OCROllamaModel {
+  name: string;
+  size: number;
+  modified_at: string;
+}
+
+export interface OCRWorkflowCreateRequest {
+  workflow_name?: string;
+  ocr_model?: string;
+  processing_options?: Record<string, any>;
+}
+
+export interface OCRBatchCreateRequest {
+  batch_name?: string;
+}
+
+export interface OCRProcessRequest {
+  batch_id: string;
+}
+
+export interface OCRExportRequest {
+  format?: 'markdown' | 'pdf' | 'docx';
+}
+
+export interface OCRWorkflowResponse {
+  workflow_id: string;
+  status: string;
+  message: string;
+}
+
+export interface OCRBatchResponse {
+  batch_id: string;
+  workflow_id: string;
+  status: string;
+  message: string;
+}
+
+export interface OCRStatusResponse {
+  workflow_id: string;
+  status: string;
+  progress: {
+    total_batches: number;
+    completed_batches: number;
+    total_images: number;
+    processed_images: number;
+  };
+  created_at: string;
+  updated_at: string;
+}
+
+export interface OCRResultsResponse {
+  workflow_id: string;
+  batch_id: string;
+  combined_markdown: string;
+  processed_images: number;
+  total_images: number;
+  status: string;
+}

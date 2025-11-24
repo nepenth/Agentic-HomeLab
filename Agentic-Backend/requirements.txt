@@ -35,3 +35,4 @@ pandas==2.2.3
 bleach==6.1.0
 playwright==1.40.0
 datasets==2.21.0
+markdown2==2.5.0

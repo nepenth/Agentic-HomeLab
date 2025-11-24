@@ -1,6 +1,6 @@
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy import MetaData, event, pool
-from sqlalchemy.orm import DeclarativeBase
+from sqlalchemy.orm import declarative_base
 from sqlalchemy.pool import NullPool
 import contextlib
 import asyncio
@@ -10,9 +10,7 @@ from app.config import settings
 
 logger = logging.getLogger(__name__)
 
-class Base(DeclarativeBase):
-    """Base class for all database models."""
-    pass
+Base = declarative_base()
 
 
 # Modern SQLAlchemy 2.0+ async engine configuration
@@ -75,14 +73,18 @@ def create_optimized_async_engine():
 # Create the optimized engine
 engine = create_optimized_async_engine()
 
-# Session configuration with modern patterns
-session_factory = async_sessionmaker(
-    bind=engine,
-    class_=AsyncSession,
-    autoflush=False,
-    autocommit=False,
-    expire_on_commit=False,  # Prevent lazy loading issues
-)
+# Session configuration for SQLAlchemy 1.4
+from sqlalchemy.orm import sessionmaker as sync_sessionmaker
+
+# For async sessions in SQLAlchemy 1.4, we create them directly from the engine
+def create_async_session():
+    """Create async session for SQLAlchemy 1.4."""
+    return AsyncSession(engine, autoflush=False, autocommit=False, expire_on_commit=False)
+
+# For backward compatibility, create a factory function
+def session_factory():
+    """Factory function to create async sessions."""
+    return create_async_session()
 
 
 async def get_async_session() -> AsyncIterator[AsyncSession]:
