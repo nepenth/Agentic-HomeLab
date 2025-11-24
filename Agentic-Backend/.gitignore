@@ -231,6 +231,22 @@ downloads/
 cache/
 .cache/
 
+# OCR temporary files and media
+media/
+media/ocr/
+*.jpg
+*.jpeg
+*.png
+*.gif
+*.bmp
+*.tiff
+*.webp
+
+# AI/ML cache directories
+media_cache/
+models_cache/
+ollama_cache/
+
 # Application logs
 app.log
 logs/
