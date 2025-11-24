@@ -70,6 +70,7 @@ async def _process_ocr_workflow_async(
 
         workflow.status = "running"
         workflow.started_at = datetime.utcnow()
+        workflow.total_images = len(image_paths)  # Set total images for progress tracking
         await session.commit()
 
         # Create batch
@@ -106,17 +107,30 @@ async def _process_ocr_workflow_async(
                 # OCR with Ollama
                 prompt = "Extract all text from this image and format it as clean markdown. Preserve structure, tables, and formatting as much as possible."
 
-                response = await ollama_client.generate(
-                    prompt=prompt,
-                    model=ocr_model,
-                    options={
-                        "images": [image_data],
-                        "temperature": 0.1,
-                        "top_p": 0.9
-                    }
-                )
+                logger.info(f"Sending OCR request to Ollama model {ocr_model} for image {os.path.basename(image_path)}")
 
-                ocr_text = response.get('response', '').strip()
+                try:
+                    response = await ollama_client.generate(
+                        prompt=prompt,
+                        model=ocr_model,
+                        options={
+                            "images": [image_data],
+                            "temperature": 0.1,
+                            "top_p": 0.9
+                        }
+                    )
+
+                    logger.info(f"Received OCR response from Ollama: {response}")
+
+                    ocr_text = response.get('response', '').strip()
+
+                    if not ocr_text:
+                        logger.warning(f"Empty OCR response for image {os.path.basename(image_path)}")
+                        ocr_text = f"[No text extracted from {os.path.basename(image_path)}]"
+
+                except Exception as ocr_error:
+                    logger.error(f"OCR API call failed for image {os.path.basename(image_path)}: {ocr_error}")
+                    ocr_text = f"[OCR failed for {os.path.basename(image_path)}: {str(ocr_error)}]"
 
                 # Create image record
                 image_record = OCRImage(
@@ -138,8 +152,9 @@ async def _process_ocr_workflow_async(
                 combined_markdown += ocr_text
                 processed_count += 1
 
-                # Update batch progress
+                # Update batch and workflow progress
                 batch.processed_images = processed_count
+                workflow.processed_images = processed_count
                 await session.commit()
 
                 # Log progress
@@ -171,8 +186,9 @@ async def _process_ocr_workflow_async(
         batch.completed_at = datetime.utcnow()
         await session.commit()
 
-        # Update workflow completion
+        # Update workflow completion - aggregate stats from all batches
         workflow.status = "completed"
+        workflow.total_images = len(image_paths)
         workflow.processed_images = processed_count
         workflow.total_pages = processed_count
         workflow.completed_at = datetime.utcnow()
