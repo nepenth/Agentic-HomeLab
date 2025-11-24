@@ -17,7 +17,7 @@ import asyncio
 from typing import List, Dict, Any, Optional, Set
 from datetime import datetime, timedelta, timezone
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, and_, or_, update, delete
+from sqlalchemy import select, and_, or_, update, delete, desc
 from sqlalchemy.orm import selectinload
 
 from app.db.models.email import EmailAccount, Email, EmailSyncHistory, FolderSyncState
@@ -62,24 +62,25 @@ class EmailSyncService:
         force_full_sync: bool = False
     ) -> EmailSyncResult:
         """
-        Synchronize a single email account using UID-based sync.
-
+        Synchronize an email account using UID-based sync.
+        
         Args:
             db: Database session
-            account_id: EmailAccount UUID
-            force_full_sync: Force full sync even if UIDVALIDITY unchanged
-
+            account_id: ID of account to sync
+            force_full_sync: Force full sync ignoring state
+            
         Returns:
-            EmailSyncResult with sync details
+            EmailSyncResult object
         """
         start_time = datetime.now(timezone.utc)
         sync_result = EmailSyncResult(
-            sync_type=SyncType.INCREMENTAL,
+            sync_type=SyncType.FULL if force_full_sync else SyncType.INCREMENTAL,
             started_at=start_time
         )
 
         try:
             # Get email account with user info
+            # The original code used selectinload(EmailAccount.user) which is important for workflow_context
             account_query = select(EmailAccount).options(
                 selectinload(EmailAccount.user)
             ).where(EmailAccount.id == account_id)
@@ -89,6 +90,18 @@ class EmailSyncService:
 
             if not account:
                 sync_result.error_message = f"Account {account_id} not found"
+                return sync_result
+
+            # Check circuit breaker
+            if not await self._check_circuit_breaker(db, account):
+                sync_result.error_message = "Circuit breaker open: too many recent failures"
+                sync_result.success = False
+                return sync_result
+
+            # Check lock
+            if not await self._check_lock(db, account):
+                sync_result.error_message = "Sync already in progress"
+                sync_result.success = False
                 return sync_result
 
             # Create unified workflow context
@@ -984,7 +997,9 @@ class EmailSyncService:
         db: AsyncSession,
         user_id: int
     ):
-        """Schedule embedding generation for newly synced emails."""
+        """Schedule embedding generation task."""
+        # This is a placeholder. In a real system, this would trigger a Celery task.
+        # For now, we rely on the periodic task to pick up pending embeddings.
         try:
             # Import here to avoid circular imports
             from app.tasks.email_sync_tasks import process_pending_embeddings
@@ -994,6 +1009,81 @@ class EmailSyncService:
             self.logger.info(f"Scheduled embedding generation task for user {user_id}")
         except Exception as e:
             self.logger.error(f"Error scheduling embedding generation: {e}")
+
+    async def _check_circuit_breaker(self, db: AsyncSession, account: EmailAccount) -> bool:
+        """
+        Check if sync should proceed based on recent failure history.
+        Returns True if allowed, False if circuit is open.
+        """
+        # Get last 5 sync attempts
+        query = select(EmailSyncHistory).where(
+            EmailSyncHistory.account_id == account.id
+        ).order_by(desc(EmailSyncHistory.started_at)).limit(5)
+        
+        result = await db.execute(query)
+        history = result.scalars().all()
+        
+        if len(history) < 5:
+            return True
+            
+        # Check if all 5 failed
+        all_failed = all(h.status == "failed" for h in history) # Changed "error" to "failed" to match EmailSyncHistory status
+        if not all_failed:
+            return True
+            
+        # Check if last failure was recent (within 30 minutes)
+        last_failure_time = history[0].started_at
+        if last_failure_time.tzinfo is None:
+            last_failure_time = last_failure_time.replace(tzinfo=timezone.utc)
+            
+        now = datetime.now(timezone.utc)
+        if (now - last_failure_time) < timedelta(minutes=30):
+            self.logger.warning(f"Circuit breaker open for account {account.id}. 5 consecutive failures, last at {last_failure_time}")
+            return False
+            
+        return True
+
+    async def _check_lock(self, db: AsyncSession, account: EmailAccount) -> bool:
+        """
+        Check if sync is already running.
+        Returns True if allowed (lock acquired or broken), False if locked.
+        """
+        if account.sync_status != "running":
+            return True
+            
+        # Check if stuck
+        # We use EmailSyncHistory to find the running sync
+        query = select(EmailSyncHistory).where(
+            and_(
+                EmailSyncHistory.account_id == account.id,
+                EmailSyncHistory.status == "running"
+            )
+        ).order_by(desc(EmailSyncHistory.started_at)).limit(1)
+        
+        result = await db.execute(query)
+        running_sync = result.scalar_one_or_none()
+        
+        if not running_sync:
+            # Account says running but no history record? Break lock.
+            self.logger.warning(f"Account {account.id} status is 'running' but no active sync history found. Breaking potential stale lock.")
+            return True
+            
+        # Check last_updated
+        last_activity = running_sync.last_updated or running_sync.started_at
+        if last_activity.tzinfo is None:
+            last_activity = last_activity.replace(tzinfo=timezone.utc)
+            
+        now = datetime.now(timezone.utc)
+        if (now - last_activity) > timedelta(minutes=60): # 1 hour timeout
+            self.logger.warning(f"Breaking stale lock for account {account.id}. Last activity at {last_activity}")
+            # Mark old sync as error
+            running_sync.status = "failed" # Changed "error" to "failed"
+            running_sync.error_message = "Stale sync terminated by lock check"
+            running_sync.completed_at = now
+            await db.commit() # Commit the status update
+            return True
+            
+        return False
 
     async def get_sync_status(
         self,
@@ -1100,6 +1190,101 @@ class EmailSyncService:
             self.logger.error(f"Error getting sync status: {e}")
             raise
 
+    async def get_sync_health(self, db: AsyncSession, user_id: int) -> Dict[str, Any]:
+        """
+        Get health status of email synchronization.
+        Returns circuit breaker status, lock status, and failure counts.
+        """
+        from sqlalchemy import select, desc, func, and_ # Added 'and_' for clarity
+        from app.db.models.email import EmailAccount, EmailSyncHistory
+        from datetime import datetime, timedelta, timezone # Added for clarity
+
+        try:
+            # Get all accounts
+            result = await db.execute(
+                select(EmailAccount).where(EmailAccount.user_id == user_id)
+            )
+            accounts = result.scalars().all()
+
+            health_status = []
+            system_healthy = True
+
+            for account in accounts:
+                # Check circuit breaker status (reusing logic but returning details)
+                # Get last 5 syncs
+                history_query = select(EmailSyncHistory).where(
+                    EmailSyncHistory.account_id == account.id
+                ).order_by(desc(EmailSyncHistory.started_at)).limit(5)
+                
+                history_result = await db.execute(history_query)
+                history = history_result.scalars().all()
+                
+                consecutive_failures = 0
+                for h in history:
+                    if h.status == "failed":
+                        consecutive_failures += 1
+                    else:
+                        break
+                
+                circuit_breaker_open = False
+                if consecutive_failures >= 5:
+                    if history:
+                        last_failure = history[0].started_at
+                        if last_failure.tzinfo is None:
+                            last_failure = last_failure.replace(tzinfo=timezone.utc)
+                        now = datetime.now(timezone.utc)
+                        if (now - last_failure) < timedelta(minutes=30):
+                            circuit_breaker_open = True
+
+                # Check lock status
+                is_locked = account.sync_status == "running"
+                lock_stale = False
+                if is_locked:
+                    # Check if lock is stale
+                    running_sync_query = select(EmailSyncHistory).where(
+                        and_(
+                            EmailSyncHistory.account_id == account.id,
+                            EmailSyncHistory.status == "running"
+                        )
+                    ).order_by(desc(EmailSyncHistory.started_at)).limit(1)
+                    running_result = await db.execute(running_sync_query)
+                    running_sync = running_result.scalar_one_or_none()
+                    
+                    if running_sync:
+                        last_activity = running_sync.last_updated or running_sync.started_at
+                        if last_activity.tzinfo is None:
+                            last_activity = last_activity.replace(tzinfo=timezone.utc)
+                        now = datetime.now(timezone.utc)
+                        if (now - last_activity) > timedelta(minutes=60):
+                            lock_stale = True
+
+                account_health = {
+                    "account_id": str(account.id),
+                    "email_address": account.email_address,
+                    "status": "unhealthy" if circuit_breaker_open else ("degraded" if consecutive_failures > 0 or lock_stale else "healthy"),
+                    "consecutive_failures": consecutive_failures,
+                    "circuit_breaker_open": circuit_breaker_open,
+                    "is_locked": is_locked,
+                    "lock_stale": lock_stale,
+                    "last_sync_at": account.last_sync_at.isoformat() if account.last_sync_at else None
+                }
+                
+                if account_health["status"] == "unhealthy":
+                    system_healthy = False
+                
+                health_status.append(account_health)
+
+            return {
+                "system_status": "healthy" if system_healthy else "unhealthy",
+                "accounts": health_status,
+                "checked_at": datetime.now(timezone.utc).isoformat()
+            }
+
+        except Exception as e:
+            self.logger.error(f"Error getting sync health: {e}")
+            raise
+
 
 # Global instance
 email_sync_service = EmailSyncService()
+

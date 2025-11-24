@@ -1,4 +1,3 @@
-
 """
 OCR Workflow API Routes.
 
@@ -15,139 +14,153 @@ from uuid import UUID, uuid4
 import os
 from datetime import datetime
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, and_
+from sqlalchemy import select, and_, update
 from sqlalchemy.orm import selectinload
-from pydantic import BaseModel
 from app.api.dependencies import get_db_session, get_current_user
 from app.db.models.user import User
 from app.db.models.ocr_workflow import (
-    OCRWorkflow, OCRBatch, OCRImage, OCRDocument, OCRWorkflowLog,
-    OCRWorkflowStatus, OCRBatchStatus
+    OCRWorkflow,
+    OCRBatch,
+    OCRImage,
+    OCRDocument,
+    OCRWorkflowStatus,
+    OCRBatchStatus
 )
-from app.services.ollama_client import ollama_client
 from app.tasks.ocr_tasks import process_ocr_workflow_task
+from app.services.ollama_client import ollama_client
 from app.utils.logging import get_logger
-import shutil
-from pathlib import Path
+from pydantic import BaseModel
 
-logger = get_logger("ocr_workflow_api")
+logger = get_logger("ocr_workflow")
+
 router = APIRouter()
 
-# Create OCR media directory
-OCR_MEDIA_DIR = Path("media/ocr")
-OCR_MEDIA_DIR.mkdir(parents=True, exist_ok=True)
-
-
-class OCRWorkflowCreateRequest(BaseModel):
-    """Request to create a new OCR workflow."""
-    workflow_name: str = "OCR Workflow"
+# Pydantic models for request/response
+class OCRWorkflowCreate(BaseModel):
+    workflow_name: Optional[str] = None
     ocr_model: str = "deepseek-ocr"
-    processing_options: dict = {}
+    processing_options: Optional[dict] = None
 
-
-class OCRBatchCreateRequest(BaseModel):
-    """Request to create a batch of images."""
-    batch_name: str = "New Batch"
-
-
-class OCRProcessRequest(BaseModel):
-    """Request to process an OCR batch."""
-    batch_id: str
-
-
-class OCRExportRequest(BaseModel):
-    """Request to export OCR results."""
-    format: str = "markdown"  # markdown, pdf, docx
-
+class OCRBatchCreate(BaseModel):
+    batch_name: Optional[str] = None
 
 class OCRWorkflowResponse(BaseModel):
-    """Response for workflow operations."""
     workflow_id: str
     status: str
     message: str
-
 
 class OCRBatchResponse(BaseModel):
-    """Response for batch operations."""
     batch_id: str
     workflow_id: str
     status: str
     message: str
 
-
-class OCRStatusResponse(BaseModel):
-    """Response for status queries."""
-    workflow_id: str
-    status: str
-    progress: dict
-    created_at: str
-    updated_at: str
-
-
-class OCRResultsResponse(BaseModel):
-    """Response for OCR results."""
-    workflow_id: str
-    batch_id: str
-    combined_markdown: str
-    processed_images: int
-    total_images: int
-    status: str
-
-
-class OCROllamaModel(BaseModel):
-    """OCR model information from Ollama."""
+class OCRModelInfo(BaseModel):
     name: str
-    size: int
-    modified_at: str
+    display_name: str
+    description: str
+    capabilities: List[str]
+    recommended: bool
+    size: Optional[str] = None
 
+class OCRModelsResponse(BaseModel):
+    models: List[OCRModelInfo]
+    total_count: int
 
-@router.get("/models", response_model=List[OCROllamaModel])
-async def get_available_ocr_models():
-    """Get list of available OCR models from Ollama."""
+@router.get("/models", response_model=OCRModelsResponse)
+async def get_ocr_models(
+    current_user: User = Depends(get_current_user)
+) -> OCRModelsResponse:
+    """
+    Get available OCR models from Ollama, filtered to vision-capable models.
+    """
     try:
-        models_response = await ollama_client.list_models()
-        models = models_response.get("models", [])
+        # Get all available models from Ollama
+        ollama_response = await ollama_client.list_models()
 
-        # Filter for OCR-related models (you might want to adjust this filter)
-        ocr_models = [
-            model for model in models
-            if any(keyword in model.get("name", "").lower() for keyword in ["ocr", "vision", "llava"])
+        # Filter for vision-capable models (models that support image processing)
+        vision_models = []
+        for model in ollama_response.get("models", []):
+            model_name = model.get("name", "")
+
+            # Check if model supports vision capabilities
+            # Vision-capable models typically include keywords like 'vision', 'vl', 'visual', etc.
+            is_vision_capable = any(keyword in model_name.lower() for keyword in [
+                'vision', 'vl', 'visual', 'llava', 'bakllava', 'moondream',
+                'deepseek-ocr', 'qwen2.5vl', 'llama3.2-vision'
+            ])
+
+            if is_vision_capable:
+                vision_models.append({
+                    "name": model_name,
+                    "display_name": model_name.replace('-', ' ').title(),
+                    "description": f"Vision-capable OCR model: {model_name}",
+                    "capabilities": ["vision", "ocr", "image-analysis"],
+                    "recommended": "deepseek-ocr" in model_name or "qwen2.5vl" in model_name,
+                    "size": model.get("size", "Unknown")
+                })
+
+        # Add some default OCR models if not found in Ollama
+        default_models = [
+            {
+                "name": "deepseek-ocr",
+                "display_name": "DeepSeek OCR",
+                "description": "Advanced OCR model optimized for document text extraction",
+                "capabilities": ["ocr", "document-processing", "text-extraction"],
+                "recommended": True,
+                "size": "Unknown"
+            }
         ]
 
-        # If no OCR-specific models, return all models
-        if not ocr_models:
-            ocr_models = models
+        # Combine Ollama vision models with defaults
+        all_models = vision_models + default_models
 
-        return [
-            OCROllamaModel(
-                name=model["name"],
-                size=model.get("size", 0),
-                modified_at=model.get("modified_at", "")
-            )
-            for model in ocr_models
-        ]
-    except Exception as e:
-        logger.error(f"Failed to get OCR models: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to retrieve OCR models"
+        # Remove duplicates
+        seen_names = set()
+        unique_models = []
+        for model in all_models:
+            if model["name"] not in seen_names:
+                seen_names.add(model["name"])
+                unique_models.append(model)
+
+        return OCRModelsResponse(
+            models=unique_models,
+            total_count=len(unique_models)
         )
 
+    except Exception as e:
+        logger.error(f"Failed to get OCR models: {e}")
+        # Return default models if Ollama is unavailable
+        return OCRModelsResponse(
+            models=[
+                {
+                    "name": "deepseek-ocr",
+                    "display_name": "DeepSeek OCR",
+                    "description": "Advanced OCR model optimized for document text extraction",
+                    "capabilities": ["ocr", "document-processing", "text-extraction"],
+                    "recommended": True,
+                    "size": "Unknown"
+                }
+            ],
+            total_count=1
+        )
 
 @router.post("/workflows", response_model=OCRWorkflowResponse)
 async def create_ocr_workflow(
-    request: OCRWorkflowCreateRequest,
+    workflow_data: OCRWorkflowCreate,
     current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db_session)
-):
-    """Create a new OCR workflow."""
+    db: AsyncSession = Depends(get_db)
+) -> OCRWorkflowResponse:
+    """
+    Create a new OCR workflow.
+    """
     try:
         workflow = OCRWorkflow(
-            user_id=str(current_user.id),
-            workflow_name=request.workflow_name,
-            ocr_model=request.ocr_model,
-            processing_options=request.processing_options,
-            status="pending"
+            user_id=current_user.username,
+            workflow_name=workflow_data.workflow_name or f"OCR Workflow {datetime.utcnow().strftime('%Y-%m-%d %H:%M')}",
+            ocr_model=workflow_data.ocr_model,
+            status="pending",
+            processing_options=workflow_data.processing_options
         )
 
         db.add(workflow)
@@ -161,143 +174,173 @@ async def create_ocr_workflow(
             status="created",
             message="OCR workflow created successfully"
         )
+
     except Exception as e:
         logger.error(f"Failed to create OCR workflow: {e}")
-        await db.rollback()
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to create OCR workflow"
         )
 
-
 @router.post("/workflows/{workflow_id}/batches", response_model=OCRBatchResponse)
-async def upload_ocr_batch(
-    workflow_id: UUID,
-    batch_name: str = Form(...),
+async def create_ocr_batch(
+    workflow_id: str,
+    batch_name: Optional[str] = Form(None),
     images: List[UploadFile] = File(...),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db_session)
-):
-    """Upload a batch of images for OCR processing."""
+) -> OCRBatchResponse:
+    """
+    Create a new OCR batch with uploaded images.
+    """
     try:
-        # Verify workflow exists and belongs to user
-        workflow = await db.get(OCRWorkflow, workflow_id)
-        if not workflow:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Workflow not found")
-        if workflow.user_id != str(current_user.id):
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
+        # Validate workflow exists and belongs to user
+        workflow_uuid = UUID(workflow_id)
+        workflow = await db.get(OCRWorkflow, workflow_uuid)
+        if not workflow or workflow.user_id != current_user.username:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Workflow not found"
+            )
 
         # Create batch
         batch = OCRBatch(
-            workflow_id=workflow_id,
-            batch_name=batch_name,
+            workflow_id=workflow_uuid,
+            batch_name=batch_name or f"Batch {datetime.utcnow().strftime('%H:%M:%S')}",
             total_images=len(images),
             status="pending"
         )
+
         db.add(batch)
         await db.commit()
         await db.refresh(batch)
 
         # Save uploaded images
-        saved_paths = []
+        media_dir = os.path.join("media", "ocr")
+        os.makedirs(media_dir, exist_ok=True)
+
         for i, image in enumerate(images):
-            if not image.filename:
+            # Validate file type
+            if not image.content_type.startswith('image/'):
                 continue
 
             # Generate unique filename
-            file_extension = Path(image.filename).suffix
-            unique_filename = f"{workflow_id}_{batch.id}_{i}{file_extension}"
-            file_path = OCR_MEDIA_DIR / unique_filename
+            file_extension = os.path.splitext(image.filename or 'image.jpg')[1]
+            unique_filename = f"{batch.id}_{i}{file_extension}"
+            file_path = os.path.join(media_dir, unique_filename)
 
             # Save file
             with open(file_path, "wb") as buffer:
-                shutil.copyfileobj(image.file, buffer)
-
-            saved_paths.append(str(file_path))
+                content = await image.read()
+                buffer.write(content)
 
             # Create image record
             image_record = OCRImage(
                 batch_id=batch.id,
-                workflow_id=workflow_id,
-                original_filename=image.filename,
-                file_path=str(file_path),
-                file_size=file_path.stat().st_size if file_path.exists() else None,
+                workflow_id=workflow_uuid,
+                original_filename=image.filename or f"image_{i}{file_extension}",
+                file_path=file_path,
+                file_size=len(content),
                 mime_type=image.content_type,
-                status="uploaded",
-                processing_order=i
+                processing_order=i,
+                status="pending"
             )
+
             db.add(image_record)
 
         await db.commit()
 
-        logger.info(f"Uploaded {len(saved_paths)} images for batch {batch.id}")
+        logger.info(f"Created OCR batch {batch.id} with {len(images)} images")
 
         return OCRBatchResponse(
             batch_id=str(batch.id),
-            workflow_id=str(workflow_id),
-            status="uploaded",
-            message=f"Successfully uploaded {len(saved_paths)} images"
+            workflow_id=workflow_id,
+            status="created",
+            message=f"Batch created with {len(images)} images"
         )
+
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Failed to upload OCR batch: {e}")
-        await db.rollback()
+        logger.error(f"Failed to create OCR batch: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to upload images"
+            detail="Failed to create OCR batch"
         )
 
-
-@router.post("/workflows/{workflow_id}/process", response_model=dict)
+@router.post("/workflows/{workflow_id}/process")
 async def process_ocr_workflow(
-    workflow_id: UUID,
-    request: OCRProcessRequest,
+    workflow_id: str,
+    batch_id: str = Form(...),
+    background_tasks: BackgroundTasks = BackgroundTasks(),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db_session)
 ):
-    """Start OCR processing for a workflow batch."""
+    """
+    Start OCR processing for a workflow batch.
+    """
     try:
-        # Verify workflow exists and belongs to user
-        workflow = await db.get(OCRWorkflow, workflow_id)
-        if not workflow:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Workflow not found")
-        if workflow.user_id != str(current_user.id):
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
+        # Validate workflow and batch exist and belong to user
+        workflow_uuid = UUID(workflow_id)
+        batch_uuid = UUID(batch_id)
 
-        # Get batch
-        batch_id = UUID(request.batch_id)
-        batch = await db.get(OCRBatch, batch_id)
-        if not batch or batch.workflow_id != workflow_id:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Batch not found")
+        workflow = await db.get(OCRWorkflow, workflow_uuid)
+        if not workflow or workflow.user_id != current_user.username:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Workflow not found"
+            )
 
-        # Get image paths
-        images_query = select(OCRImage.file_path).where(
-            and_(OCRImage.batch_id == batch_id, OCRImage.status == "uploaded")
+        batch = await db.get(OCRBatch, batch_uuid)
+        if not batch or batch.workflow_id != workflow_uuid:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Batch not found"
+            )
+
+        # Get image paths for processing
+        images_result = await db.execute(
+            select(OCRImage.file_path).where(
+                and_(
+                    OCRImage.batch_id == batch_uuid,
+                    OCRImage.status == "pending"
+                )
+            ).order_by(OCRImage.processing_order)
         )
-        result = await db.execute(images_query)
-        image_paths = [row[0] for row in result.fetchall()]
+        image_paths = [row[0] for row in images_result.fetchall()]
 
         if not image_paths:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="No images to process")
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="No images to process"
+            )
 
-        # Start Celery task
-        task = process_ocr_workflow_task.delay(
-            workflow_id=str(workflow_id),
-            ocr_model=workflow.ocr_model,
-            image_paths=image_paths,
-            batch_name=batch.batch_name
+        # Update workflow and batch status
+        workflow.status = "running"
+        workflow.started_at = datetime.utcnow()
+        batch.status = "processing"
+        batch.started_at = datetime.utcnow()
+
+        await db.commit()
+
+        # Start background processing
+        background_tasks.add_task(
+            process_ocr_workflow_task.delay,
+            workflow_id,
+            workflow.ocr_model,
+            image_paths,
+            batch.batch_name
         )
 
-        logger.info(f"Started OCR processing task {task.id} for workflow {workflow_id}")
+        logger.info(f"Started OCR processing for workflow {workflow_id}, batch {batch_id}")
 
         return {
-            "task_id": task.id,
-            "status": "processing",
             "message": "OCR processing started",
-            "workflow_id": str(workflow_id),
-            "batch_id": str(batch_id)
+            "workflow_id": workflow_id,
+            "batch_id": batch_id,
+            "task_id": None  # Could return Celery task ID if needed
         }
+
     except HTTPException:
         raise
     except Exception as e:
@@ -307,41 +350,54 @@ async def process_ocr_workflow(
             detail="Failed to start OCR processing"
         )
 
-
-@router.get("/workflows/{workflow_id}/status", response_model=OCRStatusResponse)
-async def get_ocr_workflow_status(
-    workflow_id: UUID,
+@router.get("/workflows/{workflow_id}/status")
+async def get_workflow_status(
+    workflow_id: str,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db_session)
 ):
-    """Get the status of an OCR workflow."""
+    """
+    Get the current status of an OCR workflow.
+    """
     try:
-        # Verify workflow exists and belongs to user
-        workflow = await db.get(OCRWorkflow, workflow_id)
-        if not workflow:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Workflow not found")
-        if workflow.user_id != str(current_user.id):
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
+        workflow_uuid = UUID(workflow_id)
+        workflow = await db.get(OCRWorkflow, workflow_uuid)
+
+        if not workflow or workflow.user_id != current_user.username:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Workflow not found"
+            )
 
         # Get batch information
-        batches_query = select(OCRBatch).where(OCRBatch.workflow_id == workflow_id)
-        result = await db.execute(batches_query)
-        batches = result.scalars().all()
+        batches_result = await db.execute(
+            select(OCRBatch).where(OCRBatch.workflow_id == workflow_uuid)
+        )
+        batches = batches_result.scalars().all()
 
-        progress = {
-            "total_batches": len(batches),
-            "completed_batches": len([b for b in batches if b.status == "completed"]),
-            "total_images": sum(b.total_images for b in batches),
-            "processed_images": sum(b.processed_images for b in batches)
+        return {
+            "workflow_id": workflow_id,
+            "status": workflow.status,
+            "progress": {
+                "total_images": workflow.total_images,
+                "processed_images": workflow.processed_images,
+                "total_pages": workflow.total_pages
+            },
+            "batches": [
+                {
+                    "batch_id": str(batch.id),
+                    "batch_name": batch.batch_name,
+                    "status": batch.status,
+                    "total_images": batch.total_images,
+                    "processed_images": batch.processed_images,
+                    "page_count": batch.page_count
+                }
+                for batch in batches
+            ],
+            "started_at": workflow.started_at.isoformat() if workflow.started_at else None,
+            "completed_at": workflow.completed_at.isoformat() if workflow.completed_at else None
         }
 
-        return OCRStatusResponse(
-            workflow_id=str(workflow_id),
-            status=workflow.status,
-            progress=progress,
-            created_at=workflow.created_at.isoformat() if workflow.created_at else "",
-            updated_at=workflow.updated_at.isoformat() if workflow.updated_at else ""
-        )
     except HTTPException:
         raise
     except Exception as e:
@@ -351,47 +407,56 @@ async def get_ocr_workflow_status(
             detail="Failed to get workflow status"
         )
 
-
-@router.get("/workflows/{workflow_id}/results", response_model=OCRResultsResponse)
-async def get_ocr_workflow_results(
-    workflow_id: UUID,
-    batch_id: Optional[str] = None,
+@router.get("/workflows/{workflow_id}/results")
+async def get_workflow_results(
+    workflow_id: str,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db_session)
 ):
-    """Get the results of an OCR workflow."""
+    """
+    Get the results of a completed OCR workflow.
+    """
     try:
-        # Verify workflow exists and belongs to user
-        workflow = await db.get(OCRWorkflow, workflow_id)
-        if not workflow:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Workflow not found")
-        if workflow.user_id != str(current_user.id):
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
+        workflow_uuid = UUID(workflow_id)
+        workflow = await db.get(OCRWorkflow, workflow_uuid)
 
-        # Get batch (use first batch if not specified)
-        if batch_id:
-            batch_uuid = UUID(batch_id)
-            batch = await db.get(OCRBatch, batch_uuid)
-            if not batch or batch.workflow_id != workflow_id:
-                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Batch not found")
-        else:
-            # Get the first completed batch
-            batches_query = select(OCRBatch).where(
-                and_(OCRBatch.workflow_id == workflow_id, OCRBatch.status == "completed")
-            ).order_by(OCRBatch.created_at.desc())
-            result = await db.execute(batches_query)
-            batch = result.scalar_one_or_none()
-            if not batch:
-                raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No completed batches found")
+        if not workflow or workflow.user_id != current_user.username:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Workflow not found"
+            )
 
-        return OCRResultsResponse(
-            workflow_id=str(workflow_id),
-            batch_id=str(batch.id),
-            combined_markdown=batch.combined_markdown or "",
-            processed_images=batch.processed_images,
-            total_images=batch.total_images,
-            status=batch.status
+        if workflow.status != "completed":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Workflow is not completed yet"
+            )
+
+        # Get combined results from batches
+        batches_result = await db.execute(
+            select(OCRBatch).where(
+                and_(
+                    OCRBatch.workflow_id == workflow_uuid,
+                    OCRBatch.status == "completed"
+                )
+            )
         )
+        batches = batches_result.scalars().all()
+
+        combined_markdown = ""
+        for batch in batches:
+            if batch.combined_markdown:
+                combined_markdown += f"\n\n--- {batch.batch_name} ---\n\n"
+                combined_markdown += batch.combined_markdown
+
+        return {
+            "workflow_id": workflow_id,
+            "status": workflow.status,
+            "combined_markdown": combined_markdown.strip(),
+            "total_pages": sum(batch.page_count for batch in batches),
+            "batches_count": len(batches)
+        }
+
     except HTTPException:
         raise
     except Exception as e:
@@ -401,52 +466,51 @@ async def get_ocr_workflow_results(
             detail="Failed to get workflow results"
         )
 
-
-@router.post("/workflows/{workflow_id}/export", response_model=dict)
-async def export_ocr_results(
-    workflow_id: UUID,
-    request: OCRExportRequest,
+@router.post("/workflows/{workflow_id}/export")
+async def export_workflow_results(
+    workflow_id: str,
+    format: str = Form(...),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db_session)
 ):
-    """Export OCR results in the specified format."""
+    """
+    Export OCR workflow results to PDF or DOCX format.
+    """
     try:
-        # Verify workflow exists and belongs to user
-        workflow = await db.get(OCRWorkflow, workflow_id)
-        if not workflow:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Workflow not found")
-        if workflow.user_id != str(current_user.id):
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Access denied")
-
-        # Get completed batch
-        batches_query = select(OCRBatch).where(
-            and_(OCRBatch.workflow_id == workflow_id, OCRBatch.status == "completed")
-        ).order_by(OCRBatch.created_at.desc())
-        result = await db.execute(batches_query)
-        batch = result.scalar_one_or_none()
-        if not batch or not batch.combined_markdown:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No completed results to export")
-
-        # For now, just return the markdown content
-        # In a full implementation, you'd generate PDF/DOCX files
-        if request.format == "markdown":
-            return {
-                "format": "markdown",
-                "content": batch.combined_markdown,
-                "filename": f"ocr_results_{workflow_id}.md"
-            }
-        else:
-            # Placeholder for PDF/DOCX export
+        if format not in ["pdf", "docx"]:
             raise HTTPException(
-                status_code=status.HTTP_501_NOT_IMPLEMENTED,
-                detail=f"Export format '{request.format}' not yet implemented"
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Invalid export format. Supported: pdf, docx"
             )
+
+        workflow_uuid = UUID(workflow_id)
+        workflow = await db.get(OCRWorkflow, workflow_uuid)
+
+        if not workflow or workflow.user_id != current_user.username:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Workflow not found"
+            )
+
+        # Get workflow results
+        results_response = await get_workflow_results(workflow_id, current_user, db)
+        content = results_response["combined_markdown"]
+
+        # TODO: Implement actual PDF/DOCX generation
+        # For now, return placeholder response
+        return {
+            "message": f"Export to {format.upper()} would be implemented here",
+            "workflow_id": workflow_id,
+            "format": format,
+            "content_length": len(content),
+            "download_url": f"/api/v1/ocr/workflows/{workflow_id}/download/{format}"
+        }
 
     except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Failed to export OCR results: {e}")
+        logger.error(f"Failed to export workflow results: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to export results"
+            detail="Failed to export workflow results"
         )

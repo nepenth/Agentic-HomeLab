@@ -2090,6 +2090,17 @@ export interface AgentTypeDocumentation {
   limitations?: string[];
 }
 
+
+// AI Insight types
+export interface AIInsight {
+  id: string;
+  title: string;
+  description: string;
+  type: string;
+  priority: 'low' | 'medium' | 'high';
+  created_at: string;
+}
+
 // ==========================================
 // OCR WORKFLOW TYPES
 // ==========================================

@@ -1,25 +1,34 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   Container,
-  Paper,
-  Typography,
   Box,
+  Typography,
   Button,
   Grid,
-  Select,
-  MenuItem,
-  FormControl,
-  InputLabel,
-  Chip,
-  CircularProgress,
-  Alert,
-  TextField,
-  Divider,
   Card,
   CardContent,
   CardHeader,
   IconButton,
   Tooltip,
+  CircularProgress,
+  Alert,
+  Chip,
+  LinearProgress,
+  Paper,
+  Fade,
+  useTheme,
+  alpha,
+  Avatar,
+  Divider,
+  List,
+  ListItem,
+  ListItemIcon,
+  ListItemText,
+  Collapse,
+  Dialog,
+  DialogTitle,
+  DialogContent,
+  DialogActions,
 } from '@mui/material';
 import {
   Upload as UploadIcon,
@@ -27,6 +36,21 @@ import {
   Description as DocxIcon,
   Refresh as RefreshIcon,
   ModelTraining as ModelIcon,
+  ExpandMore as ExpandMoreIcon,
+  ExpandLess as ExpandLessIcon,
+  CheckCircle as CheckCircleIcon,
+  Error as ErrorIcon,
+  Info as InfoIcon,
+  Psychology as PsychologyIcon,
+  Image as ImageIcon,
+  TextFields as TextFieldsIcon,
+  CloudUpload as CloudUploadIcon,
+  PlayArrow as PlayArrowIcon,
+  Stop as StopIcon,
+  Download as DownloadIcon,
+  Settings as SettingsIcon,
+  Search as SearchIcon,
+  Clear as ClearIcon,
 } from '@mui/icons-material';
 import ReactMarkdown from 'react-markdown';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
@@ -34,24 +58,64 @@ import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import apiClient from '../services/api';
 import type { OCRWorkflow, OCRBatch, OCRImage } from '../types';
 
-const OCRWorkflow: React.FC = () => {
-  const [models, setModels] = useState<string[]>([]);
-  const [selectedModel, setSelectedModel] = useState<string>('deepseek-ocr');
-  const [images, setImages] = useState<File[]>([]);
-  const [batchName, setBatchName] = useState<string>('New Document');
-  const [isProcessing, setIsProcessing] = useState<boolean>(false);
-  const [results, setResults] = useState<string>('');
+// Enhanced OCR Model Selector Component
+interface OCRModelInfo {
+  name: string;
+  display_name: string;
+  description: string;
+  capabilities: string[];
+  recommended: boolean;
+  size?: string;
+}
+
+interface OCRModelSelectorProps {
+  selectedModel: string;
+  onModelChange: (model: string) => void;
+  disabled?: boolean;
+}
+
+const OCRModelSelector: React.FC<OCRModelSelectorProps> = ({
+  selectedModel,
+  onModelChange,
+  disabled = false
+}) => {
+  const [models, setModels] = useState<OCRModelInfo[]>([]);
+  const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string>('');
-  const [workflowId, setWorkflowId] = useState<string>('');
-  const [status, setStatus] = useState<string>('idle');
+  const [anchorEl, setAnchorEl] = useState<null | HTMLElement>(null);
+  const [searchQuery, setSearchQuery] = useState('');
 
   const loadModels = useCallback(async () => {
     try {
-      const response = await apiClient.get('/ocr/models');
-      const modelNames = response.data.models.map((m: any) => m.name);
-      setModels(modelNames);
-    } catch (err) {
+      setLoading(true);
+      const response = await apiClient.getOCRAvailableModels();
+      // Transform raw Ollama models to expected format
+      const transformedModels = response.map((model: any) => ({
+        name: model.name,
+        display_name: model.name.split(':')[0].replace(/-/g, ' ').replace(/\b\w/g, l => l.toUpperCase()),
+        description: `Vision-capable AI model for OCR processing (${(model.size / 1024 / 1024 / 1024).toFixed(1)}GB)`,
+        capabilities: ['ocr', 'vision', 'text-extraction'],
+        recommended: model.name.includes('deepseek') || model.name.includes('llava'),
+        size: `${(model.size / 1024 / 1024 / 1024).toFixed(1)}GB`
+      }));
+      setModels(transformedModels);
+      setError('');
+    } catch (err: any) {
+      console.error('Failed to load OCR models:', err);
       setError('Failed to load models');
+      // Fallback models
+      setModels([
+        {
+          name: 'deepseek-ocr',
+          display_name: 'DeepSeek OCR',
+          description: 'Advanced OCR model optimized for document text extraction',
+          capabilities: ['ocr', 'document-processing', 'text-extraction'],
+          recommended: true,
+          size: 'Unknown'
+        }
+      ]);
+    } finally {
+      setLoading(false);
     }
   }, []);
 
@@ -59,10 +123,270 @@ const OCRWorkflow: React.FC = () => {
     loadModels();
   }, [loadModels]);
 
-  const handleFileUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
-    if (event.target.files) {
-      setImages(Array.from(event.target.files));
+  const handleClick = (event: React.MouseEvent<HTMLElement>) => {
+    if (!disabled) {
+      setAnchorEl(event.currentTarget);
     }
+  };
+
+  const handleClose = () => {
+    setAnchorEl(null);
+    setSearchQuery('');
+  };
+
+  const handleModelSelect = (modelName: string) => {
+    onModelChange(modelName);
+    handleClose();
+  };
+
+  const filteredModels = (models || []).filter(model =>
+    model.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
+    model.display_name.toLowerCase().includes(searchQuery.toLowerCase()) ||
+    model.description.toLowerCase().includes(searchQuery.toLowerCase())
+  );
+
+  const selectedModelInfo = models?.find(m => m.name === selectedModel);
+
+  if (loading) {
+    return (
+      <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+        <CircularProgress size={20} />
+        <Typography variant="body2" color="text.secondary">
+          Loading OCR models...
+        </Typography>
+      </Box>
+    );
+  }
+
+  return (
+    <Box>
+      <Button
+        fullWidth
+        onClick={handleClick}
+        disabled={disabled}
+        startIcon={
+          <PsychologyIcon sx={{ color: selectedModelInfo?.recommended ? '#007AFF' : '#666' }} />
+        }
+        endIcon={
+          <ExpandMoreIcon sx={{
+            transform: Boolean(anchorEl) ? 'rotate(180deg)' : 'rotate(0deg)',
+            transition: 'transform 0.2s ease'
+          }} />
+        }
+        sx={{
+          justifyContent: 'space-between',
+          textTransform: 'none',
+          fontSize: '0.9rem',
+          fontWeight: 500,
+          color: 'text.primary',
+          border: '1px solid rgba(0, 0, 0, 0.12)',
+          borderRadius: 2,
+          py: 1.5,
+          px: 2,
+          backgroundColor: 'background.paper',
+          '&:hover': {
+            backgroundColor: 'action.hover',
+            borderColor: 'rgba(0, 0, 0, 0.24)'
+          }
+        }}
+      >
+        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, flex: 1 }}>
+          <Typography variant="body2" sx={{ fontSize: '0.9rem', fontWeight: 500 }}>
+            {selectedModelInfo?.display_name || selectedModel || 'Select OCR Model'}
+          </Typography>
+          {selectedModelInfo?.recommended && (
+            <Chip label="★" size="small" color="primary" sx={{ height: 16, fontSize: '0.6rem' }} />
+          )}
+        </Box>
+      </Button>
+
+      {/* Model Selection Dialog */}
+      <Dialog
+        open={Boolean(anchorEl)}
+        onClose={handleClose}
+        maxWidth="sm"
+        fullWidth
+        PaperProps={{
+          sx: {
+            borderRadius: 3,
+            boxShadow: '0 25px 50px rgba(0, 0, 0, 0.25)',
+          }
+        }}
+      >
+        <DialogTitle sx={{ pb: 1 }}>
+          <Typography variant="h6" sx={{ fontWeight: 600 }}>
+            Select OCR Model
+          </Typography>
+          <Typography variant="body2" color="text.secondary">
+            Choose an AI model optimized for document text extraction
+          </Typography>
+        </DialogTitle>
+
+        <DialogContent sx={{ pt: 1 }}>
+          {/* Search */}
+          <Box sx={{ mb: 2, position: 'relative' }}>
+            <SearchIcon sx={{
+              position: 'absolute',
+              left: 12,
+              top: '50%',
+              transform: 'translateY(-50%)',
+              color: 'action.disabled',
+              fontSize: '1.2rem'
+            }} />
+            <input
+              type="text"
+              placeholder="Search models..."
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              style={{
+                width: '100%',
+                padding: '12px 12px 12px 40px',
+                border: '1px solid rgba(0, 0, 0, 0.12)',
+                borderRadius: '8px',
+                fontSize: '0.9rem',
+                outline: 'none',
+                backgroundColor: 'background.paper'
+              }}
+            />
+          </Box>
+
+          {/* Models List */}
+          <Box sx={{ maxHeight: 400, overflow: 'auto' }}>
+            <List dense>
+              {filteredModels.map((model) => (
+                <ListItem
+                  key={model.name}
+                  button
+                  onClick={() => handleModelSelect(model.name)}
+                  selected={model.name === selectedModel}
+                  sx={{
+                    borderRadius: 2,
+                    mb: 0.5,
+                    '&.Mui-selected': {
+                      backgroundColor: 'rgba(0, 122, 255, 0.1)',
+                      '&:hover': {
+                        backgroundColor: 'rgba(0, 122, 255, 0.15)'
+                      }
+                    }
+                  }}
+                >
+                  <ListItemIcon sx={{ minWidth: 40 }}>
+                    <Avatar
+                      sx={{
+                        width: 32,
+                        height: 32,
+                        bgcolor: model.recommended ? '#007AFF' : '#8E8E93',
+                        fontSize: '0.8rem'
+                      }}
+                    >
+                      {model.recommended ? '★' : 'AI'}
+                    </Avatar>
+                  </ListItemIcon>
+                  <ListItemText
+                    primary={
+                      <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                        <Typography variant="body2" sx={{ fontWeight: 600 }}>
+                          {model.display_name}
+                        </Typography>
+                        {model.recommended && (
+                          <Chip label="Recommended" size="small" color="primary" sx={{ height: 16, fontSize: '0.6rem' }} />
+                        )}
+                      </Box>
+                    }
+                    secondary={
+                      <Box>
+                        <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 0.5 }}>
+                          {model.description}
+                        </Typography>
+                        <Box sx={{ display: 'flex', gap: 0.5, flexWrap: 'wrap' }}>
+                          {model.capabilities.slice(0, 3).map((cap, idx) => (
+                            <Chip
+                              key={idx}
+                              label={cap.replace('-', ' ')}
+                              size="small"
+                              variant="outlined"
+                              sx={{ height: 16, fontSize: '0.6rem' }}
+                            />
+                          ))}
+                        </Box>
+                      </Box>
+                    }
+                  />
+                  {model.name === selectedModel && (
+                    <CheckCircleIcon sx={{ color: '#34C759', ml: 1 }} />
+                  )}
+                </ListItem>
+              ))}
+            </List>
+
+            {filteredModels.length === 0 && (
+              <Box sx={{ textAlign: 'center', py: 4 }}>
+                <Typography variant="body2" color="text.secondary">
+                  No models found matching "{searchQuery}"
+                </Typography>
+              </Box>
+            )}
+          </Box>
+        </DialogContent>
+
+        <DialogActions sx={{ px: 3, pb: 2 }}>
+          <Button onClick={handleClose} variant="outlined">
+            Cancel
+          </Button>
+        </DialogActions>
+      </Dialog>
+    </Box>
+  );
+};
+
+const OCRWorkflow: React.FC = () => {
+  const theme = useTheme();
+  const [selectedModel, setSelectedModel] = useState<string>('deepseek-ocr');
+  const [images, setImages] = useState<File[]>([]);
+  const [batchName, setBatchName] = useState<string>('Document Scan');
+  const [isProcessing, setIsProcessing] = useState<boolean>(false);
+  const [results, setResults] = useState<string>('');
+  const [error, setError] = useState<string>('');
+  const [workflowId, setWorkflowId] = useState<string>('');
+  const [status, setStatus] = useState<string>('idle');
+  const [progress, setProgress] = useState<{ current: number; total: number; message: string } | null>(null);
+  const [showResults, setShowResults] = useState(false);
+  const [dragOver, setDragOver] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Drag and drop handlers
+  const handleDragOver = (e: React.DragEvent) => {
+    e.preventDefault();
+    setDragOver(true);
+  };
+
+  const handleDragLeave = (e: React.DragEvent) => {
+    e.preventDefault();
+    setDragOver(false);
+  };
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    setDragOver(false);
+
+    const files = Array.from(e.dataTransfer.files).filter(file =>
+      file.type.startsWith('image/')
+    );
+
+    if (files.length > 0) {
+      setImages(prev => [...prev, ...files]);
+    }
+  };
+
+  const handleFileSelect = (event: React.ChangeEvent<HTMLInputElement>) => {
+    if (event.target.files) {
+      const files = Array.from(event.target.files);
+      setImages(prev => [...prev, ...files]);
+    }
+  };
+
+  const removeImage = (index: number) => {
+    setImages(prev => prev.filter((_, i) => i !== index));
   };
 
   const startOCRWorkflow = async () => {
@@ -74,215 +398,411 @@ const OCRWorkflow: React.FC = () => {
     setIsProcessing(true);
     setError('');
     setStatus('processing');
+    setProgress({ current: 0, total: images.length, message: 'Initializing OCR workflow...' });
 
     try {
       // Create workflow
-      const workflowResponse = await apiClient.post('/ocr/workflows', {
-        workflow_name: 'OCR Workflow',
+      const workflowResponse = await apiClient.createOCRWorkflow({
+        workflow_name: batchName,
         ocr_model: selectedModel,
       });
-      setWorkflowId(workflowResponse.data.workflow_id);
+      setWorkflowId(workflowResponse.workflow_id);
 
       // Upload batch
-      const formData = new FormData();
-      formData.append('batch_name', batchName);
-      images.forEach((image) => {
-        formData.append('images', image);
-      });
-
-      const batchResponse = await apiClient.post(`/ocr/workflows/${workflowResponse.data.workflow_id}/batches`, formData, {
-        headers: { 'Content-Type': 'multipart/form-data' },
+      const batchResponse = await apiClient.uploadOCRBatch(workflowResponse.workflow_id, {
+        batch_name: batchName,
+        images: images,
       });
 
       // Trigger processing
-      const task = await apiClient.post('/ocr/workflows/' + workflowResponse.data.workflow_id + '/process', {
-        batch_id: batchResponse.data.batch_id,
+      await apiClient.processOCRWorkflow(workflowResponse.workflow_id, {
+        batch_id: batchResponse.batch_id,
       });
 
       // Poll for results
       const pollInterval = setInterval(async () => {
-        const statusResponse = await apiClient.get(`/ocr/workflows/${workflowResponse.data.workflow_id}/status`);
-        if (statusResponse.data.status === 'completed') {
-          clearInterval(pollInterval);
-          const resultResponse = await apiClient.get(`/ocr/workflows/${workflowResponse.data.workflow_id}/results`);
-          setResults(resultResponse.data.combined_markdown);
-          setStatus('completed');
-          setIsProcessing(false);
-        } else if (statusResponse.data.status === 'failed') {
-          clearInterval(pollInterval);
-          setError('OCR processing failed');
-          setIsProcessing(false);
-          setStatus('failed');
+        try {
+          const workflowData = await apiClient.getOCRWorkflowStatus(workflowResponse.workflow_id);
+
+          if (workflowData.status === 'completed') {
+            clearInterval(pollInterval);
+            const resultResponse = await apiClient.getOCRWorkflowResults(workflowResponse.workflow_id);
+            setResults(resultResponse.combined_markdown);
+            setStatus('completed');
+            setProgress(null);
+            setIsProcessing(false);
+            setShowResults(true);
+          } else if (workflowData.status === 'failed') {
+            clearInterval(pollInterval);
+            setError('OCR processing failed');
+            setIsProcessing(false);
+            setStatus('failed');
+            setProgress(null);
+          } else {
+            // Update progress
+            const totalImages = workflowData.progress?.total_images || images.length;
+            const processedImages = workflowData.progress?.processed_images || 0;
+            setProgress({
+              current: processedImages,
+              total: totalImages,
+              message: `Processing ${processedImages}/${totalImages} images...`
+            });
+          }
+        } catch (err) {
+          console.error('Status check failed:', err);
         }
       }, 2000);
 
-    } catch (err) {
-      setError('OCR workflow failed');
+    } catch (err: any) {
+      console.error('OCR workflow failed:', err);
+      setError(err.response?.data?.detail || 'OCR workflow failed');
       setIsProcessing(false);
       setStatus('error');
+      setProgress(null);
     }
   };
 
   const exportResult = async (format: 'pdf' | 'docx') => {
     try {
-      const response = await apiClient.post(`/ocr/workflows/${workflowId}/export`, { format });
-      const url = response.data.download_url;
+      const response = await apiClient.exportOCRResults(workflowId, { format });
+      const url = response.download_url;
       const a = document.createElement('a');
       a.href = url;
-      a.download = `ocr-${batchName}.${format}`;
+      a.download = `${batchName}.${format}`;
       a.click();
     } catch (err) {
       setError('Export failed');
     }
   };
 
+  const resetWorkflow = () => {
+    setImages([]);
+    setBatchName('Document Scan');
+    setResults('');
+    setError('');
+    setWorkflowId('');
+    setStatus('idle');
+    setProgress(null);
+    setShowResults(false);
+  };
+
   return (
-    <Container maxWidth="lg" sx={{ mt: 4, mb: 4 }}>
-      <Paper elevation={3} sx={{ p: 4 }}>
-        <Typography variant="h4" gutterBottom>
+    <Container maxWidth="xl" sx={{ py: 4 }}>
+      {/* Header */}
+      <Box sx={{ mb: 4 }}>
+        <Typography
+          variant="h3"
+          sx={{
+            fontWeight: 700,
+            background: 'linear-gradient(135deg, #007AFF 0%, #5856D6 100%)',
+            backgroundClip: 'text',
+            WebkitBackgroundClip: 'text',
+            WebkitTextFillColor: 'transparent',
+            mb: 2
+          }}
+        >
           OCR Workflow
         </Typography>
-        <Typography variant="body1" color="text.secondary" paragraph>
-          Upload images or screenshots and convert them to editable markdown documents using advanced OCR models.
+        <Typography variant="h6" color="text.secondary" sx={{ mb: 1 }}>
+          Transform images into editable documents with AI-powered OCR
         </Typography>
+        <Typography variant="body1" color="text.secondary">
+          Upload screenshots, scanned documents, or images to extract text and convert them to structured markdown documents.
+        </Typography>
+      </Box>
 
-        <Grid container spacing={3}>
-          <Grid item xs={12} md={6}>
-            <Card>
-              <CardHeader title="Model Selection" />
-              <CardContent>
-                <FormControl fullWidth>
-                  <InputLabel>OCR Model</InputLabel>
-                  <Select
-                    value={selectedModel}
-                    label="OCR Model"
-                    onChange={(e) => setSelectedModel(e.target.value as string)}
-                  >
-                    {models.map((model) => (
-                      <MenuItem key={model} value={model}>
-                        {model}
-                      </MenuItem>
-                    ))}
-                  </Select>
-                </FormControl>
-              </CardContent>
-            </Card>
-          </Grid>
-          <Grid item xs={12} md={6}>
-            <Card>
-              <CardHeader title="Batch Settings" />
-              <CardContent>
-                <TextField
-                  fullWidth
-                  label="Batch Name"
-                  value={batchName}
-                  onChange={(e) => setBatchName(e.target.value)}
-                  margin="normal"
-                />
-                <Box sx={{ mt: 2 }}>
-                  <input
-                    accept="image/*"
-                    style={{ display: 'none' }}
-                    id="image-upload"
-                    multiple
-                    type="file"
-                    onChange={handleFileUpload}
-                  />
-                  <label htmlFor="image-upload">
-                    <Button
-                      variant="outlined"
-                      component="span"
-                      startIcon={<UploadIcon />}
-                      fullWidth
-                    >
-                      Upload Images
-                    </Button>
-                  </label>
-                  {images.length > 0 && (
-                    <Typography variant="body2" sx={{ mt: 1 }}>
-                      {images.length} image(s) selected
-                    </Typography>
-                  )}
-                </Box>
-              </CardContent>
-            </Card>
-          </Grid>
+      <Grid container spacing={4}>
+        {/* Left Panel - Configuration */}
+        <Grid item xs={12} lg={4}>
+          <Box sx={{ display: 'flex', flexDirection: 'column', gap: 3 }}>
 
-          <Grid item xs={12}>
-            <Card>
+            {/* Model Selection */}
+            <Card sx={{
+              background: 'linear-gradient(135deg, rgba(255,255,255,0.9) 0%, rgba(255,255,255,0.7) 100%)',
+              backdropFilter: 'blur(20px)',
+              border: '1px solid rgba(0,0,0,0.08)',
+              borderRadius: 3
+            }}>
               <CardHeader
-                title="Processing"
-                action={
-                  <Button
-                    variant="contained"
-                    onClick={startOCRWorkflow}
-                    disabled={isProcessing || images.length === 0}
-                    startIcon={isProcessing ? <CircularProgress size={20} /> : <ModelIcon />}
-                  >
-                    {isProcessing ? 'Processing...' : 'Start OCR'}
-                  </Button>
-                }
+                title="AI Model"
+                titleTypographyProps={{ variant: 'h6', fontWeight: 600 }}
+                avatar={<PsychologyIcon sx={{ color: '#007AFF' }} />}
               />
               <CardContent>
-                {error && (
-                  <Alert severity="error" sx={{ mb: 2 }}>
-                    {error}
-                  </Alert>
-                )}
-                {status === 'processing' && (
-                  <Box sx={{ display: 'flex', alignItems: 'center', mb: 2 }}>
-                    <CircularProgress size={20} sx={{ mr: 2 }} />
-                    <Typography>Processing images...</Typography>
+                <OCRModelSelector
+                  selectedModel={selectedModel}
+                  onModelChange={setSelectedModel}
+                  disabled={isProcessing}
+                />
+                <Typography variant="caption" color="text.secondary" sx={{ mt: 1, display: 'block' }}>
+                  Choose an AI model optimized for document text extraction and image understanding.
+                </Typography>
+              </CardContent>
+            </Card>
+
+            {/* Document Settings */}
+            <Card sx={{
+              background: 'linear-gradient(135deg, rgba(255,255,255,0.9) 0%, rgba(255,255,255,0.7) 100%)',
+              backdropFilter: 'blur(20px)',
+              border: '1px solid rgba(0,0,0,0.08)',
+              borderRadius: 3
+            }}>
+              <CardHeader
+                title="Document Settings"
+                titleTypographyProps={{ variant: 'h6', fontWeight: 600 }}
+                avatar={<SettingsIcon sx={{ color: '#007AFF' }} />}
+              />
+              <CardContent>
+                <input
+                  type="text"
+                  placeholder="Document name"
+                  value={batchName}
+                  onChange={(e) => setBatchName(e.target.value)}
+                  style={{
+                    width: '100%',
+                    padding: '12px 16px',
+                    border: '1px solid rgba(0, 0, 0, 0.12)',
+                    borderRadius: '8px',
+                    fontSize: '0.9rem',
+                    outline: 'none',
+                    backgroundColor: 'background.paper'
+                  }}
+                />
+                <Typography variant="caption" color="text.secondary" sx={{ mt: 1, display: 'block' }}>
+                  Give your document a descriptive name for easy identification.
+                </Typography>
+              </CardContent>
+            </Card>
+
+            {/* File Upload */}
+            <Card sx={{
+              background: 'linear-gradient(135deg, rgba(255,255,255,0.9) 0%, rgba(255,255,255,0.7) 100%)',
+              backdropFilter: 'blur(20px)',
+              border: '1px solid rgba(0,0,0,0.08)',
+              borderRadius: 3
+            }}>
+              <CardHeader
+                title="Upload Images"
+                titleTypographyProps={{ variant: 'h6', fontWeight: 600 }}
+                avatar={<CloudUploadIcon sx={{ color: '#007AFF' }} />}
+              />
+              <CardContent>
+                {/* Drag & Drop Zone */}
+                <Box
+                  onDragOver={handleDragOver}
+                  onDragLeave={handleDragLeave}
+                  onDrop={handleDrop}
+                  onClick={() => fileInputRef.current?.click()}
+                  sx={{
+                    border: `2px dashed ${dragOver ? '#007AFF' : 'rgba(0, 0, 0, 0.12)'}`,
+                    borderRadius: 2,
+                    p: 3,
+                    textAlign: 'center',
+                    cursor: 'pointer',
+                    transition: 'all 0.3s ease',
+                    backgroundColor: dragOver ? 'rgba(0, 122, 255, 0.05)' : 'transparent',
+                    '&:hover': {
+                      borderColor: '#007AFF',
+                      backgroundColor: 'rgba(0, 122, 255, 0.05)'
+                    }
+                  }}
+                >
+                  <ImageIcon sx={{ fontSize: '3rem', color: dragOver ? '#007AFF' : 'text.secondary', mb: 1 }} />
+                  <Typography variant="h6" sx={{ mb: 1 }}>
+                    {dragOver ? 'Drop images here' : 'Drag & drop images'}
+                  </Typography>
+                  <Typography variant="body2" color="text.secondary">
+                    or click to browse files
+                  </Typography>
+                  <Typography variant="caption" color="text.secondary" sx={{ mt: 1, display: 'block' }}>
+                    Supports: JPG, PNG, GIF, WebP
+                  </Typography>
+                </Box>
+
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept="image/*"
+                  multiple
+                  style={{ display: 'none' }}
+                  onChange={handleFileSelect}
+                />
+
+                {/* Uploaded Images Preview */}
+                {images.length > 0 && (
+                  <Box sx={{ mt: 2 }}>
+                    <Typography variant="subtitle2" sx={{ mb: 1 }}>
+                      {images.length} image{images.length !== 1 ? 's' : ''} selected
+                    </Typography>
+                    <Box sx={{ display: 'flex', flexWrap: 'wrap', gap: 1 }}>
+                      {images.map((image, index) => (
+                        <Box key={index} sx={{ position: 'relative' }}>
+                          <Avatar
+                            src={URL.createObjectURL(image)}
+                            variant="rounded"
+                            sx={{ width: 60, height: 60 }}
+                          />
+                          <IconButton
+                            size="small"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              removeImage(index);
+                            }}
+                            sx={{
+                              position: 'absolute',
+                              top: -8,
+                              right: -8,
+                              backgroundColor: 'rgba(255, 255, 255, 0.9)',
+                              '&:hover': { backgroundColor: 'white' }
+                            }}
+                          >
+                            <ClearIcon sx={{ fontSize: '1rem' }} />
+                          </IconButton>
+                        </Box>
+                      ))}
+                    </Box>
                   </Box>
-                )}
-                {status === 'completed' && (
-                  <Alert severity="success" sx={{ mb: 2 }}>
-                    OCR processing completed successfully!
-                  </Alert>
                 )}
               </CardContent>
             </Card>
-          </Grid>
 
-          {results && (
-            <Grid item xs={12}>
-              <Card>
-                <CardHeader
-                  title="OCR Results"
-                  action={
-                    <Box>
-                      <Button
-                        variant="outlined"
-                        startIcon={<PdfIcon />}
-                        onClick={() => exportResult('pdf')}
-                        sx={{ mr: 1 }}
-                      >
-                        Export PDF
-                      </Button>
-                      <Button
-                        variant="outlined"
-                        startIcon={<DocxIcon />}
-                        onClick={() => exportResult('docx')}
-                      >
-                        Export DOCX
-                      </Button>
-                    </Box>
+            {/* Action Buttons */}
+            <Box sx={{ display: 'flex', gap: 2 }}>
+              <Button
+                fullWidth
+                variant="contained"
+                onClick={startOCRWorkflow}
+                disabled={isProcessing || images.length === 0}
+                startIcon={isProcessing ? <CircularProgress size={20} /> : <PlayArrowIcon />}
+                sx={{
+                  py: 1.5,
+                  borderRadius: 2,
+                  background: 'linear-gradient(135deg, #007AFF 0%, #5856D6 100%)',
+                  '&:hover': {
+                    background: 'linear-gradient(135deg, #0056CC 0%, #4A4AC0 100%)'
                   }
-                />
-                <CardContent>
+                }}
+              >
+                {isProcessing ? 'Processing...' : 'Start OCR'}
+              </Button>
+
+              {(results || error) && (
+                <Button
+                  variant="outlined"
+                  onClick={resetWorkflow}
+                  startIcon={<RefreshIcon />}
+                  sx={{ borderRadius: 2 }}
+                >
+                  New Scan
+                </Button>
+              )}
+            </Box>
+          </Box>
+        </Grid>
+
+        {/* Right Panel - Results */}
+        <Grid item xs={12} lg={8}>
+          <Card sx={{
+            height: '100%',
+            background: 'linear-gradient(135deg, rgba(255,255,255,0.9) 0%, rgba(255,255,255,0.7) 100%)',
+            backdropFilter: 'blur(20px)',
+            border: '1px solid rgba(0,0,0,0.08)',
+            borderRadius: 3,
+            display: 'flex',
+            flexDirection: 'column'
+          }}>
+            <CardHeader
+              title={
+                <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                  <TextFieldsIcon sx={{ color: '#007AFF' }} />
+                  <Typography variant="h6" sx={{ fontWeight: 600 }}>
+                    OCR Results
+                  </Typography>
+                </Box>
+              }
+              action={
+                showResults && (
+                  <Box sx={{ display: 'flex', gap: 1 }}>
+                    <Tooltip title="Export as PDF">
+                      <IconButton onClick={() => exportResult('pdf')} size="small">
+                        <PdfIcon />
+                      </IconButton>
+                    </Tooltip>
+                    <Tooltip title="Export as DOCX">
+                      <IconButton onClick={() => exportResult('docx')} size="small">
+                        <DocxIcon />
+                      </IconButton>
+                    </Tooltip>
+                  </Box>
+                )
+              }
+            />
+
+            <CardContent sx={{ flex: 1, display: 'flex', flexDirection: 'column' }}>
+
+              {/* Status Messages */}
+              {error && (
+                <Alert severity="error" sx={{ mb: 2 }}>
+                  {error}
+                </Alert>
+              )}
+
+              {status === 'completed' && (
+                <Alert severity="success" sx={{ mb: 2 }}>
+                  OCR processing completed successfully!
+                </Alert>
+              )}
+
+              {/* Progress */}
+              {progress && (
+                <Box sx={{ mb: 3 }}>
+                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, mb: 1 }}>
+                    <CircularProgress size={20} />
+                    <Typography variant="body2">
+                      {progress.message}
+                    </Typography>
+                  </Box>
+                  <LinearProgress
+                    variant="determinate"
+                    value={(progress.current / progress.total) * 100}
+                    sx={{ height: 6, borderRadius: 3 }}
+                  />
+                  <Typography variant="caption" color="text.secondary" sx={{ mt: 0.5, display: 'block' }}>
+                    {progress.current} of {progress.total} images processed
+                  </Typography>
+                </Box>
+              )}
+
+              {/* Results Display */}
+              {showResults && results ? (
+                <Box sx={{
+                  flex: 1,
+                  border: '1px solid rgba(0, 0, 0, 0.08)',
+                  borderRadius: 2,
+                  overflow: 'hidden',
+                  backgroundColor: 'grey.50'
+                }}>
                   <Box sx={{
                     maxHeight: 600,
                     overflow: 'auto',
-                    border: '1px solid #e0e0e0',
-                    borderRadius: 1,
-                    p: 2,
-                    backgroundColor: '#f5f5f5'
+                    p: 3,
+                    '&::-webkit-scrollbar': {
+                      width: '8px',
+                    },
+                    '&::-webkit-scrollbar-track': {
+                      backgroundColor: 'rgba(0,0,0,0.05)',
+                    },
+                    '&::-webkit-scrollbar-thumb': {
+                      backgroundColor: 'rgba(0,0,0,0.2)',
+                      borderRadius: '4px',
+                    }
                   }}>
                     <ReactMarkdown
                       components={{
-                        code: ({ node, inline, className, children, ...props }) => {
+                        code: ({ node, className, children, ...props }: any) => {
                           const match = /language-(\w+)/.exec(className || '');
-                          return !inline && match ? (
+                          const isInline = !match;
+                          return !isInline && match ? (
                             <SyntaxHighlighter
                               style={vscDarkPlus}
                               language={match[1]}
@@ -302,12 +822,30 @@ const OCRWorkflow: React.FC = () => {
                       {results}
                     </ReactMarkdown>
                   </Box>
-                </CardContent>
-              </Card>
-            </Grid>
-          )}
+                </Box>
+              ) : (
+                <Box sx={{
+                  flex: 1,
+                  display: 'flex',
+                  flexDirection: 'column',
+                  alignItems: 'center',
+                  justifyContent: 'center',
+                  py: 8,
+                  textAlign: 'center'
+                }}>
+                  <TextFieldsIcon sx={{ fontSize: '4rem', color: 'text.disabled', mb: 2 }} />
+                  <Typography variant="h6" color="text.secondary" sx={{ mb: 1 }}>
+                    No OCR Results Yet
+                  </Typography>
+                  <Typography variant="body2" color="text.secondary">
+                    Upload some images and start processing to see extracted text here
+                  </Typography>
+                </Box>
+              )}
+            </CardContent>
+          </Card>
         </Grid>
-      </Paper>
+      </Grid>
     </Container>
   );
 };

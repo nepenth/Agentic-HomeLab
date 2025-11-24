@@ -15,13 +15,14 @@ Features:
 import hashlib
 import asyncio
 from typing import List, Dict, Any, Optional, Tuple
-from datetime import datetime
+from datetime import datetime, timezone, timedelta
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, and_, or_
 from sqlalchemy.orm import selectinload
 
 from app.db.models.email import Email, EmailEmbedding, EmailAttachment
 from app.db.models.task import LogLevel
+from app.db.models.embedding_task import EmbeddingTask, EmbeddingTaskStatus
 from app.services.semantic_processing_service import semantic_processing_service
 from app.services.unified_log_service import unified_log_service, WorkflowType, LogScope
 from app.utils.logging import get_logger
@@ -41,6 +42,78 @@ class EmailEmbeddingService:
         # Max chars for embedding - set conservatively for smallest model (embeddinggemma: 2048 tokens)
         # Using ~3.5 chars per token: 2048 tokens ≈ 7000 chars, use 6000 for safety margin
         self.max_content_length = 6000
+        self.max_retries = 3
+        self.retry_delay_minutes = 5
+
+    async def _enqueue_missing_tasks(self, db: AsyncSession, user_id: Optional[int] = None):
+        """Create EmbeddingTask records for emails that need them."""
+        # Find emails that need embeddings but don't have a task
+        # We use a left join to find missing tasks
+        query = select(Email.id).outerjoin(
+            EmbeddingTask, Email.id == EmbeddingTask.email_id
+        ).where(
+            and_(
+                or_(
+                    Email.embeddings_generated == False,
+                    Email.embeddings_generated.is_(None)
+                ),
+                EmbeddingTask.id.is_(None)
+            )
+        )
+
+        if user_id:
+            query = query.where(Email.user_id == user_id)
+
+        result = await db.execute(query)
+        email_ids = result.scalars().all()
+
+        if not email_ids:
+            return
+
+        # Bulk insert tasks
+        for i in range(0, len(email_ids), 1000):
+            batch_ids = email_ids[i:i + 1000]
+            tasks = [
+                EmbeddingTask(
+                    email_id=eid,
+                    status=EmbeddingTaskStatus.PENDING
+                )
+                for eid in batch_ids
+            ]
+            db.add_all(tasks)
+        
+        await db.commit()
+        self.logger.info(f"Enqueued {len(email_ids)} new embedding tasks")
+
+    async def _get_pending_tasks(
+        self, 
+        db: AsyncSession, 
+        user_id: Optional[int] = None, 
+        limit: int = 1000
+    ) -> List[EmbeddingTask]:
+        """Get pending embedding tasks."""
+        now = datetime.now(timezone.utc)
+        
+        query = select(EmbeddingTask).join(Email).options(
+            selectinload(EmbeddingTask.email).selectinload(Email.attachments),
+            selectinload(EmbeddingTask.email).selectinload(Email.embeddings)
+        ).where(
+            or_(
+                EmbeddingTask.status == EmbeddingTaskStatus.PENDING,
+                and_(
+                    EmbeddingTask.status == EmbeddingTaskStatus.FAILED,
+                    EmbeddingTask.next_retry <= now
+                )
+            )
+        )
+
+        if user_id:
+            query = query.where(Email.user_id == user_id)
+
+        query = query.limit(limit)
+        
+        result = await db.execute(query)
+        return result.scalars().all()
 
     async def process_pending_emails(
         self,
@@ -49,15 +122,7 @@ class EmailEmbeddingService:
         force_regenerate: bool = False
     ) -> Dict[str, int]:
         """
-        Process all emails that need embeddings generated.
-
-        Args:
-            db: Database session
-            user_id: Process emails for specific user (None = all users)
-            force_regenerate: Regenerate embeddings even if they exist
-
-        Returns:
-            Dict with processing statistics
+        Process all emails that need embeddings generated using the task queue.
         """
         # Create unified workflow context for embedding generation
         async with unified_log_service.workflow_context(
@@ -86,45 +151,37 @@ class EmailEmbeddingService:
                     }
                 )
 
-                # Get emails that need embedding processing
-                query = select(Email).options(
-                    selectinload(Email.embeddings),
-                    selectinload(Email.attachments)
-                )
-
-                if user_id:
-                    query = query.where(Email.user_id == user_id)
-
+                # Step 1: Enqueue missing tasks
                 if not force_regenerate:
-                    query = query.where(
-                        or_(
-                            Email.embeddings_generated == False,
-                            Email.embeddings_generated.is_(None)
-                        )
-                    )
+                    await self._enqueue_missing_tasks(db, user_id)
 
-                result = await db.execute(query)
-                emails = result.scalars().all()
+                # Step 2: Get pending tasks
+                # If force_regenerate is True, we might need different logic, 
+                # but for now let's assume we rely on the queue for robustness.
+                # If force_regenerate, we might want to reset all tasks to PENDING?
+                # For now, let's stick to the queue processing.
+                
+                tasks = await self._get_pending_tasks(db, user_id)
 
                 await unified_log_service.log(
                     context=workflow_context,
                     level=LogLevel.INFO,
-                    message=f"Found {len(emails)} emails to process for embeddings",
+                    message=f"Found {len(tasks)} pending embedding tasks",
                     component="email_embedding_service",
-                    extra_metadata={"emails_to_process": len(emails)}
+                    extra_metadata={"tasks_to_process": len(tasks)}
                 )
 
-                # Process emails in batches
+                # Process tasks in batches
                 async with unified_log_service.task_context(
                     parent_context=workflow_context,
-                    task_name="Process email embeddings in batches",
+                    task_name="Process embedding tasks in batches",
                     agent_id="embedding_generator_agent"
                 ) as task_context:
 
-                    for i in range(0, len(emails), self.batch_size):
-                        batch = emails[i:i + self.batch_size]
+                    for i in range(0, len(tasks), self.batch_size):
+                        batch = tasks[i:i + self.batch_size]
                         batch_num = i//self.batch_size + 1
-                        total_batches = (len(emails)-1)//self.batch_size + 1
+                        total_batches = (len(tasks)-1)//self.batch_size + 1
 
                         await unified_log_service.log(
                             context=task_context,
@@ -138,7 +195,7 @@ class EmailEmbeddingService:
                             }
                         )
 
-                        batch_stats = await self._process_email_batch_with_logging(
+                        batch_stats = await self._process_task_batch_with_logging(
                             db, batch, force_regenerate, task_context
                         )
 
@@ -159,6 +216,8 @@ class EmailEmbeddingService:
                 )
 
             except Exception as e:
+                import traceback
+                traceback.print_exc()
                 await unified_log_service.log(
                     context=workflow_context,
                     level=LogLevel.ERROR,
@@ -216,8 +275,7 @@ class EmailEmbeddingService:
                     existing_query = select(EmailEmbedding).where(
                         and_(
                             EmailEmbedding.email_id == email.id,
-                            EmailEmbedding.embedding_type == embedding_type,
-                            EmailEmbedding.content_hash == content_hash
+                            EmailEmbedding.embedding_type == embedding_type
                         )
                     )
                     result = await db.execute(existing_query)
@@ -458,6 +516,136 @@ class EmailEmbeddingService:
         return context
 
     # Private helper methods
+
+    async def _process_task_batch_with_logging(
+        self,
+        db: AsyncSession,
+        tasks: List[EmbeddingTask],
+        force_regenerate: bool,
+        task_context
+    ) -> Dict[str, int]:
+        """Process embedding task batch with unified logging."""
+        stats = {
+            "emails_processed": 0,
+            "embeddings_generated": 0,
+            "attachments_processed": 0,
+            "errors": 0
+        }
+
+        for task in tasks:
+            try:
+                await unified_log_service.log(
+                    context=task_context,
+                    level=LogLevel.DEBUG,
+                    message=f"Processing embedding task",
+                    component="email_embedding_service",
+                    extra_metadata={
+                        "task_id": str(task.id),
+                        "email_id": str(task.email_id),
+                        "attempt": task.attempts + 1
+                    }
+                )
+
+                # Call processing method
+                batch_stats = await self._process_task_batch(db, [task], force_regenerate)
+
+                stats["emails_processed"] += batch_stats["emails_processed"]
+                stats["embeddings_generated"] += batch_stats["embeddings_generated"]
+                stats["attachments_processed"] += batch_stats["attachments_processed"]
+                stats["errors"] += batch_stats["errors"]
+
+            except Exception as e:
+                await unified_log_service.log(
+                    context=task_context,
+                    level=LogLevel.ERROR,
+                    message=f"Failed to process embedding task",
+                    component="email_embedding_service",
+                    error=e,
+                    extra_metadata={"task_id": str(task.id)}
+                )
+                stats["errors"] += 1
+
+        return stats
+
+    async def _process_task_batch(
+        self,
+        db: AsyncSession,
+        tasks: List[EmbeddingTask],
+        force_regenerate: bool
+    ) -> Dict[str, int]:
+        """
+        Process a batch of embedding tasks with concurrent processing.
+        """
+        stats = {
+            "emails_processed": 0,
+            "embeddings_generated": 0,
+            "attachments_processed": 0,
+            "errors": 0
+        }
+
+        # Create semaphore to limit concurrency
+        semaphore = asyncio.Semaphore(self.concurrency)
+
+        async def process_single_task(task: EmbeddingTask):
+            """Process a single task with semaphore control."""
+            async with semaphore:
+                try:
+                    # Update task status
+                    task.status = EmbeddingTaskStatus.PROCESSING
+                    task.last_attempt = datetime.now(timezone.utc)
+                    task.attempts += 1
+                    
+                    # Generate email embeddings
+                    embeddings = await self.generate_email_embeddings(db, task.email, force_regenerate)
+                    
+                    email_stats = {
+                        "embeddings_generated": len(embeddings),
+                        "attachments_processed": 0,
+                        "errors": 0
+                    }
+
+                    # Process attachments if they have extracted text
+                    for attachment in task.email.attachments:
+                        if attachment.extracted_text and not attachment.embeddings_generated:
+                            await self._generate_attachment_embedding(db, attachment)
+                            email_stats["attachments_processed"] += 1
+
+                    # Mark task as completed
+                    task.status = EmbeddingTaskStatus.COMPLETED
+                    task.error_message = None
+                    
+                    return email_stats
+
+                except Exception as e:
+                    self.logger.error(f"Error processing task {task.id}: {e}")
+                    
+                    # Handle retry logic
+                    task.error_message = str(e)
+                    if task.attempts >= self.max_retries:
+                        task.status = EmbeddingTaskStatus.FAILED_PERMANENTLY
+                    else:
+                        task.status = EmbeddingTaskStatus.FAILED
+                        task.next_retry = datetime.now(timezone.utc) + timedelta(minutes=self.retry_delay_minutes * task.attempts)
+                    
+                    return {"embeddings_generated": 0, "attachments_processed": 0, "errors": 1}
+
+        # Process all tasks concurrently
+        # Ensure email is loaded
+        task_futures = [process_single_task(task) for task in tasks]
+        results = await asyncio.gather(*task_futures, return_exceptions=True)
+
+        # Aggregate results
+        for result in results:
+            if isinstance(result, Exception):
+                self.logger.error(f"Unexpected error in concurrent processing: {result}")
+                stats["errors"] += 1
+            elif isinstance(result, dict):
+                stats["emails_processed"] += 1 if result["errors"] == 0 else 0
+                stats["embeddings_generated"] += result["embeddings_generated"]
+                stats["attachments_processed"] += result["attachments_processed"]
+                stats["errors"] += result["errors"]
+
+        return stats
 
     async def _process_email_batch_with_logging(
         self,
