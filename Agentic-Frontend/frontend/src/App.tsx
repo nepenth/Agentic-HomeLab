@@ -40,7 +40,7 @@ import UserManagement from './pages/UserManagement';
 
 // Workflow modules
 import EmailAssistant from './pages/EmailAssistant';
-import OCRWorkflow from './pages/OCRWorkflow';
+import OCRWorkflow from './pages/OCRWorkflow.tsx';
 import DocumentAnalyzer from './modules/document-analyzer/DocumentAnalyzer';
 // Email Assistant Component
 import { EmailAssistantComponent } from './components/EmailAssistant/EmailAssistantComponent';

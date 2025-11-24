@@ -493,6 +493,29 @@ async def get_sync_status(
         )
 
 
+@router.get("/sync/health")
+async def get_sync_health(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db_session)
+):
+    """
+    Get detailed health status of email synchronization.
+    
+    Returns circuit breaker status, lock status, and failure counts
+    for all user accounts.
+    """
+    try:
+        health = await email_sync_service.get_sync_health(db, current_user.id)
+        return health
+
+    except Exception as e:
+        logger.error(f"Failed to get sync health: {e}")
+        raise HTTPException(
+            status_code=status_codes.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to retrieve sync health"
+        )
+
+
 @router.get("/sync/realtime-counts")
 async def get_realtime_counts(
     current_user: User = Depends(get_current_user),

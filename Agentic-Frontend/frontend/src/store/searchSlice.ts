@@ -1,4 +1,5 @@
-import { createSlice, PayloadAction } from '@reduxjs/toolkit';
+import { createSlice } from '@reduxjs/toolkit';
+import type { PayloadAction } from '@reduxjs/toolkit';
 import type { SearchType, SortOrder, SearchResult, EmailThread } from '../services/emailSearchApi';
 
 interface SearchFilters {
@@ -60,7 +61,7 @@ export const searchSlice = createSlice({
       state.sortOrder = action.payload;
     },
     setFilter: (state, action: PayloadAction<{ key: keyof SearchFilters; value: any }>) => {
-      state.filters[action.payload.key] = action.payload.value;
+      (state.filters as any)[action.payload.key] = action.payload.value;
     },
     clearFilters: (state) => {
       state.filters = initialState.filters;

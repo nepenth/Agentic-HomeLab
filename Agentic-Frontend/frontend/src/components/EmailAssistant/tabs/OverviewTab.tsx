@@ -38,7 +38,8 @@ import { useQuery } from '@tanstack/react-query';
 import { useEmail } from '../../../hooks/useEmail';
 import { useTasks } from '../../../hooks/useTasks';
 import { StatCard } from '../../common/StatCard';
-import { getDashboardMetrics, getAIInsights, AIInsight } from '../../../services/emailApi';
+import { getDashboardMetrics, getAIInsights } from '../../../services/emailApi';
+import { AIInsight } from '../../../types';
 import { QuickChat } from './QuickChat';
 
 interface OverviewTabProps {
