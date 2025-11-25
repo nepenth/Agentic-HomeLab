@@ -2090,6 +2090,165 @@ export interface AgentTypeDocumentation {
   limitations?: string[];
 }
 
+// ==========================================
+// OCR WORKFLOW TYPES
+// ==========================================
+
+export interface OCRWorkflow {
+  id: string;
+  user_id: string;
+  workflow_name?: string;
+  ocr_model: string;
+  status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
+  processing_options?: Record<string, any>;
+  total_images: number;
+  processed_images: number;
+  total_pages: number;
+  error_message?: string;
+  warning_messages?: any[];
+  workflow_metadata?: any;
+  created_at: string;
+  updated_at: string;
+  started_at?: string;
+  completed_at?: string;
+  cancelled_at?: string;
+}
+
+export interface OCRBatch {
+  id: string;
+  workflow_id: string;
+  batch_name?: string;
+  document_title?: string;
+  status: 'pending' | 'processing' | 'completed' | 'failed';
+  processing_order: number;
+  total_images: number;
+  processed_images: number;
+  combined_markdown?: string;
+  page_count: number;
+  started_at?: string;
+  completed_at?: string;
+  error_message?: string;
+  batch_metadata?: any;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface OCRImage {
+  id: string;
+  batch_id: string;
+  workflow_id: string;
+  original_filename: string;
+  file_path: string;
+  file_size?: number;
+  mime_type?: string;
+  status: 'pending' | 'processing' | 'completed' | 'failed';
+  processing_order: number;
+  ocr_model_used?: string;
+  raw_markdown?: string;
+  processed_markdown?: string;
+  confidence_score?: number;
+  image_width?: number;
+  image_height?: number;
+  image_dpi?: number;
+  uploaded_at: string;
+  processed_at?: string;
+  error_message?: string;
+  retry_count: number;
+  image_metadata?: any;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface OCRDocument {
+  id: string;
+  user_id: string;
+  batch_id?: string;
+  workflow_id?: string;
+  title?: string;
+  document_type: 'markdown' | 'pdf' | 'docx';
+  content?: string;
+  file_path?: string;
+  file_size?: number;
+  export_format?: string;
+  exported_at: string;
+  document_metadata?: any;
+  created_at: string;
+}
+
+export interface OCRWorkflowLog {
+  id: string;
+  workflow_id?: string;
+  batch_id?: string;
+  image_id?: string;
+  user_id: string;
+  level: 'debug' | 'info' | 'warning' | 'error';
+  message: string;
+  context?: any;
+  workflow_phase?: string;
+  batch_count?: number;
+  image_count?: number;
+  timestamp: string;
+}
+
+export interface OCRWorkflowStats {
+  id: string;
+  user_id: string;
+  period_start: string;
+  period_end: string;
+  total_workflows: number;
+  successful_workflows: number;
+  failed_workflows: number;
+  total_images_processed: number;
+  total_batches_created: number;
+  total_documents_exported: number;
+  avg_processing_time_ms?: number;
+  avg_confidence_score?: number;
+  images_by_status?: any;
+  workflows_by_model?: any;
+  stats_metadata?: any;
+  calculated_at: string;
+}
+
+export interface OCRWorkflowStatus {
+  status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
+  workflow_id: string;
+  total_images: number;
+  processed_images: number;
+  current_batch?: string;
+  error_message?: string;
+  started_at?: string;
+  completed_at?: string;
+}
+
+export interface OCRBatchStatus {
+  status: 'pending' | 'processing' | 'completed' | 'failed';
+  batch_id: string;
+  total_images: number;
+  processed_images: number;
+  error_message?: string;
+  started_at?: string;
+  completed_at?: string;
+}
+
+export interface OCRModelsResponse {
+  models: Array<{
+    name: string;
+    size?: number;
+    modified_at?: string;
+    digest?: string;
+    vision_capable?: boolean;
+    description?: string;
+  }>;
+}
+
+export interface OCRWorkflowLogsResponse {
+  workflow_id: string;
+  logs: OCRWorkflowLog[];
+  total_count: number;
+  limit: number;
+  offset: number;
+}
+
 
 // AI Insight types
 export interface AIInsight {
@@ -2101,23 +2260,7 @@ export interface AIInsight {
   created_at: string;
 }
 
-// ==========================================
-// OCR WORKFLOW TYPES
-// ==========================================
-
-export interface OCRWorkflow {
-  id: string;
-  user_id: string;
-  workflow_name: string;
-  ocr_model: string;
-  status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled';
-  processing_options?: Record<string, any>;
-  total_images: number;
-  processed_images: number;
-  total_pages: number;
-  created_at: string;
-  updated_at: string;
-}
+// OCR Workflow types are defined above
 
 export interface OCRBatch {
   id: string;

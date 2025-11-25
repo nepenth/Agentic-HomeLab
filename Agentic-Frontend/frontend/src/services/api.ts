@@ -2677,6 +2677,14 @@ class ApiClient {
     });
     return response.data;
   }
+
+  async getOCRWorkflowLogs(workflowId: string, params?: {
+    limit?: number;
+    offset?: number;
+  }) {
+    const response = await this.client.get(`/api/v1/ocr/workflows/${workflowId}/logs`, { params });
+    return response.data;
+  }
 }
 
 export const apiClient = new ApiClient();

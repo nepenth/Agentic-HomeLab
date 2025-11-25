@@ -27,6 +27,7 @@ import {
 import { useEmail } from '../../hooks/useEmail';
 import { useQuery } from '@tanstack/react-query';
 import apiClient from '../../services/api';
+import { getSyncHealth } from '../../services/emailApi';
 
 interface SyncControlProps {
   accountIds?: string[];
@@ -52,6 +53,13 @@ export const SyncControl: React.FC<SyncControlProps> = ({ accountIds }) => {
     },
     refetchInterval: isSyncing ? 2000 : false, // Poll every 2 seconds when syncing
     enabled: true,
+  });
+
+  // Fetch sync health
+  const { data: syncHealth } = useQuery({
+    queryKey: ['sync-health'],
+    queryFn: getSyncHealth,
+    refetchInterval: 10000, // Check health every 10s
   });
 
   // Auto-expand status when sync starts and show notifications
@@ -132,6 +140,15 @@ export const SyncControl: React.FC<SyncControlProps> = ({ accountIds }) => {
 
   return (
     <Box>
+      {/* Health Alerts */}
+      {syncHealth?.accounts?.filter((acc: any) => acc.circuit_breaker_open || acc.lock_stale).map((acc: any) => (
+        <Alert severity="warning" sx={{ mb: 2 }} key={acc.account_id}>
+          {acc.circuit_breaker_open
+            ? `Sync paused for ${acc.email_address}: Too many failures (Circuit Breaker Open).`
+            : `Sync lock stale for ${acc.email_address}. System will auto-recover.`}
+        </Alert>
+      ))}
+
       {/* Simplified Sync Button - No more Quick/Full distinction */}
       <Box sx={{ display: 'flex', flexDirection: 'column', gap: 1 }}>
         <Button

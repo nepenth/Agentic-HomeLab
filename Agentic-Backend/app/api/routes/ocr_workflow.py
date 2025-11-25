@@ -23,11 +23,13 @@ from app.db.models.ocr_workflow import (
     OCRBatch,
     OCRImage,
     OCRDocument,
+    OCRWorkflowLog,
     OCRWorkflowStatus,
     OCRBatchStatus
 )
 from app.tasks.ocr_tasks import process_ocr_workflow_task
 from app.services.ollama_client import ollama_client
+from app.services.pubsub_service import pubsub_service
 from app.utils.logging import get_logger
 from pydantic import BaseModel
 
@@ -465,6 +467,54 @@ async def get_workflow_results(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to get workflow results"
+        )
+
+@router.get("/workflows/{workflow_id}/logs")
+async def get_workflow_logs(
+    workflow_id: str,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db_session),
+    limit: int = 100,
+    offset: int = 0
+):
+    """
+    Get OCR workflow logs from database.
+    """
+    try:
+        workflow_uuid = UUID(workflow_id)
+        workflow = await db.get(OCRWorkflow, workflow_uuid)
+
+        if not workflow or workflow.user_id != current_user.username:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Workflow not found"
+            )
+
+        # Get logs from database
+        logs_result = await db.execute(
+            select(OCRWorkflowLog).where(
+                OCRWorkflowLog.workflow_id == workflow_uuid
+            ).order_by(OCRWorkflowLog.timestamp.desc())
+            .limit(limit)
+            .offset(offset)
+        )
+        logs = logs_result.scalars().all()
+
+        return {
+            "workflow_id": workflow_id,
+            "logs": [log.to_dict() for log in logs],
+            "total_count": len(logs),
+            "limit": limit,
+            "offset": offset
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to get workflow logs: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to get workflow logs"
         )
 
 @router.post("/workflows/{workflow_id}/export")

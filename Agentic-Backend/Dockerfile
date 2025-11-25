@@ -1,5 +1,5 @@
 # Multi-stage build for Python 3.12
-FROM python:3.12-slim as builder
+FROM python:3.12-slim AS builder
 
 # Set build arguments
 ARG BUILD_DEPS="build-essential libpq-dev"
