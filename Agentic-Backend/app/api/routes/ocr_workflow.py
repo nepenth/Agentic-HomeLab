@@ -490,15 +490,18 @@ async def get_workflow_logs(
                 detail="Workflow not found"
             )
 
-        # Get logs from database
+        # Get logs from database - also include logs without workflow_id but with matching user_id
         logs_result = await db.execute(
             select(OCRWorkflowLog).where(
-                OCRWorkflowLog.workflow_id == workflow_uuid
+                (OCRWorkflowLog.workflow_id == workflow_uuid) |
+                ((OCRWorkflowLog.workflow_id.is_(None)) & (OCRWorkflowLog.user_id == current_user.username))
             ).order_by(OCRWorkflowLog.timestamp.desc())
             .limit(limit)
             .offset(offset)
         )
         logs = logs_result.scalars().all()
+
+        logger.info(f"Found {len(logs)} logs for workflow {workflow_id} and user {current_user.username}")
 
         return {
             "workflow_id": workflow_id,

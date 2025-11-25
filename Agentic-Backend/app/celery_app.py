@@ -6,7 +6,7 @@ celery_app = Celery(
     "agentic-backend",
     broker=settings.celery_broker_url,
     backend=settings.celery_result_backend,
-    include=["app.tasks.agent_tasks", "app.tasks.email_sync_tasks"]
+    include=["app.tasks.agent_tasks", "app.tasks.email_sync_tasks", "app.tasks.ocr_tasks"]
 )
 
 # Configure Celery
@@ -24,10 +24,12 @@ celery_app.conf.update(
     task_routes={
         "app.tasks.agent_tasks.*": {"queue": "agent_tasks"},
         "app.tasks.email_sync_tasks.*": {"queue": "email_sync"},
+        "app.tasks.ocr_tasks.*": {"queue": "ocr_tasks"},
     },
     task_annotations={
         "app.tasks.agent_tasks.*": {"rate_limit": "100/m"},
         "app.tasks.email_sync_tasks.*": {"rate_limit": "50/m"},
+        "app.tasks.ocr_tasks.*": {"rate_limit": "20/m"},
     },
     result_expires=3600,  # 1 hour
 )

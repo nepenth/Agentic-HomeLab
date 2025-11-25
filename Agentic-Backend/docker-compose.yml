@@ -104,7 +104,7 @@ services:
       - knowledge_base_models:/app/models_cache
       - ollama_models:/root/.ollama
       - playwright_cache:/home/app/.cache
-    command: celery -A app.celery_app worker --loglevel=info --concurrency=4 -Q agent_tasks,email_sync
+    command: celery -A app.celery_app worker --loglevel=info --concurrency=4 -Q agent_tasks,email_sync,ocr_tasks
     healthcheck:
       disable: true
 

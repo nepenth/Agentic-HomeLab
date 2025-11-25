@@ -36,9 +36,10 @@ class OCRTask(Task):
         logger.info(f"OCR Task {task_id} completed successfully")
 
 
-@celery_app.task(base=OCRTask, bind=True, max_retries=3, default_retry_delay=60)
+@celery_app.task(base=OCRTask, bind=True, max_retries=3, default_retry_delay=60, time_limit=600, soft_time_limit=540)
 def process_ocr_workflow_task(self, workflow_id: str, ocr_model: str, image_paths: List[str], batch_name: str = "Default Batch", user_id: str = "system"):
     """Celery task for processing OCR workflow."""
+    logger.info(f"OCR task called with workflow_id={workflow_id}, user_id={user_id}, model={ocr_model}, images={len(image_paths)}")
     return asyncio.run(_process_ocr_workflow_async(self, workflow_id, ocr_model, image_paths, batch_name, user_id))
 
 
@@ -51,12 +52,14 @@ async def _process_ocr_workflow_async(
     user_id: str
 ) -> Dict[str, Any]:
     """Async implementation of OCR workflow processing."""
+    logger.info(f"Starting OCR workflow processing for workflow {workflow_id}, user {user_id}, model {ocr_model}, {len(image_paths)} images")
     workflow_uuid = UUID(workflow_id)
 
     async with get_session_context() as session:
         # Get or create workflow
         workflow = await session.get(OCRWorkflow, workflow_uuid)
         if not workflow:
+            logger.info(f"Creating new workflow {workflow_id}")
             workflow = OCRWorkflow(
                 id=workflow_uuid,
                 user_id=user_id,
@@ -67,11 +70,17 @@ async def _process_ocr_workflow_async(
             session.add(workflow)
             await session.commit()
             await session.refresh(workflow)
+        else:
+            logger.info(f"Found existing workflow {workflow_id}")
 
         workflow.status = "running"
         workflow.started_at = datetime.utcnow()
         workflow.total_images = len(image_paths)  # Set total images for progress tracking
         await session.commit()
+
+        # Create initial log
+        await _log_workflow_progress(session, workflow_uuid, None, None,
+                                   f"Started OCR processing for {len(image_paths)} images", "info", user_id)
 
         # Create batch
         batch = OCRBatch(
@@ -224,7 +233,7 @@ async def _process_ocr_workflow_async(
 async def _log_workflow_progress(
     session: AsyncSession,
     workflow_id: UUID,
-    batch_id: UUID,
+    batch_id: UUID = None,
     image_id: UUID = None,
     message: str = "",
     level: str = "info",
