@@ -50,6 +50,7 @@ interface ModelSelectorProps {
   onModelChange: (model: string) => void;
   disabled?: boolean;
   showStatus?: boolean;
+  capabilityFilter?: string; // Optional capability filter (e.g., 'vision' for OCR)
 }
 
 interface OllamaModel {
@@ -108,7 +109,8 @@ const ModelSelector: React.FC<ModelSelectorProps> = ({
   selectedModel,
   onModelChange,
   disabled = false,
-  showStatus = true
+  showStatus = true,
+  capabilityFilter
 }) => {
   const [modelStatus, setModelStatus] = useState<'idle' | 'switching' | 'error'>('idle');
   const [enhancedModelInfo, setEnhancedModelInfo] = useState<any>(null);
@@ -127,10 +129,15 @@ const ModelSelector: React.FC<ModelSelectorProps> = ({
     error,
     refetch
   } = useQuery({
-    queryKey: ['chat-models-rich'],
+    queryKey: ['models-rich', capabilityFilter],
     queryFn: async () => {
       try {
-        const response = await apiClient.get('/api/v1/email-assistant/models/rich');
+        // Use global endpoint for all model requests (with optional capability filtering)
+        const endpoint = capabilityFilter
+          ? `/api/v1/global/models/rich?capability_filter=${capabilityFilter}`
+          : '/api/v1/global/models/rich';
+
+        const response = await apiClient.get(endpoint);
         return response.data; // Return the data, not the full response
       } catch (error) {
         console.warn('Rich models endpoint failed, falling back to basic models');
