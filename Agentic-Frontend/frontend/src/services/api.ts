@@ -471,8 +471,8 @@ class ApiClient {
   }
 
   async getChatModels(): Promise<ChatModelsResponse> {
-    // Use rich email-assistant endpoint which provides comprehensive model information
-    const response = await this.client.get('/api/v1/email-assistant/models/rich');
+    // Use global endpoint which provides comprehensive model information
+    const response = await this.client.get('/api/v1/global/models/rich');
     return response.data;
   }
 
@@ -522,8 +522,8 @@ class ApiClient {
 
   // Dynamic Model Selection System (Phase 1.3)
   async getAvailableModels() {
-    // Use email-assistant endpoint which filters out embedding models
-    const response = await this.client.get('/api/v1/email-assistant/models');
+    // Use global endpoint which filters out embedding models
+    const response = await this.client.get('/api/v1/global/models/rich');
     return response.data;
   }
 

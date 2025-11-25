@@ -586,70 +586,11 @@ async def execute_quick_action(
         )
 
 
-@router.get("/models")
-async def get_available_models():
-    """Get list of available Ollama models for the assistant (excludes embedding models)."""
-    try:
-        from app.services.ollama_client import ollama_client
-        from app.config import settings
-
-        models_response = await ollama_client.list_models()
-        all_models = models_response.get("models", [])
-
-        # Filter out embedding models - they typically have "embed" in the name
-        # or are smaller models designed specifically for embeddings
-        embedding_keywords = ["embed", "embedding", "nomic", "mxbai", "snowflake-arctic-embed"]
-
-        chat_models = []
-        duplicates_found = 0
-        seen_names = set()
-
-        for model in all_models:
-            model_name = model["name"]
-            model_name_lower = model_name.lower()
-
-            # Skip embedding models
-            if any(keyword in model_name_lower for keyword in embedding_keywords):
-                continue
-
-            # Check for duplicates
-            if model_name in seen_names:
-                logger.warning(f"Duplicate model found in Ollama response: {model_name}")
-                duplicates_found += 1
-                continue
-
-            seen_names.add(model_name)
-            chat_models.append(model_name)
-
-        # Sort alphabetically for consistent ordering
-        chat_models.sort()
-
-        # Get default model from settings
-        default_model = settings.ollama_default_model
-
-        logger.info(f"Found {len(chat_models)} chat models (filtered from {len(all_models)} total, {duplicates_found} duplicates removed)")
-
-        return {
-            "models": chat_models,
-            "default_model": default_model,
-            "total_models": len(all_models),
-            "chat_models": len(chat_models),
-            "filtered_out": len(all_models) - len(chat_models) - duplicates_found,
-            "duplicates_removed": duplicates_found
-        }
-
-    except Exception as e:
-        logger.error(f"Get models failed: {e}")
-        from app.config import settings
-        return {
-            "models": [settings.ollama_default_model],
-            "default_model": settings.ollama_default_model,
-            "error": "Failed to fetch models from Ollama"
-        }
 
 
-@router.get("/models/rich")
-async def get_available_models_rich(db: AsyncSession = Depends(get_db_session)):
+
+
+async def get_available_models_rich_impl(db: AsyncSession):
     """Get comprehensive model information with deduplication and rich data."""
     logger.info(f"get_available_models_rich called with db session: {db is not None}")
     # Test database connection
@@ -819,8 +760,36 @@ async def get_available_models_rich(db: AsyncSession = Depends(get_db_session)):
         logger.error(f"Get rich models failed: {e}")
         import traceback
         logger.error(f"Traceback: {traceback.format_exc()}")
-        # Fallback to basic endpoint
-        return await get_available_models()
+        # Fallback to global endpoint
+        from app.services.ollama_client import ollama_client
+        from app.config import settings
+
+        models_response = await ollama_client.list_models()
+        all_models = models_response.get("models", [])
+
+        # Filter out embedding models
+        embedding_keywords = ["embed", "embedding", "nomic", "mxbai", "snowflake-arctic-embed"]
+        chat_models = []
+
+        for model in all_models:
+            model_name = model["name"]
+            model_name_lower = model_name.lower()
+
+            if any(keyword in model_name_lower for keyword in embedding_keywords):
+                continue
+
+            chat_models.append(model_name)
+
+        chat_models.sort()
+
+        return {
+            "models": chat_models,
+            "default_model": settings.ollama_default_model,
+            "total_models": len(all_models),
+            "chat_models": len(chat_models),
+            "filtered_out": len(all_models) - len(chat_models),
+            "error": "Rich models failed, using basic fallback"
+        }
 
 
 @router.get("/analytics")
