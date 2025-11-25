@@ -66,8 +66,8 @@ WORKDIR /app
 # Copy application code
 COPY . .
 
-# Create logs directory
-RUN mkdir -p /app/logs && chown -R app:app /app
+# Create logs and media directories
+RUN mkdir -p /app/logs /app/media && chown -R app:app /app
 
 # Switch to app user for browser installation
 USER app

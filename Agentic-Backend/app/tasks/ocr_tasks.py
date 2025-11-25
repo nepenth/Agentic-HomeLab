@@ -119,6 +119,24 @@ async def _process_ocr_workflow_async(
                 logger.info(f"Sending OCR request to Ollama model {ocr_model} for image {os.path.basename(image_path)}")
 
                 try:
+                    # First check if the model is available
+                    try:
+                        models_response = await ollama_client.list_models()
+                        available_models = [model.get('name', '') for model in models_response.get('models', [])]
+
+                        if ocr_model not in available_models:
+                            logger.warning(f"Model {ocr_model} not available. Available models: {available_models}")
+                            # Try to find a suitable vision-capable model
+                            vision_models = [m for m in available_models if any(keyword in m.lower() for keyword in ['vision', 'vl', 'visual', 'llava', 'bakllava', 'moondream', 'qwen2.5vl', 'llama3.2-vision'])]
+                            if vision_models:
+                                fallback_model = vision_models[0]
+                                logger.info(f"Using fallback vision model: {fallback_model}")
+                                ocr_model = fallback_model
+                            else:
+                                raise Exception(f"Model {ocr_model} not available and no suitable vision-capable fallback found. Available models: {available_models}")
+                    except Exception as model_check_error:
+                        logger.warning(f"Could not check available models: {model_check_error}")
+
                     response = await ollama_client.generate(
                         prompt=prompt,
                         model=ocr_model,
