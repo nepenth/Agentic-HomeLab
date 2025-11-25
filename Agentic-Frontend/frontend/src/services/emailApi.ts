@@ -177,6 +177,11 @@ export const getSyncStatus = async (): Promise<any> => {
   return response.data;
 };
 
+export const getSyncHealth = async (): Promise<any> => {
+  const response = await apiClient.get('/api/v1/email-sync/sync/health');
+  return response.data;
+};
+
 // Semantic Search
 export const semanticSearch = async (query: string, accountId?: string, limit = 50): Promise<Email[]> => {
   const params: any = { query, limit };

@@ -344,6 +344,9 @@ const OCRWorkflow: React.FC = () => {
   const [progress, setProgress] = useState<{ current: number; total: number; message: string } | null>(null);
   const [showResults, setShowResults] = useState(false);
   const [dragOver, setDragOver] = useState(false);
+  const [logsExpanded, setLogsExpanded] = useState(false);
+  const [logs, setLogs] = useState<any[]>([]);
+  const [logsLoading, setLogsLoading] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Drag and drop handlers
@@ -467,6 +470,20 @@ const OCRWorkflow: React.FC = () => {
     }
   };
 
+  const loadLogs = async () => {
+    if (!workflowId) return;
+
+    try {
+      setLogsLoading(true);
+      const logsResponse = await apiClient.getOCRWorkflowLogs(workflowId);
+      setLogs(logsResponse.logs || []);
+    } catch (err) {
+      console.error('Failed to load logs:', err);
+    } finally {
+      setLogsLoading(false);
+    }
+  };
+
   const resetWorkflow = () => {
     setImages([]);
     setBatchName('Document Scan');
@@ -476,6 +493,8 @@ const OCRWorkflow: React.FC = () => {
     setStatus('idle');
     setProgress(null);
     setShowResults(false);
+    setLogs([]);
+    setLogsExpanded(false);
   };
 
   return (
@@ -832,6 +851,103 @@ const OCRWorkflow: React.FC = () => {
                   <Typography variant="body2" color="text.secondary">
                     Upload some images and start processing to see extracted text here
                   </Typography>
+                </Box>
+              )}
+
+              {/* Logs Section */}
+              {workflowId && (
+                <Box sx={{ mt: 3 }}>
+                  <Divider sx={{ mb: 2 }} />
+                  <Box
+                    sx={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'space-between',
+                      cursor: 'pointer',
+                      py: 1,
+                      px: 2,
+                      borderRadius: 1,
+                      '&:hover': { backgroundColor: 'action.hover' }
+                    }}
+                    onClick={() => {
+                      setLogsExpanded(!logsExpanded);
+                      if (!logsExpanded && logs.length === 0) {
+                        loadLogs();
+                      }
+                    }}
+                  >
+                    <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                      <InfoIcon sx={{ color: 'text.secondary' }} />
+                      <Typography variant="subtitle2" sx={{ fontWeight: 600 }}>
+                        Processing Logs
+                      </Typography>
+                      {logs.length > 0 && (
+                        <Chip
+                          label={`${logs.length} entries`}
+                          size="small"
+                          variant="outlined"
+                          sx={{ fontSize: '0.7rem' }}
+                        />
+                      )}
+                    </Box>
+                    {logsExpanded ? <ExpandLessIcon /> : <ExpandMoreIcon />}
+                  </Box>
+
+                  <Collapse in={logsExpanded} timeout="auto">
+                    <Box sx={{
+                      mt: 2,
+                      maxHeight: 300,
+                      overflow: 'auto',
+                      border: '1px solid rgba(0, 0, 0, 0.08)',
+                      borderRadius: 1,
+                      backgroundColor: 'grey.50'
+                    }}>
+                      {logsLoading ? (
+                        <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'center', py: 4 }}>
+                          <CircularProgress size={20} />
+                          <Typography variant="body2" sx={{ ml: 1 }}>
+                            Loading logs...
+                          </Typography>
+                        </Box>
+                      ) : logs.length > 0 ? (
+                        <List dense sx={{ py: 0 }}>
+                          {logs.map((log, index) => (
+                            <ListItem key={index} sx={{ py: 0.5, px: 2 }}>
+                              <ListItemIcon sx={{ minWidth: 30 }}>
+                                {log.level === 'error' ? (
+                                  <ErrorIcon sx={{ fontSize: '1rem', color: 'error.main' }} />
+                                ) : log.level === 'warning' ? (
+                                  <ErrorIcon sx={{ fontSize: '1rem', color: 'warning.main' }} />
+                                ) : log.level === 'info' ? (
+                                  <InfoIcon sx={{ fontSize: '1rem', color: 'info.main' }} />
+                                ) : (
+                                  <CheckCircleIcon sx={{ fontSize: '1rem', color: 'success.main' }} />
+                                )}
+                              </ListItemIcon>
+                              <ListItemText
+                                primary={
+                                  <Typography variant="body2" sx={{ fontFamily: 'monospace', fontSize: '0.8rem' }}>
+                                    {log.message}
+                                  </Typography>
+                                }
+                                secondary={
+                                  <Typography variant="caption" color="text.secondary">
+                                    {new Date(log.timestamp).toLocaleString()} • {log.workflow_phase || 'General'}
+                                  </Typography>
+                                }
+                              />
+                            </ListItem>
+                          ))}
+                        </List>
+                      ) : (
+                        <Box sx={{ textAlign: 'center', py: 4 }}>
+                          <Typography variant="body2" color="text.secondary">
+                            No logs available yet
+                          </Typography>
+                        </Box>
+                      )}
+                    </Box>
+                  </Collapse>
                 </Box>
               )}
             </CardContent>
