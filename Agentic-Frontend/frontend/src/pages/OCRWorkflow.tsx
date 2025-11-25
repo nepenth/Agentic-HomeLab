@@ -427,12 +427,18 @@ const OCRWorkflow: React.FC = () => {
             setProgress(null);
             setIsProcessing(false);
             setShowResults(true);
+
+            // Load final logs
+            loadLogs();
           } else if (workflowData.status === 'failed') {
             clearInterval(pollInterval);
             setError('OCR processing failed');
             setIsProcessing(false);
             setStatus('failed');
             setProgress(null);
+
+            // Load error logs
+            loadLogs();
           } else {
             // Update progress
             const totalImages = workflowData.progress?.total_images || images.length;
@@ -442,6 +448,11 @@ const OCRWorkflow: React.FC = () => {
               total: totalImages,
               message: `Processing ${processedImages}/${totalImages} images...`
             });
+
+            // Load logs periodically during processing if logs section is expanded
+            if (logsExpanded) {
+              loadLogs();
+            }
           }
         } catch (err) {
           console.error('Status check failed:', err);
