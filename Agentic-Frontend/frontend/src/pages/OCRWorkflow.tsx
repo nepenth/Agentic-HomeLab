@@ -421,12 +421,22 @@ const OCRWorkflow: React.FC = () => {
 
           if (workflowData.status === 'completed') {
             clearInterval(pollInterval);
-            const resultResponse = await apiClient.getOCRWorkflowResults(workflowResponse.workflow_id);
-            setResults(resultResponse.combined_markdown);
-            setStatus('completed');
-            setProgress(null);
-            setIsProcessing(false);
-            setShowResults(true);
+
+            // Check if any images were actually processed
+            if (workflowData.progress?.processed_images > 0) {
+              const resultResponse = await apiClient.getOCRWorkflowResults(workflowResponse.workflow_id);
+              setResults(resultResponse.combined_markdown);
+              setStatus('completed');
+              setProgress(null);
+              setIsProcessing(false);
+              setShowResults(true);
+            } else {
+              // No images processed - this is a failure
+              setError('OCR processing failed - no images were successfully processed');
+              setIsProcessing(false);
+              setStatus('failed');
+              setProgress(null);
+            }
 
             // Load final logs
             loadLogs();
