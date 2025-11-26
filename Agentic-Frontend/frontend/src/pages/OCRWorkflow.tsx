@@ -59,6 +59,7 @@ import ReactMarkdown from 'react-markdown';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
 import { vscDarkPlus } from 'react-syntax-highlighter/dist/esm/styles/prism';
 import apiClient from '../services/api';
+import webSocketService from '../services/websocket';
 import ModelSelector from '../components/EmailAssistant/ModelSelector';
 import type { OCRWorkflow, OCRBatch, OCRImage } from '../types';
 
@@ -87,7 +88,7 @@ const OCRModelSelector: React.FC<OCRModelSelectorProps> = ({
 
 const OCRWorkflow: React.FC = () => {
   const theme = useTheme();
-  const [selectedModel, setSelectedModel] = useState<string>('deepseek-ocr:latest');
+  const [selectedModel, setSelectedModel] = useState<string>('deepseek-ocr');
   const [images, setImages] = useState<File[]>([]);
   const [batchName, setBatchName] = useState<string>('Document Scan');
   const [isProcessing, setIsProcessing] = useState<boolean>(false);
@@ -100,11 +101,23 @@ const OCRWorkflow: React.FC = () => {
   const [dragOver, setDragOver] = useState(false);
   const [logsExpanded, setLogsExpanded] = useState(false);
   const [logs, setLogs] = useState<any[]>([]);
+  const [logsDebug, setLogsDebug] = useState<string[]>([]);
   const [logsLoading, setLogsLoading] = useState(false);
   const [queueItems, setQueueItems] = useState<any[]>([]);
   const [queueLoading, setQueueLoading] = useState(false);
   const [queueExpanded, setQueueExpanded] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const webSocketUnsubscribeRef = useRef<(() => void) | null>(null);
+
+  // Cleanup WebSocket subscriptions on unmount
+  useEffect(() => {
+    return () => {
+      if (webSocketUnsubscribeRef.current) {
+        webSocketUnsubscribeRef.current();
+        webSocketUnsubscribeRef.current = null;
+      }
+    };
+  }, []);
 
   // Drag and drop handlers
   const handleDragOver = (e: React.DragEvent) => {
@@ -142,94 +155,136 @@ const OCRWorkflow: React.FC = () => {
   };
 
   const startOCRWorkflow = async () => {
+    console.log('=== START OCR WORKFLOW CALLED ===');
+    console.log('Images selected:', images.length);
+    console.log('Selected model:', selectedModel);
+    console.log('Is processing:', isProcessing);
+
     if (images.length === 0) {
+      console.log('No images selected, returning early');
       setError('Please select at least one image');
       return;
     }
 
+    if (!selectedModel) {
+      console.log('No model selected, returning early');
+      setError('Please select an OCR model');
+      return;
+    }
+
+    console.log('Starting OCR workflow with model:', selectedModel);
     setIsProcessing(true);
     setError('');
     setStatus('processing');
     setProgress({ current: 0, total: images.length, message: 'Initializing OCR workflow...' });
 
     try {
+      console.log('Creating workflow...');
       // Create workflow
       const workflowResponse = await apiClient.createOCRWorkflow({
         workflow_name: batchName,
         ocr_model: selectedModel,
       });
+      console.log('Workflow created:', workflowResponse);
       setWorkflowId(workflowResponse.workflow_id);
 
+      console.log('Uploading batch...');
       // Upload batch
       const batchResponse = await apiClient.uploadOCRBatch(workflowResponse.workflow_id, {
         batch_name: batchName,
         images: images,
       });
+      console.log('Batch uploaded:', batchResponse);
 
+      console.log('Triggering processing...');
       // Trigger processing
       await apiClient.processOCRWorkflow(workflowResponse.workflow_id, {
         batch_id: batchResponse.batch_id,
       });
+      console.log('Processing triggered');
 
       // Load initial logs
+      console.log('Loading initial logs...');
       loadLogs(true);
 
-      // Poll for results
-      const pollInterval = setInterval(async () => {
-        try {
-          const workflowData = await apiClient.getOCRWorkflowStatus(workflowResponse.workflow_id);
+      // Subscribe to WebSocket updates for this workflow
+      console.log('Subscribing to WebSocket updates for workflow:', workflowResponse.workflow_id);
+      const unsubscribe = webSocketService.subscribeToOCRProgress(
+        workflowResponse.workflow_id,
+        (update: any) => {
+          console.log('Received WebSocket update:', update);
 
-          if (workflowData.status === 'completed') {
-            clearInterval(pollInterval);
+          if (update.type === 'ocr_workflow_status') {
+            const workflowData = update.data || update;
 
-            // Check if any images were actually processed
-            if (workflowData.progress?.processed_images > 0) {
-              const resultResponse = await apiClient.getOCRWorkflowResults(workflowResponse.workflow_id);
-              setResults(resultResponse.combined_markdown);
-              setStatus('completed');
-              setProgress(null);
-              setIsProcessing(false);
-              setShowResults(true);
-            } else {
-              // No images processed - this is a failure
-              setError('OCR processing failed - no images were successfully processed');
+            if (workflowData.status === 'completed') {
+              // Workflow completed successfully
+              if (workflowData.progress?.processed_images > 0) {
+                // Load final results
+                apiClient.getOCRWorkflowResults(workflowResponse.workflow_id).then(resultResponse => {
+                  setResults(resultResponse.combined_markdown);
+                  setStatus('completed');
+                  setProgress(null);
+                  setIsProcessing(false);
+                  setShowResults(true);
+                  // Load final logs
+                  loadLogs(true);
+                }).catch(err => {
+                  console.error('Failed to load results:', err);
+                  setError('Failed to load OCR results');
+                  setIsProcessing(false);
+                  setStatus('error');
+                  setProgress(null);
+                });
+              } else {
+                // No images processed - this is a failure
+                setError('OCR processing failed - no images were successfully processed');
+                setIsProcessing(false);
+                setStatus('failed');
+                setProgress(null);
+              }
+
+              // Unsubscribe from WebSocket updates
+              if (webSocketUnsubscribeRef.current) {
+                webSocketUnsubscribeRef.current();
+                webSocketUnsubscribeRef.current = null;
+              }
+            } else if (workflowData.status === 'failed') {
+              setError('OCR processing failed');
               setIsProcessing(false);
               setStatus('failed');
               setProgress(null);
+
+              // Load error logs
+              loadLogs(true);
+
+              // Unsubscribe from WebSocket updates
+              if (webSocketUnsubscribeRef.current) {
+                webSocketUnsubscribeRef.current();
+                webSocketUnsubscribeRef.current = null;
+              }
+            } else {
+              // Update progress for running workflows
+              const totalImages = workflowData.progress?.total_images || images.length;
+              const processedImages = workflowData.progress?.processed_images || 0;
+              setProgress({
+                current: processedImages,
+                total: totalImages,
+                message: `Processing ${processedImages}/${totalImages} images...`
+              });
             }
-
-            // Load final logs
-            loadLogs(true);
-          } else if (workflowData.status === 'failed') {
-            clearInterval(pollInterval);
-            setError('OCR processing failed');
-            setIsProcessing(false);
-            setStatus('failed');
-            setProgress(null);
-
-            // Load error logs
-            loadLogs(true);
-          } else {
-            // Update progress
-            const totalImages = workflowData.progress?.total_images || images.length;
-            const processedImages = workflowData.progress?.processed_images || 0;
-            setProgress({
-              current: processedImages,
-              total: totalImages,
-              message: `Processing ${processedImages}/${totalImages} images...`
-            });
-
-            // Load logs periodically during processing
-            loadLogs(true);
           }
-        } catch (err) {
-          console.error('Status check failed:', err);
         }
-      }, 2000);
+      );
+
+      // Store unsubscribe function for cleanup
+      webSocketUnsubscribeRef.current = unsubscribe;
 
     } catch (err: any) {
       console.error('OCR workflow failed:', err);
-      setError(err.response?.data?.detail || 'OCR workflow failed');
+      const errorMessage = err.response?.data?.detail || err.message || 'OCR workflow failed';
+      console.error('Error details:', errorMessage);
+      setError(errorMessage);
       setIsProcessing(false);
       setStatus('error');
       setProgress(null);
@@ -250,17 +305,27 @@ const OCRWorkflow: React.FC = () => {
   };
 
   const loadLogs = async (background = false) => {
-    if (!workflowId && !background) return;
+    console.log(`loadLogs called: background=${background}, workflowId=${workflowId}, current logs=${logs.length}`);
+    if (!workflowId && !background) {
+      console.log('loadLogs: No workflowId and not background, returning');
+      return;
+    }
 
     try {
-      if (!background) setLogsLoading(true);
+      if (!background) {
+        console.log('loadLogs: Setting loading to true');
+        setLogsLoading(true);
+      }
 
       let logsResponse;
       if (workflowId) {
+        console.log(`loadLogs: Fetching logs for workflow ${workflowId}`);
         logsResponse = await apiClient.getOCRWorkflowLogs(workflowId);
+        console.log(`loadLogs: Got ${logsResponse.logs?.length || 0} logs from API`);
       } else {
         // If no workflowId yet, try to get recent logs for current user
         // This is a fallback for when logs are created before workflowId is set
+        console.log('loadLogs: No workflowId, using empty logs');
         logsResponse = { logs: [] };
       }
 
@@ -269,24 +334,40 @@ const OCRWorkflow: React.FC = () => {
         new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()
       );
 
+      console.log(`loadLogs: Setting ${sortedLogs.length} logs in state`);
+      setLogsDebug(prev => [...prev, `Set ${sortedLogs.length} logs at ${new Date().toLocaleTimeString()}`]);
       setLogs(sortedLogs);
 
       // If no logs found and we're in background mode, try again in 1 second
       if (background && sortedLogs.length === 0 && workflowId) {
+        console.log('loadLogs: No logs found, retrying in 1 second...');
         setTimeout(() => loadLogs(true), 1000);
       }
     } catch (err) {
-      console.error('Failed to load logs:', err);
+      console.error('loadLogs: Failed to load logs:', err);
       // If background loading fails, retry once after a delay
       if (background && workflowId) {
+        console.log('loadLogs: Log loading failed, retrying in 2 seconds...');
         setTimeout(() => loadLogs(true), 2000);
       }
     } finally {
-      if (!background) setLogsLoading(false);
+      if (!background) {
+        console.log('loadLogs: Setting loading to false');
+        setLogsLoading(false);
+      }
     }
   };
 
   const resetWorkflow = () => {
+    console.log('resetWorkflow: Clearing all state');
+    setLogsDebug(prev => [...prev, `Reset workflow at ${new Date().toLocaleTimeString()}`]);
+
+    // Clean up WebSocket subscription
+    if (webSocketUnsubscribeRef.current) {
+      webSocketUnsubscribeRef.current();
+      webSocketUnsubscribeRef.current = null;
+    }
+
     setImages([]);
     setBatchName('Document Scan');
     setResults('');
@@ -520,7 +601,10 @@ const OCRWorkflow: React.FC = () => {
               <Button
                 fullWidth
                 variant="contained"
-                onClick={startOCRWorkflow}
+                onClick={() => {
+                  console.log('=== BUTTON CLICKED ===');
+                  startOCRWorkflow();
+                }}
                 disabled={isProcessing || images.length === 0}
                 startIcon={isProcessing ? <CircularProgress size={20} /> : <PlayArrowIcon />}
                 sx={{
@@ -791,6 +875,13 @@ const OCRWorkflow: React.FC = () => {
                           <Typography variant="body2" color="text.secondary">
                             No logs available yet
                           </Typography>
+                          {logsDebug.length > 0 && (
+                            <Box sx={{ mt: 2, p: 1, bgcolor: 'grey.100', borderRadius: 1 }}>
+                              <Typography variant="caption" sx={{ fontFamily: 'monospace', fontSize: '0.7rem' }}>
+                                Debug: {logsDebug.slice(-3).join(' | ')}
+                              </Typography>
+                            </Box>
+                          )}
                         </Box>
                       )}
                     </Box>

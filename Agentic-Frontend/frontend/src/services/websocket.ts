@@ -514,6 +514,28 @@ class WebSocketService {
     };
   }
 
+  // Subscribe to OCR workflow progress updates
+  subscribeToOCRProgress(
+    workflowId: string,
+    callback: (update: any) => void
+  ) {
+    // Connect to OCR progress endpoint with workflow_id filter
+    const endpoint = `ocr/progress?workflow_id=${workflowId}`;
+
+    // Connect with authentication token
+    const token = apiClient.getAuthToken();
+    this.connect(endpoint, token || undefined);
+
+    // Add handlers for OCR progress messages
+    this.addMessageHandler('ocr_workflow_status', callback);
+    this.addMessageHandler('ocr_workflow_update', callback);
+
+    return () => {
+      this.removeMessageHandler('ocr_workflow_status', callback);
+      this.removeMessageHandler('ocr_workflow_update', callback);
+    };
+  }
+
   private addMessageHandler(type: string, callback: (data: any) => void) {
     if (!this.messageHandlers.has(type)) {
       this.messageHandlers.set(type, []);

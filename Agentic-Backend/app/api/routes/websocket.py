@@ -210,6 +210,50 @@ class ConnectionManager:
 
         return True
 
+    async def broadcast_workflow_update(self, message: Dict[str, Any], user_id: str, workflow_id: Optional[str] = None):
+        """Broadcast workflow update to appropriate WebSocket subscribers."""
+        try:
+            eligible_connections = []
+
+            for connection_id, user in self.connection_users.items():
+                # Check if this user should receive workflow updates
+                if user.username == user_id:
+                    # If workflow_id is specified, check if connection is subscribed to OCR progress
+                    if workflow_id:
+                        # For OCR workflows, check if connection is subscribed to OCR progress
+                        if connection_id.startswith("ocr_progress_"):
+                            eligible_connections.append(connection_id)
+                    else:
+                        # Broadcast to all user connections
+                        eligible_connections.append(connection_id)
+
+            # Broadcast to eligible connections
+            if eligible_connections:
+                websocket_message = {
+                    "type": "ocr_workflow_update",
+                    "data": message,
+                    "timestamp": message.get("timestamp") or datetime.utcnow().isoformat()
+                }
+
+                disconnected = set()
+                for connection_id in eligible_connections:
+                    if connection_id in self.active_connections:
+                        websocket = self.active_connections[connection_id]
+                        try:
+                            await websocket.send_text(json.dumps(websocket_message))
+                        except Exception as e:
+                            logger.error(f"Failed to broadcast workflow update to {connection_id}: {e}")
+                            disconnected.add(connection_id)
+
+                # Clean up disconnected clients
+                for connection_id in disconnected:
+                    self.disconnect(connection_id)
+
+                logger.debug(f"Broadcasted workflow update to {len(eligible_connections) - len(disconnected)} connections")
+
+        except Exception as e:
+            logger.error(f"Failed to broadcast workflow update: {e}")
+
 
 manager = ConnectionManager()
 
@@ -508,6 +552,147 @@ async def websocket_chat(
         logger.info(f"Chat WebSocket disconnected: {connection_id}")
     except Exception as e:
         logger.error(f"Chat WebSocket error: {e}")
+    finally:
+        manager.disconnect(connection_id)
+
+
+@router.websocket("/ocr/progress")
+async def websocket_ocr_progress(
+    websocket: WebSocket,
+    token: str = Query(..., description="JWT authentication token"),
+    workflow_id: Optional[str] = Query(None)
+):
+    """WebSocket endpoint for real-time OCR workflow progress monitoring."""
+    connection_id = f"ocr_progress_{id(websocket)}"
+
+    # Validate JWT token
+    try:
+        user = await validate_websocket_token(token)
+        logger.info(f"OCR progress WebSocket authenticated for user: {user.username}")
+    except HTTPException as e:
+        logger.warning(f"OCR progress WebSocket authentication failed: {e.detail}")
+        await websocket.close(code=1008, reason="Authentication failed")
+        return
+
+    await manager.connect(websocket, connection_id, user)
+
+    try:
+        # Send welcome message
+        await manager.send_personal_message({
+            "type": "connected",
+            "message": "Connected to OCR progress monitoring",
+            "workflow_id": workflow_id
+        }, connection_id)
+
+        # Send initial status if workflow_id is provided
+        if workflow_id:
+            try:
+                from app.db.models.ocr_workflow import OCRWorkflow, OCRBatch
+                workflow_uuid = UUID(workflow_id)
+                workflow = await db.get(OCRWorkflow, workflow_uuid)
+                if workflow and workflow.user_id == user.username:
+                    # Get batch information
+                    batches_result = await db.execute(
+                        select(OCRBatch).where(OCRBatch.workflow_id == workflow_uuid)
+                    )
+                    batches = batches_result.scalars().all()
+
+                    await manager.send_personal_message({
+                        "type": "ocr_workflow_status",
+                        "workflow_id": str(workflow.id),
+                        "status": workflow.status,
+                        "progress": {
+                            "total_images": workflow.total_images,
+                            "processed_images": workflow.processed_images,
+                            "total_pages": workflow.total_pages
+                        },
+                        "batches": [
+                            {
+                                "batch_id": str(batch.id),
+                                "batch_name": batch.batch_name,
+                                "status": batch.status,
+                                "total_images": batch.total_images,
+                                "processed_images": batch.processed_images,
+                                "page_count": batch.page_count
+                            }
+                            for batch in batches
+                        ],
+                        "started_at": workflow.started_at.isoformat() if workflow.started_at else None,
+                        "completed_at": workflow.completed_at.isoformat() if workflow.completed_at else None
+                    }, connection_id)
+                else:
+                    await manager.send_personal_message({
+                        "type": "error",
+                        "message": "Workflow not found or access denied"
+                    }, connection_id)
+            except ValueError:
+                await manager.send_personal_message({
+                    "type": "error",
+                    "message": "Invalid workflow_id format"
+                }, connection_id)
+
+        # Keep connection alive and handle incoming messages
+        while True:
+            try:
+                data = await websocket.receive_text()
+                message = json.loads(data)
+
+                # Handle different message types
+                if message.get("type") == "ping":
+                    from datetime import datetime
+                    await manager.send_personal_message({
+                        "type": "pong",
+                        "timestamp": datetime.utcnow().isoformat()
+                    }, connection_id)
+
+                elif message.get("type") == "subscribe_workflow":
+                    # Subscribe to specific workflow updates
+                    wf_id = message.get("workflow_id")
+                    if wf_id:
+                        try:
+                            workflow_uuid = UUID(wf_id)
+                            workflow = await db.get(OCRWorkflow, workflow_uuid)
+                            if workflow and workflow.user_id == user.username:
+                                await manager.send_personal_message({
+                                    "type": "workflow_subscribed",
+                                    "workflow_id": str(workflow.id),
+                                    "status": workflow.status
+                                }, connection_id)
+                            else:
+                                await manager.send_personal_message({
+                                    "type": "error",
+                                    "message": "Workflow not found or access denied"
+                                }, connection_id)
+                        except ValueError:
+                            await manager.send_personal_message({
+                                "type": "error",
+                                "message": "Invalid workflow_id format"
+                            }, connection_id)
+
+                else:
+                    await manager.send_personal_message({
+                        "type": "error",
+                        "message": f"Unknown message type: {message.get('type')}"
+                    }, connection_id)
+
+            except WebSocketDisconnect:
+                break
+            except json.JSONDecodeError:
+                await manager.send_personal_message({
+                    "type": "error",
+                    "message": "Invalid JSON format"
+                }, connection_id)
+            except Exception as e:
+                logger.error(f"Error handling OCR progress WebSocket message: {e}")
+                await manager.send_personal_message({
+                    "type": "error",
+                    "message": str(e)
+                }, connection_id)
+
+    except WebSocketDisconnect:
+        logger.info(f"OCR progress WebSocket disconnected: {connection_id}")
+    except Exception as e:
+        logger.error(f"OCR progress WebSocket error: {e}")
     finally:
         manager.disconnect(connection_id)
 
