@@ -113,92 +113,58 @@ async def _process_ocr_workflow_async(
                 with open(image_path, 'rb') as f:
                     image_data = base64.b64encode(f.read()).decode('utf-8')
 
-                # OCR with Ollama
-                # Specialized prompt for DeepSeek-OCR / Vision models
-                prompt = """
-                Perform high-quality OCR on this image. 
-                1. Extract ALL text exactly as it appears.
-                2. Preserve formatting (headers, lists, tables) using Markdown.
-                3. If there are tables, format them as Markdown tables.
-                4. Do not add conversational filler (like "Here is the text"). Just provide the Markdown content.
-                """
+                # OCR with Ollama - use the selected model directly
+                # The intelligent model selection system handles availability
+                selected_model = ocr_model
+
+                # Use appropriate prompt based on model type
+                if 'llama3.2-vision' in selected_model.lower():
+                    prompt = """
+                    Analyze this image and extract all visible text. Convert the text to clean, well-formatted Markdown.
+
+                    Instructions:
+                    - Extract ALL text from the image exactly as it appears
+                    - Use proper Markdown formatting for headers, lists, tables, etc.
+                    - For tables, use Markdown table syntax
+                    - Preserve the original structure and formatting as much as possible
+                    - Do not add any introductory text or explanations
+                    - Return only the extracted text in Markdown format
+                    """
+                else:  # deepseek-ocr and other models
+                    prompt = """
+                    Perform high-quality OCR on this image.
+                    1. Extract ALL text exactly as it appears.
+                    2. Preserve formatting (headers, lists, tables) using Markdown.
+                    3. If there are tables, format them as Markdown tables.
+                    4. Do not add conversational filler (like "Here is the text"). Just provide the Markdown content.
+                    """
 
                 logger.info(f"Sending OCR request to Ollama model {ocr_model} for image {os.path.basename(image_path)}")
                 await _log_workflow_progress(session, workflow_uuid, batch.id, None,
                                            f"Sending image {i+1} to {ocr_model}...", "info", user_id)
 
                 try:
-                    # First check if the model is available
-                    try:
-                        models_response = await ollama_client.list_models()
-                        available_models = [model.get('name', '') for model in models_response.get('models', [])]
-
-                        # Check if specific version exists or if we need to pull it
-                        # More flexible matching: check if the requested model matches any available model
-                        model_available = any(
-                            available_model.startswith(ocr_model) or
-                            available_model == ocr_model or
-                            (ocr_model in available_model and ':' in available_model)
-                            for available_model in available_models
-                        )
-
-                        if not model_available:
-                            logger.warning(f"Model {ocr_model} not available locally. Available: {available_models}")
-
-                            # Try to pull it if it's a known model
-                            if 'deepseek-ocr' in ocr_model or 'llama3.2-vision' in ocr_model:
-                                try:
-                                    await _log_workflow_progress(session, workflow_uuid, batch.id, None,
-                                                               f"Pulling model {ocr_model}...", "info", user_id)
-                                    await ollama_client.pull_model(ocr_model)
-                                    logger.info(f"Successfully pulled model {ocr_model}")
-                                except Exception as pull_error:
-                                    logger.error(f"Failed to pull model {ocr_model}: {pull_error}")
-                                    # Fallback logic continues below
-
-                            # Re-check availability or find fallback
-                            models_response = await ollama_client.list_models()
-                            available_models = [model.get('name', '') for model in models_response.get('models', [])]
-
-                            # Check again with flexible matching
-                            model_available = any(
-                                available_model.startswith(ocr_model) or
-                                available_model == ocr_model or
-                                (ocr_model in available_model and ':' in available_model)
-                                for available_model in available_models
-                            )
-
-                            if not model_available:
-                                # Try to find a suitable vision-capable model
-                                vision_models = [m for m in available_models if any(keyword in m.lower() for keyword in ['vision', 'vl', 'llava', 'qwen2.5vl', 'llama3.2-vision', 'deepseek-ocr'])]
-                                if vision_models:
-                                    # Prefer llama3.2-vision or deepseek-ocr as primary fallback
-                                    preferred_models = [m for m in vision_models if 'deepseek-ocr' in m or 'llama3.2-vision' in m]
-                                    fallback_model = preferred_models[0] if preferred_models else vision_models[0]
-                                    logger.info(f"Using fallback vision model: {fallback_model}")
-                                    await _log_workflow_progress(session, workflow_uuid, batch.id, None,
-                                                               f"Model {ocr_model} unavailable, using fallback: {fallback_model}", "warning", user_id)
-                                    ocr_model = fallback_model
-                                else:
-                                    raise Exception(f"Model {ocr_model} not available and no suitable vision-capable fallback found.")
-
-                        # Log the model being used
-                        logger.info(f"Starting OCR processing with model: {ocr_model}")
-                    except Exception as model_check_error:
-                        logger.warning(f"Could not check available models: {model_check_error}")
+                    # Use shorter timeout for OCR operations (2 minutes total, 90 seconds read)
+                    logger.info(f"Making Ollama API call to {selected_model} with image size: {len(image_data)} chars")
+                    start_time = datetime.utcnow()
 
                     response = await ollama_client.generate(
                         prompt=prompt,
-                        model=ocr_model,
+                        model=selected_model,
                         options={
                             "images": [image_data],
                             "temperature": 0.1,
                             "top_p": 0.9,
                             "num_ctx": 4096  # Ensure enough context for full page
-                        }
+                        },
+                        timeout_ms=120000  # 2 minutes timeout for OCR
                     )
 
-                    logger.info(f"Received OCR response from Ollama")
+                    end_time = datetime.utcnow()
+                    duration = (end_time - start_time).total_seconds()
+                    logger.info(f"Received OCR response from Ollama in {duration:.2f} seconds")
+                    logger.info(f"Response keys: {list(response.keys()) if response else 'None'}")
+                    logger.info(f"Response has 'response' key: {'response' in response if response else False}")
 
                     ocr_text = response.get('response', '').strip()
 
@@ -208,11 +174,25 @@ async def _process_ocr_workflow_async(
                         await _log_workflow_progress(session, workflow_uuid, batch.id, None,
                                                    f"Warning: No text extracted from image {i+1}", "warning", user_id)
 
-                except Exception as ocr_error:
-                    logger.error(f"OCR API call failed for image {os.path.basename(image_path)}: {ocr_error}")
-                    ocr_text = f"[OCR failed for {os.path.basename(image_path)}: {str(ocr_error)}]"
+                except asyncio.TimeoutError as timeout_error:
+                    logger.error(f"OCR API call timed out for image {os.path.basename(image_path)} after 2 minutes")
+                    ocr_text = f"[OCR timed out for {os.path.basename(image_path)}: Operation took longer than 2 minutes]"
                     await _log_workflow_progress(session, workflow_uuid, batch.id, None,
-                                               f"OCR API failed for image {i+1}: {str(ocr_error)}", "error", user_id)
+                                               f"OCR API timed out for image {i+1}: Operation exceeded 2-minute limit", "error", user_id)
+
+                except Exception as ocr_error:
+                    error_msg = str(ocr_error)
+                    logger.error(f"OCR API call failed for image {os.path.basename(image_path)}: {error_msg}")
+
+                    # Check if it's a timeout-related error
+                    if "timeout" in error_msg.lower() or "time" in error_msg.lower():
+                        ocr_text = f"[OCR timed out for {os.path.basename(image_path)}: {error_msg}]"
+                        await _log_workflow_progress(session, workflow_uuid, batch.id, None,
+                                                   f"OCR API timed out for image {i+1}: {error_msg}", "error", user_id)
+                    else:
+                        ocr_text = f"[OCR failed for {os.path.basename(image_path)}: {error_msg}]"
+                        await _log_workflow_progress(session, workflow_uuid, batch.id, None,
+                                                   f"OCR API failed for image {i+1}: {error_msg}", "error", user_id)
 
                 # Create image record
                 image_record = OCRImage(
@@ -222,7 +202,7 @@ async def _process_ocr_workflow_async(
                     file_path=image_path,
                     status="completed",
                     processing_order=i,
-                    ocr_model_used=ocr_model,
+                    ocr_model_used=selected_model,
                     raw_markdown=ocr_text,
                     processed_markdown=ocr_text,  # For now, same as raw
                     confidence_score=0.8,  # TODO: Extract from Ollama response if available
@@ -269,8 +249,26 @@ async def _process_ocr_workflow_async(
         batch.completed_at = datetime.utcnow()
         await session.commit()
 
-        # Update workflow completion - aggregate stats from all batches
-        workflow.status = "completed"
+        # Determine workflow status based on processing results
+        if processed_count == 0:
+            # No images were processed successfully
+            workflow.status = "failed"
+            workflow.error_message = "No images were successfully processed"
+            await _log_workflow_progress(session, workflow_uuid, batch.id, None,
+                                       "OCR workflow failed: No images were successfully processed", "error", user_id)
+        elif processed_count < len(image_paths):
+            # Some images failed but some succeeded
+            workflow.status = "completed"
+            workflow.error_message = f"Partial success: {processed_count}/{len(image_paths)} images processed"
+            await _log_workflow_progress(session, workflow_uuid, batch.id, None,
+                                       f"OCR workflow completed with partial success: {processed_count}/{len(image_paths)} images processed", "warning", user_id)
+        else:
+            # All images processed successfully
+            workflow.status = "completed"
+            await _log_workflow_progress(session, workflow_uuid, batch.id, None,
+                                       f"OCR workflow completed successfully: {processed_count} images processed", "success", user_id)
+
+        # Update workflow completion stats
         workflow.total_images = len(image_paths)
         workflow.processed_images = processed_count
         workflow.total_pages = processed_count
@@ -278,7 +276,7 @@ async def _process_ocr_workflow_async(
         await session.commit()
 
         # Broadcast WebSocket update for workflow completion
-        await _broadcast_workflow_update(session, workflow_uuid, "completed", user_id)
+        await _broadcast_workflow_update(session, workflow_uuid, workflow.status, user_id)
 
         # Log completion
         await _log_workflow_progress(session, workflow_uuid, batch.id, None,

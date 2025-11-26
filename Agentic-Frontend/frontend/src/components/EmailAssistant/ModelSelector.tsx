@@ -51,6 +51,7 @@ interface ModelSelectorProps {
   disabled?: boolean;
   showStatus?: boolean;
   capabilityFilter?: string; // Optional capability filter (e.g., 'vision' for OCR)
+  placeholderText?: string; // Custom placeholder text when no model is selected
 }
 
 interface OllamaModel {
@@ -110,7 +111,8 @@ const ModelSelector: React.FC<ModelSelectorProps> = ({
   onModelChange,
   disabled = false,
   showStatus = true,
-  capabilityFilter
+  capabilityFilter,
+  placeholderText = "Select AI Model"
 }) => {
   const [modelStatus, setModelStatus] = useState<'idle' | 'switching' | 'error'>('idle');
   const [enhancedModelInfo, setEnhancedModelInfo] = useState<any>(null);
@@ -446,7 +448,7 @@ const ModelSelector: React.FC<ModelSelectorProps> = ({
           >
             <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, flex: 1 }}>
               <Typography variant="body2" sx={{ fontSize: '0.9rem', fontWeight: 500 }}>
-                {currentModelInfo.displayName || selectedModel || 'Select AI Model'}
+                {currentModelInfo.displayName || selectedModel || placeholderText}
               </Typography>
               {currentModelInfo.recommended && (
                 <Chip label="★" size="small" color="primary" sx={{ height: 16, fontSize: '0.6rem' }} />

@@ -82,13 +82,14 @@ const OCRModelSelector: React.FC<OCRModelSelectorProps> = ({
       disabled={disabled}
       showStatus={true}
       capabilityFilter="vision"
+      placeholderText="Select OCR/Vision Model"
     />
   );
 };
 
 const OCRWorkflow: React.FC = () => {
   const theme = useTheme();
-  const [selectedModel, setSelectedModel] = useState<string>('deepseek-ocr');
+  const [selectedModel, setSelectedModel] = useState<string>('');
   const [images, setImages] = useState<File[]>([]);
   const [batchName, setBatchName] = useState<string>('Document Scan');
   const [isProcessing, setIsProcessing] = useState<boolean>(false);
@@ -280,6 +281,43 @@ const OCRWorkflow: React.FC = () => {
       // Store unsubscribe function for cleanup
       webSocketUnsubscribeRef.current = unsubscribe;
 
+      // Poll for results more aggressively
+      const pollInterval = setInterval(async () => {
+        try {
+          console.log('Polling workflow status...');
+          const workflowData = await apiClient.getOCRWorkflowStatus(workflowResponse.workflow_id);
+          console.log('Poll result:', workflowData.status, workflowData.progress);
+
+          if (workflowData.status === 'completed') {
+            console.log('Poll: Workflow completed');
+            clearInterval(pollInterval);
+            handleWorkflowCompletion(workflowResponse.workflow_id);
+          } else if (workflowData.status === 'failed') {
+            console.log('Poll: Workflow failed');
+            clearInterval(pollInterval);
+            setError('OCR processing failed');
+            setIsProcessing(false);
+            setStatus('failed');
+            setProgress(null);
+            loadLogs(true);
+          } else {
+            // Update progress
+            const totalImages = workflowData.progress?.total_images || images.length;
+            const processedImages = workflowData.progress?.processed_images || 0;
+            setProgress({
+              current: processedImages,
+              total: totalImages,
+              message: `Processing ${processedImages}/${totalImages} images...`
+            });
+
+            // Load logs periodically during processing
+            loadLogs(true);
+          }
+        } catch (err) {
+          console.error('Status check failed:', err);
+        }
+      }, 5000); // Poll every 5 seconds as fallback to WebSocket
+
     } catch (err: any) {
       console.error('OCR workflow failed:', err);
       const errorMessage = err.response?.data?.detail || err.message || 'OCR workflow failed';
@@ -355,6 +393,26 @@ const OCRWorkflow: React.FC = () => {
         console.log('loadLogs: Setting loading to false');
         setLogsLoading(false);
       }
+    }
+  };
+
+  const handleWorkflowCompletion = async (workflowId: string) => {
+    console.log('handleWorkflowCompletion: Loading results for workflow:', workflowId);
+    try {
+      const resultResponse = await apiClient.getOCRWorkflowResults(workflowId);
+      setResults(resultResponse.combined_markdown);
+      setStatus('completed');
+      setProgress(null);
+      setIsProcessing(false);
+      setShowResults(true);
+      loadLogs(true);
+      console.log('handleWorkflowCompletion: Results loaded successfully');
+    } catch (err) {
+      console.error('handleWorkflowCompletion: Failed to load results:', err);
+      setError('Failed to load OCR results');
+      setIsProcessing(false);
+      setStatus('error');
+      setProgress(null);
     }
   };
 

@@ -218,19 +218,13 @@ class ConnectionManager:
             for connection_id, user in self.connection_users.items():
                 # Check if this user should receive workflow updates
                 if user.username == user_id:
-                    # If workflow_id is specified, check if connection is subscribed to OCR progress
-                    if workflow_id:
-                        # For OCR workflows, check if connection is subscribed to OCR progress
-                        if connection_id.startswith("ocr_progress_"):
-                            eligible_connections.append(connection_id)
-                    else:
-                        # Broadcast to all user connections
-                        eligible_connections.append(connection_id)
+                    # Broadcast to all user connections (including OCR progress connections)
+                    eligible_connections.append(connection_id)
 
             # Broadcast to eligible connections
             if eligible_connections:
                 websocket_message = {
-                    "type": "ocr_workflow_update",
+                    "type": "ocr_workflow_status",
                     "data": message,
                     "timestamp": message.get("timestamp") or datetime.utcnow().isoformat()
                 }
@@ -587,48 +581,57 @@ async def websocket_ocr_progress(
         # Send initial status if workflow_id is provided
         if workflow_id:
             try:
+                from app.db.database import get_session_context
                 from app.db.models.ocr_workflow import OCRWorkflow, OCRBatch
-                workflow_uuid = UUID(workflow_id)
-                workflow = await db.get(OCRWorkflow, workflow_uuid)
-                if workflow and workflow.user_id == user.username:
-                    # Get batch information
-                    batches_result = await db.execute(
-                        select(OCRBatch).where(OCRBatch.workflow_id == workflow_uuid)
-                    )
-                    batches = batches_result.scalars().all()
 
-                    await manager.send_personal_message({
-                        "type": "ocr_workflow_status",
-                        "workflow_id": str(workflow.id),
-                        "status": workflow.status,
-                        "progress": {
-                            "total_images": workflow.total_images,
-                            "processed_images": workflow.processed_images,
-                            "total_pages": workflow.total_pages
-                        },
-                        "batches": [
-                            {
-                                "batch_id": str(batch.id),
-                                "batch_name": batch.batch_name,
-                                "status": batch.status,
-                                "total_images": batch.total_images,
-                                "processed_images": batch.processed_images,
-                                "page_count": batch.page_count
-                            }
-                            for batch in batches
-                        ],
-                        "started_at": workflow.started_at.isoformat() if workflow.started_at else None,
-                        "completed_at": workflow.completed_at.isoformat() if workflow.completed_at else None
-                    }, connection_id)
-                else:
-                    await manager.send_personal_message({
-                        "type": "error",
-                        "message": "Workflow not found or access denied"
-                    }, connection_id)
+                async with get_session_context() as db:
+                    workflow_uuid = UUID(workflow_id)
+                    workflow = await db.get(OCRWorkflow, workflow_uuid)
+                    if workflow and workflow.user_id == user.username:
+                        # Get batch information
+                        batches_result = await db.execute(
+                            select(OCRBatch).where(OCRBatch.workflow_id == workflow_uuid)
+                        )
+                        batches = batches_result.scalars().all()
+
+                        await manager.send_personal_message({
+                            "type": "ocr_workflow_status",
+                            "workflow_id": str(workflow.id),
+                            "status": workflow.status,
+                            "progress": {
+                                "total_images": workflow.total_images,
+                                "processed_images": workflow.processed_images,
+                                "total_pages": workflow.total_pages
+                            },
+                            "batches": [
+                                {
+                                    "batch_id": str(batch.id),
+                                    "batch_name": batch.batch_name,
+                                    "status": batch.status,
+                                    "total_images": batch.total_images,
+                                    "processed_images": batch.processed_images,
+                                    "page_count": batch.page_count
+                                }
+                                for batch in batches
+                            ],
+                            "started_at": workflow.started_at.isoformat() if workflow.started_at else None,
+                            "completed_at": workflow.completed_at.isoformat() if workflow.completed_at else None
+                        }, connection_id)
+                    else:
+                        await manager.send_personal_message({
+                            "type": "error",
+                            "message": "Workflow not found or access denied"
+                        }, connection_id)
             except ValueError:
                 await manager.send_personal_message({
                     "type": "error",
                     "message": "Invalid workflow_id format"
+                }, connection_id)
+            except Exception as e:
+                logger.error(f"Error sending initial OCR workflow status: {e}")
+                await manager.send_personal_message({
+                    "type": "error",
+                    "message": f"Failed to load workflow status: {str(e)}"
                 }, connection_id)
 
         # Keep connection alive and handle incoming messages
