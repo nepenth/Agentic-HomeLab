@@ -8,10 +8,9 @@ from uuid import UUID
 import asyncio
 from datetime import datetime
 from sqlalchemy import select, update
-from sqlalchemy.ext.asyncio import AsyncSession
 from app.celery_app import celery_app
-from app.db.database import get_session_context
-from app.services.ollama_client import ollama_client
+from app.db.database import get_celery_db_session
+from app.services.ollama_client import sync_ollama_client
 from app.db.models.ocr_workflow import OCRWorkflow, OCRBatch, OCRImage, OCRWorkflowLog
 from app.utils.logging import get_logger
 from app.services.pubsub_service import pubsub_service
@@ -40,281 +39,277 @@ class OCRTask(Task):
 def process_ocr_workflow_task(self, workflow_id: str, ocr_model: str, image_paths: List[str], batch_name: str = "Default Batch", user_id: str = "system"):
     """Celery task for processing OCR workflow."""
     logger.info(f"OCR task called with workflow_id={workflow_id}, user_id={user_id}, model={ocr_model}, images={len(image_paths)}")
-    return asyncio.run(_process_ocr_workflow_async(self, workflow_id, ocr_model, image_paths, batch_name, user_id))
+
+    # Use synchronous database session for Celery tasks
+    with get_celery_db_session() as db:
+        return _process_ocr_workflow_sync(self, db, workflow_id, ocr_model, image_paths, batch_name, user_id)
 
 
-async def _process_ocr_workflow_async(
+def _process_ocr_workflow_sync(
     task: OCRTask,
+    db,
     workflow_id: str,
     ocr_model: str,
     image_paths: List[str],
     batch_name: str,
     user_id: str
 ) -> Dict[str, Any]:
-    """Async implementation of OCR workflow processing."""
+    """Synchronous implementation of OCR workflow processing."""
     logger.info(f"Starting OCR workflow processing for workflow {workflow_id}, user {user_id}, model {ocr_model}, {len(image_paths)} images")
     workflow_uuid = UUID(workflow_id)
 
-    async with get_session_context() as session:
-        # Get or create workflow
-        workflow = await session.get(OCRWorkflow, workflow_uuid)
-        if not workflow:
-            logger.info(f"Creating new workflow {workflow_id}")
-            workflow = OCRWorkflow(
-                id=workflow_uuid,
-                user_id=user_id,
-                workflow_name="OCR Workflow",
-                ocr_model=ocr_model,
-                status="running"
-            )
-            session.add(workflow)
-            await session.commit()
-            await session.refresh(workflow)
-        else:
-            logger.info(f"Found existing workflow {workflow_id}")
-
-        workflow.status = "running"
-        workflow.started_at = datetime.utcnow()
-        workflow.total_images = len(image_paths)  # Set total images for progress tracking
-        await session.commit()
-
-        # Create initial log
-        await _log_workflow_progress(session, workflow_uuid, None, None,
-                                   f"Started OCR processing for {len(image_paths)} images", "info", user_id)
-
-        # Create batch
-        batch = OCRBatch(
-            workflow_id=workflow_uuid,
-            batch_name=batch_name,
-            total_images=len(image_paths),
-            status="processing"
+    # Get or create workflow
+    workflow = db.query(OCRWorkflow).filter(OCRWorkflow.id == workflow_uuid).first()
+    if not workflow:
+        logger.info(f"Creating new workflow {workflow_id}")
+        workflow = OCRWorkflow(
+            id=workflow_uuid,
+            user_id=user_id,
+            workflow_name="OCR Workflow",
+            ocr_model=ocr_model,
+            status="running"
         )
-        session.add(batch)
-        await session.commit()
-        await session.refresh(batch)
+        db.add(workflow)
+        db.commit()
+        db.refresh(workflow)
+    else:
+        logger.info(f"Found existing workflow {workflow_id}")
 
-        # Process images
-        combined_markdown = ""
-        processed_count = 0
+    workflow.status = "running"
+    workflow.started_at = datetime.utcnow()
+    workflow.total_images = len(image_paths)  # Set total images for progress tracking
+    db.commit()
 
-        for i, image_path in enumerate(image_paths):
+    # Create initial log
+    _log_workflow_progress_sync(db, workflow_uuid, None, None,
+                               f"Started OCR processing for {len(image_paths)} images", "info", user_id)
+
+    # Create batch
+    batch = OCRBatch(
+        workflow_id=workflow_uuid,
+        batch_name=batch_name,
+        total_images=len(image_paths),
+        status="processing"
+    )
+    db.add(batch)
+    db.commit()
+    db.refresh(batch)
+
+    # Process images
+    combined_markdown = ""
+    processed_count = 0
+
+    for i, image_path in enumerate(image_paths):
+        try:
+            # Update progress
+            task.update_state(
+                state='PROGRESS',
+                meta={
+                    'current': i,
+                    'total': len(image_paths),
+                    'message': f'Processing image {i+1}/{len(image_paths)}'
+                }
+            )
+
+            # Load image
+            with open(image_path, 'rb') as f:
+                image_data = base64.b64encode(f.read()).decode('utf-8')
+
+            # OCR with Ollama - use the selected model directly
+            # The intelligent model selection system handles availability
+            selected_model = ocr_model
+
+            # Use appropriate prompt based on model type
+            if 'llama3.2-vision' in selected_model.lower():
+                prompt = """
+                Analyze this image and extract all visible text. Convert the text to clean, well-formatted Markdown.
+
+                Instructions:
+                - Extract ALL text from the image exactly as it appears
+                - Use proper Markdown formatting for headers, lists, tables, etc.
+                - For tables, use Markdown table syntax
+                - Preserve the original structure and formatting as much as possible
+                - Do not add any introductory text or explanations
+                - Return only the extracted text in Markdown format
+                """
+            else:  # deepseek-ocr and other models
+                prompt = """
+                Perform high-quality OCR on this image.
+                1. Extract ALL text exactly as it appears.
+                2. Preserve formatting (headers, lists, tables) using Markdown.
+                3. If there are tables, format them as Markdown tables.
+                4. Do not add conversational filler (like "Here is the text"). Just provide the Markdown content.
+                """
+
+            logger.info(f"Sending OCR request to Ollama model {ocr_model} for image {os.path.basename(image_path)}")
+            _log_workflow_progress_sync(db, workflow_uuid, batch.id, None,
+                                       f"Sending image {i+1} to {ocr_model}...", "info", user_id)
+
             try:
-                # Update progress
-                task.update_state(
-                    state='PROGRESS',
-                    meta={
-                        'current': i,
-                        'total': len(image_paths),
-                        'message': f'Processing image {i+1}/{len(image_paths)}'
+                # Use shorter timeout for OCR operations (2 minutes total, 90 seconds read)
+                logger.info(f"Making Ollama API call to {selected_model} with image size: {len(image_data)} chars")
+                start_time = datetime.utcnow()
+
+                response = sync_ollama_client.generate(
+                    prompt=prompt,
+                    model=selected_model,
+                    options={
+                        "images": [image_data],
+                        "temperature": 0.1,
+                        "top_p": 0.9,
+                        "num_ctx": 4096  # Ensure enough context for full page
                     }
                 )
 
-                # Load image
-                with open(image_path, 'rb') as f:
-                    image_data = base64.b64encode(f.read()).decode('utf-8')
+                end_time = datetime.utcnow()
+                duration = (end_time - start_time).total_seconds()
+                logger.info(f"Received OCR response from Ollama in {duration:.2f} seconds")
+                logger.info(f"Response keys: {list(response.keys()) if response else 'None'}")
+                logger.info(f"Response has 'response' key: {'response' in response if response else False}")
 
-                # OCR with Ollama - use the selected model directly
-                # The intelligent model selection system handles availability
-                selected_model = ocr_model
+                ocr_text = response.get('response', '').strip()
 
-                # Use appropriate prompt based on model type
-                if 'llama3.2-vision' in selected_model.lower():
-                    prompt = """
-                    Analyze this image and extract all visible text. Convert the text to clean, well-formatted Markdown.
+                if not ocr_text:
+                    logger.warning(f"Empty OCR response for image {os.path.basename(image_path)}")
+                    ocr_text = f"[No text extracted from {os.path.basename(image_path)}]"
+                    _log_workflow_progress_sync(db, workflow_uuid, batch.id, None,
+                                               f"Warning: No text extracted from image {i+1}", "warning", user_id)
 
-                    Instructions:
-                    - Extract ALL text from the image exactly as it appears
-                    - Use proper Markdown formatting for headers, lists, tables, etc.
-                    - For tables, use Markdown table syntax
-                    - Preserve the original structure and formatting as much as possible
-                    - Do not add any introductory text or explanations
-                    - Return only the extracted text in Markdown format
-                    """
-                else:  # deepseek-ocr and other models
-                    prompt = """
-                    Perform high-quality OCR on this image.
-                    1. Extract ALL text exactly as it appears.
-                    2. Preserve formatting (headers, lists, tables) using Markdown.
-                    3. If there are tables, format them as Markdown tables.
-                    4. Do not add conversational filler (like "Here is the text"). Just provide the Markdown content.
-                    """
+            except Exception as ocr_error:
+                error_msg = str(ocr_error)
+                logger.error(f"OCR API call failed for image {os.path.basename(image_path)}: {error_msg}")
 
-                logger.info(f"Sending OCR request to Ollama model {ocr_model} for image {os.path.basename(image_path)}")
-                await _log_workflow_progress(session, workflow_uuid, batch.id, None,
-                                           f"Sending image {i+1} to {ocr_model}...", "info", user_id)
+                # Check if it's a timeout-related error
+                if "timeout" in error_msg.lower() or "time" in error_msg.lower():
+                    ocr_text = f"[OCR timed out for {os.path.basename(image_path)}: {error_msg}]"
+                    _log_workflow_progress_sync(db, workflow_uuid, batch.id, None,
+                                               f"OCR API timed out for image {i+1}: {error_msg}", "error", user_id)
+                else:
+                    ocr_text = f"[OCR failed for {os.path.basename(image_path)}: {error_msg}]"
+                    _log_workflow_progress_sync(db, workflow_uuid, batch.id, None,
+                                               f"OCR API failed for image {i+1}: {error_msg}", "error", user_id)
 
-                try:
-                    # Use shorter timeout for OCR operations (2 minutes total, 90 seconds read)
-                    logger.info(f"Making Ollama API call to {selected_model} with image size: {len(image_data)} chars")
-                    start_time = datetime.utcnow()
+            # Create image record
+            image_record = OCRImage(
+                batch_id=batch.id,
+                workflow_id=workflow_uuid,
+                original_filename=os.path.basename(image_path),
+                file_path=image_path,
+                status="completed",
+                processing_order=i,
+                ocr_model_used=selected_model,
+                raw_markdown=ocr_text,
+                processed_markdown=ocr_text,  # For now, same as raw
+                confidence_score=0.8,  # TODO: Extract from Ollama response if available
+                processed_at=datetime.utcnow()
+            )
 
-                    response = await ollama_client.generate(
-                        prompt=prompt,
-                        model=selected_model,
-                        options={
-                            "images": [image_data],
-                            "temperature": 0.1,
-                            "top_p": 0.9,
-                            "num_ctx": 4096  # Ensure enough context for full page
-                        },
-                        timeout_ms=120000  # 2 minutes timeout for OCR
-                    )
+            db.add(image_record)
+            combined_markdown += f"\n\n--- Page {i+1} ---\n\n"
+            combined_markdown += ocr_text
+            processed_count += 1
 
-                    end_time = datetime.utcnow()
-                    duration = (end_time - start_time).total_seconds()
-                    logger.info(f"Received OCR response from Ollama in {duration:.2f} seconds")
-                    logger.info(f"Response keys: {list(response.keys()) if response else 'None'}")
-                    logger.info(f"Response has 'response' key: {'response' in response if response else False}")
+            # Update batch and workflow progress
+            batch.processed_images = processed_count
+            workflow.processed_images = processed_count
+            db.commit()
 
-                    ocr_text = response.get('response', '').strip()
+            # Log progress
+            _log_workflow_progress_sync(db, workflow_uuid, batch.id, None,
+                                       f"Successfully processed image {i+1}/{len(image_paths)}", "success", user_id)
 
-                    if not ocr_text:
-                        logger.warning(f"Empty OCR response for image {os.path.basename(image_path)}")
-                        ocr_text = f"[No text extracted from {os.path.basename(image_path)}]"
-                        await _log_workflow_progress(session, workflow_uuid, batch.id, None,
-                                                   f"Warning: No text extracted from image {i+1}", "warning", user_id)
-
-                except asyncio.TimeoutError as timeout_error:
-                    logger.error(f"OCR API call timed out for image {os.path.basename(image_path)} after 2 minutes")
-                    ocr_text = f"[OCR timed out for {os.path.basename(image_path)}: Operation took longer than 2 minutes]"
-                    await _log_workflow_progress(session, workflow_uuid, batch.id, None,
-                                               f"OCR API timed out for image {i+1}: Operation exceeded 2-minute limit", "error", user_id)
-
-                except Exception as ocr_error:
-                    error_msg = str(ocr_error)
-                    logger.error(f"OCR API call failed for image {os.path.basename(image_path)}: {error_msg}")
-
-                    # Check if it's a timeout-related error
-                    if "timeout" in error_msg.lower() or "time" in error_msg.lower():
-                        ocr_text = f"[OCR timed out for {os.path.basename(image_path)}: {error_msg}]"
-                        await _log_workflow_progress(session, workflow_uuid, batch.id, None,
-                                                   f"OCR API timed out for image {i+1}: {error_msg}", "error", user_id)
-                    else:
-                        ocr_text = f"[OCR failed for {os.path.basename(image_path)}: {error_msg}]"
-                        await _log_workflow_progress(session, workflow_uuid, batch.id, None,
-                                                   f"OCR API failed for image {i+1}: {error_msg}", "error", user_id)
-
-                # Create image record
-                image_record = OCRImage(
-                    batch_id=batch.id,
-                    workflow_id=workflow_uuid,
-                    original_filename=os.path.basename(image_path),
-                    file_path=image_path,
-                    status="completed",
-                    processing_order=i,
-                    ocr_model_used=selected_model,
-                    raw_markdown=ocr_text,
-                    processed_markdown=ocr_text,  # For now, same as raw
-                    confidence_score=0.8,  # TODO: Extract from Ollama response if available
-                    processed_at=datetime.utcnow()
-                )
-
-                session.add(image_record)
-                combined_markdown += f"\n\n--- Page {i+1} ---\n\n"
-                combined_markdown += ocr_text
-                processed_count += 1
-
-                # Update batch and workflow progress
-                batch.processed_images = processed_count
-                workflow.processed_images = processed_count
-                await session.commit()
-
-                # Log progress
-                await _log_workflow_progress(session, workflow_uuid, batch.id, None,
-                                           f"Successfully processed image {i+1}/{len(image_paths)}", "success", user_id)
-
-            except Exception as e:
-                logger.error(f"Failed to process image {image_path}: {e}")
-
-                # Create failed image record
-                image_record = OCRImage(
-                    batch_id=batch.id,
-                    workflow_id=workflow_uuid,
-                    original_filename=os.path.basename(image_path),
-                    file_path=image_path,
-                    status="failed",
-                    processing_order=i,
-                    error_message=str(e)
-                )
-                session.add(image_record)
-                await session.commit() # Commit failure record
-
-                await _log_workflow_progress(session, workflow_uuid, batch.id, None,
-                                           f"Failed to process image {os.path.basename(image_path)}: {e}", "error", user_id)
-
-        # Update batch completion
-        batch.status = "completed"
-        batch.combined_markdown = combined_markdown.strip()
-        batch.page_count = processed_count
-        batch.completed_at = datetime.utcnow()
-        await session.commit()
-
-        # Determine workflow status based on processing results
-        if processed_count == 0:
-            # No images were processed successfully
-            workflow.status = "failed"
-            workflow.error_message = "No images were successfully processed"
-            await _log_workflow_progress(session, workflow_uuid, batch.id, None,
-                                       "OCR workflow failed: No images were successfully processed", "error", user_id)
-        elif processed_count < len(image_paths):
-            # Some images failed but some succeeded
-            workflow.status = "completed"
-            workflow.error_message = f"Partial success: {processed_count}/{len(image_paths)} images processed"
-            await _log_workflow_progress(session, workflow_uuid, batch.id, None,
-                                       f"OCR workflow completed with partial success: {processed_count}/{len(image_paths)} images processed", "warning", user_id)
-        else:
-            # All images processed successfully
-            workflow.status = "completed"
-            await _log_workflow_progress(session, workflow_uuid, batch.id, None,
-                                       f"OCR workflow completed successfully: {processed_count} images processed", "success", user_id)
-
-        # Update workflow completion stats
-        workflow.total_images = len(image_paths)
-        workflow.processed_images = processed_count
-        workflow.total_pages = processed_count
-        workflow.completed_at = datetime.utcnow()
-        await session.commit()
-
-        # Broadcast WebSocket update for workflow completion
-        await _broadcast_workflow_update(session, workflow_uuid, workflow.status, user_id)
-
-        # Log completion
-        await _log_workflow_progress(session, workflow_uuid, batch.id, None,
-                                   f"OCR workflow completed: {processed_count} images processed", "info", user_id)
-
-        # Send notification
-        await _send_completion_notification(session, workflow.user_id, workflow_uuid, batch.id, processed_count)
-
-        # Clean up uploaded images after processing to prevent storage accumulation
-        # Note: Only the processed results (markdown) are stored in the database
-        try:
-            for image_path in image_paths:
-                if os.path.exists(image_path):
-                    os.remove(image_path)
-                    logger.info(f"Cleaned up temporary image file: {image_path}")
         except Exception as e:
-            logger.warning(f"Failed to clean up some image files: {e}")
+            logger.error(f"Failed to process image {image_path}: {e}")
 
-        return {
-            "workflow_id": str(workflow_uuid),
-            "batch_id": str(batch.id),
-            "status": "completed",
-            "processed_images": processed_count,
-            "total_images": len(image_paths),
-            "combined_markdown": combined_markdown.strip()
-        }
+            # Create failed image record
+            image_record = OCRImage(
+                batch_id=batch.id,
+                workflow_id=workflow_uuid,
+                original_filename=os.path.basename(image_path),
+                file_path=image_path,
+                status="failed",
+                processing_order=i,
+                error_message=str(e)
+            )
+            db.add(image_record)
+            db.commit()  # Commit failure record
+
+            _log_workflow_progress_sync(db, workflow_uuid, batch.id, None,
+                                       f"Failed to process image {os.path.basename(image_path)}: {e}", "error", user_id)
+
+    # Update batch completion
+    batch.status = "completed"
+    batch.combined_markdown = combined_markdown.strip()
+    batch.page_count = processed_count
+    batch.completed_at = datetime.utcnow()
+    db.commit()
+
+    # Determine workflow status based on processing results
+    if processed_count == 0:
+        # No images were processed successfully
+        workflow.status = "failed"
+        workflow.error_message = "No images were successfully processed"
+        _log_workflow_progress_sync(db, workflow_uuid, batch.id, None,
+                                   "OCR workflow failed: No images were successfully processed", "error", user_id)
+    elif processed_count < len(image_paths):
+        # Some images failed but some succeeded
+        workflow.status = "completed"
+        workflow.error_message = f"Partial success: {processed_count}/{len(image_paths)} images processed"
+        _log_workflow_progress_sync(db, workflow_uuid, batch.id, None,
+                                   f"OCR workflow completed with partial success: {processed_count}/{len(image_paths)} images processed", "warning", user_id)
+    else:
+        # All images processed successfully
+        workflow.status = "completed"
+        _log_workflow_progress_sync(db, workflow_uuid, batch.id, None,
+                                   f"OCR workflow completed successfully: {processed_count} images processed", "success", user_id)
+
+    # Update workflow completion stats
+    workflow.total_images = len(image_paths)
+    workflow.processed_images = processed_count
+    workflow.total_pages = processed_count
+    workflow.completed_at = datetime.utcnow()
+    db.commit()
+
+    # Broadcast WebSocket update for workflow completion
+    _broadcast_workflow_update_sync(db, workflow_uuid, workflow.status, user_id)
+
+    # Log completion
+    _log_workflow_progress_sync(db, workflow_uuid, batch.id, None,
+                               f"OCR workflow completed: {processed_count} images processed", "info", user_id)
+
+    # Send notification
+    _send_completion_notification_sync(db, workflow.user_id, workflow_uuid, batch.id, processed_count)
+
+    # Clean up uploaded images after processing to prevent storage accumulation
+    # Note: Only the processed results (markdown) are stored in the database
+    try:
+        for image_path in image_paths:
+            if os.path.exists(image_path):
+                os.remove(image_path)
+                logger.info(f"Cleaned up temporary image file: {image_path}")
+    except Exception as e:
+        logger.warning(f"Failed to clean up some image files: {e}")
+
+    return {
+        "workflow_id": str(workflow_uuid),
+        "batch_id": str(batch.id),
+        "status": "completed",
+        "processed_images": processed_count,
+        "total_images": len(image_paths),
+        "combined_markdown": combined_markdown.strip()
+    }
 
 
-async def _log_workflow_progress(
-    session: AsyncSession,
+def _log_workflow_progress_sync(
+    db,
     workflow_id: UUID,
-    batch_id: UUID = None,
-    image_id: UUID = None,
+    batch_id = None,
+    image_id = None,
     message: str = "",
     level: str = "info",
     user_id: str = "system"
 ):
-    """Log workflow progress."""
+    """Log workflow progress synchronously."""
     log_entry = OCRWorkflowLog(
         workflow_id=workflow_id,
         batch_id=batch_id,
@@ -324,31 +319,28 @@ async def _log_workflow_progress(
         message=message,
         workflow_phase="processing"
     )
-    session.add(log_entry)
-    await session.commit()
+    db.add(log_entry)
+    db.commit()
 
 
-async def _broadcast_workflow_update(
-    session: AsyncSession,
+def _broadcast_workflow_update_sync(
+    db,
     workflow_id: UUID,
     status: str,
     user_id: str
 ) -> None:
-    """Broadcast OCR workflow status update via WebSocket."""
+    """Broadcast OCR workflow status update via WebSocket synchronously."""
     try:
         from app.api.routes.websocket import manager
         from app.db.models.ocr_workflow import OCRBatch
 
         # Get updated workflow data
-        workflow = await session.get(OCRWorkflow, workflow_id)
+        workflow = db.query(OCRWorkflow).filter(OCRWorkflow.id == workflow_id).first()
         if not workflow:
             return
 
         # Get batch information
-        batches_result = await session.execute(
-            select(OCRBatch).where(OCRBatch.workflow_id == workflow_id)
-        )
-        batches = batches_result.scalars().all()
+        batches = db.query(OCRBatch).filter(OCRBatch.workflow_id == workflow_id).all()
 
         # Broadcast to WebSocket connections
         message = {
@@ -376,20 +368,20 @@ async def _broadcast_workflow_update(
         }
 
         # Broadcast to all connections subscribed to this workflow
-        await manager.broadcast_workflow_update(message, user_id, str(workflow_id))
+        manager.broadcast_workflow_update(message, user_id, str(workflow_id))
 
     except Exception as e:
         logger.error(f"Failed to broadcast OCR workflow update: {e}")
 
 
-async def _send_completion_notification(
-    session: AsyncSession,
+def _send_completion_notification_sync(
+    db,
     user_id: str,
     workflow_id: UUID,
     batch_id: UUID,
     processed_count: int
 ) -> None:
-    """Send completion notification."""
+    """Send completion notification synchronously."""
     try:
         notification = Notification(
             user_id=user_id,
@@ -402,11 +394,11 @@ async def _send_completion_notification(
                 "processed_count": processed_count
             }
         )
-        session.add(notification)
-        await session.commit()
+        db.add(notification)
+        db.commit()
 
         # Publish to pubsub for real-time updates
-        await pubsub_service.publish(
+        pubsub_service.publish(
             f"user:{user_id}:ocr",
             {
                 "type": "ocr_complete",
