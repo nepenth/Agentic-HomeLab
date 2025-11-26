@@ -114,9 +114,18 @@ async def _process_ocr_workflow_async(
                     image_data = base64.b64encode(f.read()).decode('utf-8')
 
                 # OCR with Ollama
-                prompt = "Extract all text from this image and format it as clean markdown. Preserve structure, tables, and formatting as much as possible."
+                # Specialized prompt for DeepSeek-OCR / Vision models
+                prompt = """
+                Perform high-quality OCR on this image. 
+                1. Extract ALL text exactly as it appears.
+                2. Preserve formatting (headers, lists, tables) using Markdown.
+                3. If there are tables, format them as Markdown tables.
+                4. Do not add conversational filler (like "Here is the text"). Just provide the Markdown content.
+                """
 
                 logger.info(f"Sending OCR request to Ollama model {ocr_model} for image {os.path.basename(image_path)}")
+                await _log_workflow_progress(session, workflow_uuid, batch.id, None,
+                                           f"Sending image {i+1} to {ocr_model}...", "info", user_id)
 
                 try:
                     # First check if the model is available
@@ -124,18 +133,54 @@ async def _process_ocr_workflow_async(
                         models_response = await ollama_client.list_models()
                         available_models = [model.get('name', '') for model in models_response.get('models', [])]
 
-                        if ocr_model not in available_models:
-                            logger.warning(f"Model {ocr_model} not available. Available models: {available_models}")
-                            # Try to find a suitable vision-capable model
-                            vision_models = [m for m in available_models if any(keyword in m.lower() for keyword in ['vision', 'vl', 'llava', 'qwen2.5vl', 'llama3.2-vision'])]
-                            if vision_models:
-                                # Prefer llama3.2-vision as primary fallback
-                                preferred_models = [m for m in vision_models if 'llama3.2-vision' in m]
-                                fallback_model = preferred_models[0] if preferred_models else vision_models[0]
-                                logger.info(f"Using fallback vision model: {fallback_model}")
-                                ocr_model = fallback_model
-                            else:
-                                raise Exception(f"Model {ocr_model} not available and no suitable vision-capable fallback found. Available models: {available_models}")
+                        # Check if specific version exists or if we need to pull it
+                        # More flexible matching: check if the requested model matches any available model
+                        model_available = any(
+                            available_model.startswith(ocr_model) or
+                            available_model == ocr_model or
+                            (ocr_model in available_model and ':' in available_model)
+                            for available_model in available_models
+                        )
+
+                        if not model_available:
+                            logger.warning(f"Model {ocr_model} not available locally. Available: {available_models}")
+
+                            # Try to pull it if it's a known model
+                            if 'deepseek-ocr' in ocr_model or 'llama3.2-vision' in ocr_model:
+                                try:
+                                    await _log_workflow_progress(session, workflow_uuid, batch.id, None,
+                                                               f"Pulling model {ocr_model}...", "info", user_id)
+                                    await ollama_client.pull_model(ocr_model)
+                                    logger.info(f"Successfully pulled model {ocr_model}")
+                                except Exception as pull_error:
+                                    logger.error(f"Failed to pull model {ocr_model}: {pull_error}")
+                                    # Fallback logic continues below
+
+                            # Re-check availability or find fallback
+                            models_response = await ollama_client.list_models()
+                            available_models = [model.get('name', '') for model in models_response.get('models', [])]
+
+                            # Check again with flexible matching
+                            model_available = any(
+                                available_model.startswith(ocr_model) or
+                                available_model == ocr_model or
+                                (ocr_model in available_model and ':' in available_model)
+                                for available_model in available_models
+                            )
+
+                            if not model_available:
+                                # Try to find a suitable vision-capable model
+                                vision_models = [m for m in available_models if any(keyword in m.lower() for keyword in ['vision', 'vl', 'llava', 'qwen2.5vl', 'llama3.2-vision', 'deepseek-ocr'])]
+                                if vision_models:
+                                    # Prefer llama3.2-vision or deepseek-ocr as primary fallback
+                                    preferred_models = [m for m in vision_models if 'deepseek-ocr' in m or 'llama3.2-vision' in m]
+                                    fallback_model = preferred_models[0] if preferred_models else vision_models[0]
+                                    logger.info(f"Using fallback vision model: {fallback_model}")
+                                    await _log_workflow_progress(session, workflow_uuid, batch.id, None,
+                                                               f"Model {ocr_model} unavailable, using fallback: {fallback_model}", "warning", user_id)
+                                    ocr_model = fallback_model
+                                else:
+                                    raise Exception(f"Model {ocr_model} not available and no suitable vision-capable fallback found.")
 
                         # Log the model being used
                         logger.info(f"Starting OCR processing with model: {ocr_model}")
@@ -148,21 +193,26 @@ async def _process_ocr_workflow_async(
                         options={
                             "images": [image_data],
                             "temperature": 0.1,
-                            "top_p": 0.9
+                            "top_p": 0.9,
+                            "num_ctx": 4096  # Ensure enough context for full page
                         }
                     )
 
-                    logger.info(f"Received OCR response from Ollama: {response}")
+                    logger.info(f"Received OCR response from Ollama")
 
                     ocr_text = response.get('response', '').strip()
 
                     if not ocr_text:
                         logger.warning(f"Empty OCR response for image {os.path.basename(image_path)}")
                         ocr_text = f"[No text extracted from {os.path.basename(image_path)}]"
+                        await _log_workflow_progress(session, workflow_uuid, batch.id, None,
+                                                   f"Warning: No text extracted from image {i+1}", "warning", user_id)
 
                 except Exception as ocr_error:
                     logger.error(f"OCR API call failed for image {os.path.basename(image_path)}: {ocr_error}")
                     ocr_text = f"[OCR failed for {os.path.basename(image_path)}: {str(ocr_error)}]"
+                    await _log_workflow_progress(session, workflow_uuid, batch.id, None,
+                                               f"OCR API failed for image {i+1}: {str(ocr_error)}", "error", user_id)
 
                 # Create image record
                 image_record = OCRImage(
@@ -191,7 +241,7 @@ async def _process_ocr_workflow_async(
 
                 # Log progress
                 await _log_workflow_progress(session, workflow_uuid, batch.id, None,
-                                           f"Processed image {i+1}/{len(image_paths)}", "info", user_id)
+                                           f"Successfully processed image {i+1}/{len(image_paths)}", "success", user_id)
 
             except Exception as e:
                 logger.error(f"Failed to process image {image_path}: {e}")
@@ -207,6 +257,7 @@ async def _process_ocr_workflow_async(
                     error_message=str(e)
                 )
                 session.add(image_record)
+                await session.commit() # Commit failure record
 
                 await _log_workflow_progress(session, workflow_uuid, batch.id, None,
                                            f"Failed to process image {os.path.basename(image_path)}: {e}", "error", user_id)

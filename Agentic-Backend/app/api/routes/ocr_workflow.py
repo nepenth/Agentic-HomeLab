@@ -562,3 +562,184 @@ async def export_workflow_results(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to export workflow results"
         )
+
+# Queue Management Endpoints
+
+@router.get("/queue/status")
+async def get_ocr_queue_status(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db_session)
+):
+    """
+    Get OCR queue status and active workflows.
+    """
+    try:
+        # Get active workflows for the user
+        workflows_result = await db.execute(
+            select(OCRWorkflow).where(
+                and_(
+                    OCRWorkflow.user_id == current_user.username,
+                    OCRWorkflow.status.in_(["pending", "running"])
+                )
+            ).order_by(OCRWorkflow.created_at.desc())
+        )
+        workflows = workflows_result.scalars().all()
+
+        # Get workflow details with batch info
+        queue_items = []
+        for workflow in workflows:
+            batches_result = await db.execute(
+                select(OCRBatch).where(OCRBatch.workflow_id == workflow.id)
+            )
+            batches = batches_result.scalars().all()
+
+            queue_items.append({
+                "workflow_id": str(workflow.id),
+                "workflow_name": workflow.workflow_name,
+                "status": workflow.status,
+                "created_at": workflow.created_at.isoformat() if workflow.created_at else None,
+                "started_at": workflow.started_at.isoformat() if workflow.started_at else None,
+                "total_images": workflow.total_images,
+                "processed_images": workflow.processed_images,
+                "ocr_model": workflow.ocr_model,
+                "batches": [
+                    {
+                        "batch_id": str(batch.id),
+                        "batch_name": batch.batch_name,
+                        "status": batch.status,
+                        "total_images": batch.total_images,
+                        "processed_images": batch.processed_images,
+                        "created_at": batch.created_at.isoformat() if batch.created_at else None,
+                    }
+                    for batch in batches
+                ]
+            })
+
+        return {
+            "queue_items": queue_items,
+            "total_count": len(queue_items),
+            "user_id": current_user.username
+        }
+
+    except Exception as e:
+        logger.error(f"Failed to get OCR queue status: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to get queue status"
+        )
+
+@router.delete("/workflows/{workflow_id}")
+async def cancel_ocr_workflow(
+    workflow_id: str,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db_session)
+):
+    """
+    Cancel an OCR workflow and remove it from queue.
+    """
+    try:
+        workflow_uuid = UUID(workflow_id)
+        workflow = await db.get(OCRWorkflow, workflow_uuid)
+
+        if not workflow or workflow.user_id != current_user.username:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Workflow not found"
+            )
+
+        # Update workflow status
+        workflow.status = "cancelled"
+        workflow.completed_at = datetime.utcnow()
+        workflow.error_message = "Cancelled by user"
+
+        # Update associated batches
+        await db.execute(
+            update(OCRBatch).where(OCRBatch.workflow_id == workflow_uuid)
+            .values(status="cancelled", completed_at=datetime.utcnow())
+        )
+
+        await db.commit()
+
+        logger.info(f"Cancelled OCR workflow {workflow_id} for user {current_user.username}")
+
+        return {
+            "message": "Workflow cancelled successfully",
+            "workflow_id": workflow_id,
+            "status": "cancelled"
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to cancel OCR workflow: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to cancel workflow"
+        )
+
+@router.delete("/queue/clear-all")
+async def clear_all_ocr_workflows(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db_session)
+):
+    """
+    Cancel all active OCR workflows for the current user.
+    """
+    try:
+        # Get all active workflows for the user
+        workflows_result = await db.execute(
+            select(OCRWorkflow.id).where(
+                and_(
+                    OCRWorkflow.user_id == current_user.username,
+                    OCRWorkflow.status.in_(["pending", "running"])
+                )
+            )
+        )
+        workflow_ids = [row[0] for row in workflows_result.fetchall()]
+
+        if not workflow_ids:
+            return {
+                "message": "No active workflows to cancel",
+                "cancelled_count": 0
+            }
+
+        # Update workflows
+        await db.execute(
+            update(OCRWorkflow).where(
+                and_(
+                    OCRWorkflow.user_id == current_user.username,
+                    OCRWorkflow.status.in_(["pending", "running"])
+                )
+            ).values(
+                status="cancelled",
+                completed_at=datetime.utcnow(),
+                error_message="Cancelled by user - clear all"
+            )
+        )
+
+        # Update associated batches
+        await db.execute(
+            update(OCRBatch).where(
+                OCRBatch.workflow_id.in_(workflow_ids)
+            ).values(
+                status="cancelled",
+                completed_at=datetime.utcnow()
+            )
+        )
+
+        await db.commit()
+
+        logger.info(f"Cancelled {len(workflow_ids)} OCR workflows for user {current_user.username}")
+
+        return {
+            "message": f"Cancelled {len(workflow_ids)} workflows successfully",
+            "cancelled_count": len(workflow_ids),
+            "cancelled_workflows": [str(wid) for wid in workflow_ids]
+        }
+
+    except Exception as e:
+        logger.error(f"Failed to clear all OCR workflows: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to clear workflows"
+        )

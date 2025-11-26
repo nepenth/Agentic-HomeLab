@@ -51,6 +51,9 @@ import {
   Settings as SettingsIcon,
   Search as SearchIcon,
   Clear as ClearIcon,
+  Queue as QueueIcon,
+  Delete as DeleteIcon,
+  DeleteSweep as DeleteSweepIcon,
 } from '@mui/icons-material';
 import ReactMarkdown from 'react-markdown';
 import { Prism as SyntaxHighlighter } from 'react-syntax-highlighter';
@@ -84,7 +87,7 @@ const OCRModelSelector: React.FC<OCRModelSelectorProps> = ({
 
 const OCRWorkflow: React.FC = () => {
   const theme = useTheme();
-  const [selectedModel, setSelectedModel] = useState<string>('deepseek-ocr');
+  const [selectedModel, setSelectedModel] = useState<string>('deepseek-ocr:latest');
   const [images, setImages] = useState<File[]>([]);
   const [batchName, setBatchName] = useState<string>('Document Scan');
   const [isProcessing, setIsProcessing] = useState<boolean>(false);
@@ -98,6 +101,9 @@ const OCRWorkflow: React.FC = () => {
   const [logsExpanded, setLogsExpanded] = useState(false);
   const [logs, setLogs] = useState<any[]>([]);
   const [logsLoading, setLogsLoading] = useState(false);
+  const [queueItems, setQueueItems] = useState<any[]>([]);
+  const [queueLoading, setQueueLoading] = useState(false);
+  const [queueExpanded, setQueueExpanded] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Drag and drop handlers
@@ -166,7 +172,7 @@ const OCRWorkflow: React.FC = () => {
       });
 
       // Load initial logs
-      loadLogs();
+      loadLogs(true);
 
       // Poll for results
       const pollInterval = setInterval(async () => {
@@ -193,7 +199,7 @@ const OCRWorkflow: React.FC = () => {
             }
 
             // Load final logs
-            loadLogs();
+            loadLogs(true);
           } else if (workflowData.status === 'failed') {
             clearInterval(pollInterval);
             setError('OCR processing failed');
@@ -202,7 +208,7 @@ const OCRWorkflow: React.FC = () => {
             setProgress(null);
 
             // Load error logs
-            loadLogs();
+            loadLogs(true);
           } else {
             // Update progress
             const totalImages = workflowData.progress?.total_images || images.length;
@@ -214,7 +220,7 @@ const OCRWorkflow: React.FC = () => {
             });
 
             // Load logs periodically during processing
-            loadLogs();
+            loadLogs(true);
           }
         } catch (err) {
           console.error('Status check failed:', err);
@@ -243,17 +249,40 @@ const OCRWorkflow: React.FC = () => {
     }
   };
 
-  const loadLogs = async () => {
-    if (!workflowId) return;
+  const loadLogs = async (background = false) => {
+    if (!workflowId && !background) return;
 
     try {
-      setLogsLoading(true);
-      const logsResponse = await apiClient.getOCRWorkflowLogs(workflowId);
-      setLogs(logsResponse.logs || []);
+      if (!background) setLogsLoading(true);
+
+      let logsResponse;
+      if (workflowId) {
+        logsResponse = await apiClient.getOCRWorkflowLogs(workflowId);
+      } else {
+        // If no workflowId yet, try to get recent logs for current user
+        // This is a fallback for when logs are created before workflowId is set
+        logsResponse = { logs: [] };
+      }
+
+      // Sort logs by timestamp descending if not already
+      const sortedLogs = (logsResponse.logs || []).sort((a: any, b: any) =>
+        new Date(b.timestamp).getTime() - new Date(a.timestamp).getTime()
+      );
+
+      setLogs(sortedLogs);
+
+      // If no logs found and we're in background mode, try again in 1 second
+      if (background && sortedLogs.length === 0 && workflowId) {
+        setTimeout(() => loadLogs(true), 1000);
+      }
     } catch (err) {
       console.error('Failed to load logs:', err);
+      // If background loading fails, retry once after a delay
+      if (background && workflowId) {
+        setTimeout(() => loadLogs(true), 2000);
+      }
     } finally {
-      setLogsLoading(false);
+      if (!background) setLogsLoading(false);
     }
   };
 
@@ -268,6 +297,42 @@ const OCRWorkflow: React.FC = () => {
     setShowResults(false);
     setLogs([]);
     setLogsExpanded(false);
+  };
+
+  const loadQueueStatus = async () => {
+    try {
+      setQueueLoading(true);
+      const queueResponse = await apiClient.getOCRQueueStatus();
+      setQueueItems(queueResponse.queue_items || []);
+    } catch (err) {
+      console.error('Failed to load queue status:', err);
+    } finally {
+      setQueueLoading(false);
+    }
+  };
+
+  const cancelWorkflow = async (workflowId: string) => {
+    try {
+      await apiClient.cancelOCRWorkflow(workflowId);
+      // Reload queue after cancellation
+      await loadQueueStatus();
+      setError('');
+    } catch (err: any) {
+      console.error('Failed to cancel workflow:', err);
+      setError(err.response?.data?.detail || 'Failed to cancel workflow');
+    }
+  };
+
+  const clearAllWorkflows = async () => {
+    try {
+      await apiClient.clearAllOCRWorkflows();
+      // Reload queue after clearing
+      await loadQueueStatus();
+      setError('');
+    } catch (err: any) {
+      console.error('Failed to clear all workflows:', err);
+      setError(err.response?.data?.detail || 'Failed to clear all workflows');
+    }
   };
 
   return (
@@ -628,7 +693,7 @@ const OCRWorkflow: React.FC = () => {
               )}
 
               {/* Logs Section */}
-              {(workflowId || isProcessing) && (
+              {(workflowId || isProcessing || logs.length > 0) && (
                 <Box sx={{ mt: 3 }}>
                   <Divider sx={{ mb: 2 }} />
                   <Box
@@ -643,8 +708,9 @@ const OCRWorkflow: React.FC = () => {
                       '&:hover': { backgroundColor: 'action.hover' }
                     }}
                     onClick={() => {
-                      setLogsExpanded(!logsExpanded);
-                      if (!logsExpanded) {
+                      const newExpanded = !logsExpanded;
+                      setLogsExpanded(newExpanded);
+                      if (newExpanded && logs.length === 0 && !logsLoading) {
                         loadLogs();
                       }
                     }}
@@ -664,6 +730,11 @@ const OCRWorkflow: React.FC = () => {
                       )}
                       {logsLoading && (
                         <CircularProgress size={14} />
+                      )}
+                      {isProcessing && logs.length === 0 && (
+                        <Typography variant="caption" color="text.secondary">
+                          Processing...
+                        </Typography>
                       )}
                     </Box>
                     {logsExpanded ? <ExpandLessIcon /> : <ExpandMoreIcon />}
@@ -726,6 +797,146 @@ const OCRWorkflow: React.FC = () => {
                   </Collapse>
                 </Box>
               )}
+
+              {/* Queue Management Section */}
+              <Box sx={{ mt: 3 }}>
+                <Divider sx={{ mb: 2 }} />
+                <Box
+                  sx={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    cursor: 'pointer',
+                    py: 1,
+                    px: 2,
+                    borderRadius: 1,
+                    '&:hover': { backgroundColor: 'action.hover' }
+                  }}
+                  onClick={() => {
+                    setQueueExpanded(!queueExpanded);
+                    if (!queueExpanded) {
+                      loadQueueStatus();
+                    }
+                  }}
+                >
+                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                    <QueueIcon sx={{ color: 'text.secondary' }} />
+                    <Typography variant="subtitle2" sx={{ fontWeight: 600 }}>
+                      Queue Management
+                    </Typography>
+                    {queueItems.length > 0 && (
+                      <Chip
+                        label={`${queueItems.length} active`}
+                        size="small"
+                        variant="outlined"
+                        color="warning"
+                        sx={{ fontSize: '0.7rem' }}
+                      />
+                    )}
+                    {queueLoading && (
+                      <CircularProgress size={14} />
+                    )}
+                  </Box>
+                  <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                    {queueItems.length > 0 && (
+                      <Tooltip title="Clear All Workflows">
+                        <IconButton
+                          size="small"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            clearAllWorkflows();
+                          }}
+                          sx={{ color: 'error.main' }}
+                        >
+                          <DeleteSweepIcon sx={{ fontSize: '1rem' }} />
+                        </IconButton>
+                      </Tooltip>
+                    )}
+                    <IconButton size="small" onClick={() => loadQueueStatus()}>
+                      <RefreshIcon sx={{ fontSize: '1rem' }} />
+                    </IconButton>
+                    {queueExpanded ? <ExpandLessIcon /> : <ExpandMoreIcon />}
+                  </Box>
+                </Box>
+
+                <Collapse in={queueExpanded} timeout="auto">
+                  <Box sx={{
+                    mt: 2,
+                    maxHeight: 400,
+                    overflow: 'auto',
+                    border: '1px solid rgba(0, 0, 0, 0.08)',
+                    borderRadius: 1,
+                    backgroundColor: 'grey.50'
+                  }}>
+                    {queueLoading ? (
+                      <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'center', py: 4 }}>
+                        <CircularProgress size={20} />
+                        <Typography variant="body2" sx={{ ml: 1 }}>
+                          Loading queue...
+                        </Typography>
+                      </Box>
+                    ) : queueItems.length > 0 ? (
+                      <List dense sx={{ py: 0 }}>
+                        {queueItems.map((item, index) => (
+                          <ListItem key={index} sx={{ py: 1, px: 2, flexDirection: 'column', alignItems: 'stretch' }}>
+                            <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', width: '100%', mb: 1 }}>
+                              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                                <Typography variant="subtitle2" sx={{ fontWeight: 600 }}>
+                                  {item.workflow_name || `Workflow ${item.workflow_id.slice(0, 8)}`}
+                                </Typography>
+                                <Chip
+                                  label={item.status}
+                                  size="small"
+                                  color={item.status === 'running' ? 'warning' : 'default'}
+                                  sx={{ fontSize: '0.7rem' }}
+                                />
+                              </Box>
+                              <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                                <Typography variant="caption" color="text.secondary">
+                                  {item.ocr_model}
+                                </Typography>
+                                <Tooltip title="Cancel Workflow">
+                                  <IconButton
+                                    size="small"
+                                    onClick={() => cancelWorkflow(item.workflow_id)}
+                                    sx={{ color: 'error.main' }}
+                                  >
+                                    <DeleteIcon sx={{ fontSize: '1rem' }} />
+                                  </IconButton>
+                                </Tooltip>
+                              </Box>
+                            </Box>
+                            <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                              <Typography variant="caption" color="text.secondary">
+                                {item.total_images} images • {item.processed_images} processed
+                              </Typography>
+                              <Typography variant="caption" color="text.secondary">
+                                {new Date(item.created_at).toLocaleString()}
+                              </Typography>
+                            </Box>
+                            {item.batches && item.batches.length > 0 && (
+                              <Box sx={{ mt: 1, pl: 2, borderLeft: '2px solid rgba(0, 0, 0, 0.12)' }}>
+                                {item.batches.map((batch: any, batchIndex: number) => (
+                                  <Typography key={batchIndex} variant="caption" color="text.secondary" sx={{ display: 'block' }}>
+                                    Batch: {batch.batch_name || `Batch ${batchIndex + 1}`} ({batch.processed_images}/{batch.total_images} images)
+                                  </Typography>
+                                ))}
+                              </Box>
+                            )}
+                          </ListItem>
+                        ))}
+                      </List>
+                    ) : (
+                      <Box sx={{ textAlign: 'center', py: 4 }}>
+                        <QueueIcon sx={{ fontSize: '2rem', color: 'text.disabled', mb: 1 }} />
+                        <Typography variant="body2" color="text.secondary">
+                          No active workflows in queue
+                        </Typography>
+                      </Box>
+                    )}
+                  </Box>
+                </Collapse>
+              </Box>
             </CardContent>
           </Card>
         </Grid>
