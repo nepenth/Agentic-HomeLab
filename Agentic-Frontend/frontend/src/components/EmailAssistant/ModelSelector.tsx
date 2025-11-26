@@ -163,8 +163,11 @@ const ModelSelector: React.FC<ModelSelectorProps> = ({
       // Rate limit: Process models sequentially with delay to avoid nginx rate limiting
       // nginx is configured with: limit_req_zone rate=10r/s burst=20
       // We'll use 150ms delay between requests to stay well under 10r/s (6.6r/s)
-      for (const modelName of modelsData.models) {
+      for (const model of modelsData.models) {
+        let modelName: string;
         try {
+          // Extract model name from object
+          modelName = typeof model === 'string' ? model : model.name;
           // Get runtime data (without web research to keep it fast)
           const info = await hybridIntelligence.getModelInfo(modelName, false);
           modelInfoMap.set(modelName, info);
@@ -318,24 +321,28 @@ const ModelSelector: React.FC<ModelSelectorProps> = ({
     };
   }, [autoCollapseTimer]);
 
-  const getCategoryColor = (category: ModelInfo['category']) => {
+  const getCategoryColor = (category: ModelInfo['category'] | string) => {
     const colors = {
       general: '#1976d2',
       code: '#f57c00',
       chat: '#388e3c',
-      instruct: '#7b1fa2'
+      instruct: '#7b1fa2',
+      vision: '#9c27b0',
+      reasoning: '#ff5722'
     };
-    return colors[category];
+    return colors[category] || '#666';
   };
 
-  const getCategoryIcon = (category: ModelInfo['category']) => {
+  const getCategoryIcon = (category: ModelInfo['category'] | string) => {
     const icons = {
       general: '🧠',
       code: '💻',
       chat: '💬',
-      instruct: '📝'
+      instruct: '📝',
+      vision: '👁️',
+      reasoning: '🧠'
     };
-    return icons[category];
+    return icons[category] || '🤖';
   };
 
   if (isLoading) {
@@ -556,9 +563,9 @@ const ModelSelector: React.FC<ModelSelectorProps> = ({
                                 {model.runtime_data?.quantization && (
                                   <Chip label={model.runtime_data.quantization} size="small" variant="outlined" sx={{ fontSize: '0.6rem', height: 16 }} />
                                 )}
-                                {model.benchmarks?.average_score && (
+                                {model.size && (
                                   <Chip
-                                    label={`Score: ${model.benchmarks.average_score.toFixed(1)}`}
+                                    label={`${(model.size / (1024 * 1024 * 1024)).toFixed(1)}GB`}
                                     size="small"
                                     color="secondary"
                                     sx={{ fontSize: '0.6rem', height: 16 }}

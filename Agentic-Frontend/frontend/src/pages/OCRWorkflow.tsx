@@ -165,6 +165,9 @@ const OCRWorkflow: React.FC = () => {
         batch_id: batchResponse.batch_id,
       });
 
+      // Load initial logs
+      loadLogs();
+
       // Poll for results
       const pollInterval = setInterval(async () => {
         try {
@@ -210,10 +213,8 @@ const OCRWorkflow: React.FC = () => {
               message: `Processing ${processedImages}/${totalImages} images...`
             });
 
-            // Load logs periodically during processing if logs section is expanded
-            if (logsExpanded) {
-              loadLogs();
-            }
+            // Load logs periodically during processing
+            loadLogs();
           }
         } catch (err) {
           console.error('Status check failed:', err);
@@ -627,7 +628,7 @@ const OCRWorkflow: React.FC = () => {
               )}
 
               {/* Logs Section */}
-              {workflowId && (
+              {(workflowId || isProcessing) && (
                 <Box sx={{ mt: 3 }}>
                   <Divider sx={{ mb: 2 }} />
                   <Box
@@ -643,7 +644,7 @@ const OCRWorkflow: React.FC = () => {
                     }}
                     onClick={() => {
                       setLogsExpanded(!logsExpanded);
-                      if (!logsExpanded && logs.length === 0) {
+                      if (!logsExpanded) {
                         loadLogs();
                       }
                     }}
@@ -660,6 +661,9 @@ const OCRWorkflow: React.FC = () => {
                           variant="outlined"
                           sx={{ fontSize: '0.7rem' }}
                         />
+                      )}
+                      {logsLoading && (
+                        <CircularProgress size={14} />
                       )}
                     </Box>
                     {logsExpanded ? <ExpandLessIcon /> : <ExpandMoreIcon />}
