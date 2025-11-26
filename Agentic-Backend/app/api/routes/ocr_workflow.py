@@ -563,6 +563,163 @@ async def export_workflow_results(
             detail="Failed to export workflow results"
         )
 
+
+@router.get("/queue/status")
+async def get_queue_status(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db_session)
+):
+    """
+    Get the current status of OCR workflow queue.
+    """
+    try:
+        # Get all workflows for the user that are not completed or failed
+        workflows_result = await db.execute(
+            select(OCRWorkflow).where(
+                and_(
+                    OCRWorkflow.user_id == current_user.username,
+                    OCRWorkflow.status.in_(["pending", "running"])
+                )
+            ).order_by(OCRWorkflow.created_at.desc())
+        )
+        workflows = workflows_result.scalars().all()
+
+        queue_items = []
+        for workflow in workflows:
+            # Get batches for this workflow
+            batches_result = await db.execute(
+                select(OCRBatch).where(OCRBatch.workflow_id == workflow.id)
+            )
+            batches = batches_result.scalars().all()
+
+            queue_items.append({
+                "workflow_id": str(workflow.id),
+                "workflow_name": workflow.workflow_name,
+                "status": workflow.status,
+                "ocr_model": workflow.ocr_model,
+                "total_images": workflow.total_images,
+                "processed_images": workflow.processed_images,
+                "created_at": workflow.created_at.isoformat(),
+                "batches": [
+                    {
+                        "batch_id": str(batch.id),
+                        "batch_name": batch.batch_name,
+                        "total_images": batch.total_images,
+                        "processed_images": batch.processed_images,
+                        "status": batch.status
+                    }
+                    for batch in batches
+                ]
+            })
+
+        return {
+            "queue_items": queue_items,
+            "total_count": len(queue_items)
+        }
+
+    except Exception as e:
+        logger.error(f"Failed to get queue status: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to get queue status"
+        )
+
+
+@router.delete("/workflows/{workflow_id}")
+async def cancel_workflow(
+    workflow_id: str,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db_session)
+):
+    """
+    Cancel an OCR workflow.
+    """
+    try:
+        workflow_uuid = UUID(workflow_id)
+        workflow = await db.get(OCRWorkflow, workflow_uuid)
+
+        if not workflow or workflow.user_id != current_user.username:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Workflow not found"
+            )
+
+        if workflow.status in ["completed", "failed", "cancelled"]:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Workflow is already finished"
+            )
+
+        # Update workflow status
+        workflow.status = "cancelled"
+        workflow.cancelled_at = datetime.utcnow()
+        await db.commit()
+
+        # TODO: Cancel the Celery task if it's still running
+        # This would require storing the task ID and using Celery's control API
+
+        logger.info(f"Cancelled OCR workflow {workflow_id} for user {current_user.username}")
+
+        return {
+            "message": "Workflow cancelled successfully",
+            "workflow_id": workflow_id,
+            "status": "cancelled"
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to cancel workflow: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to cancel workflow"
+        )
+
+
+@router.delete("/queue/clear-all")
+async def clear_all_workflows(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db_session)
+):
+    """
+    Clear all active OCR workflows for the current user.
+    """
+    try:
+        # Get all active workflows for the user
+        workflows_result = await db.execute(
+            select(OCRWorkflow).where(
+                and_(
+                    OCRWorkflow.user_id == current_user.username,
+                    OCRWorkflow.status.in_(["pending", "running"])
+                )
+            )
+        )
+        workflows = workflows_result.scalars().all()
+
+        cancelled_count = 0
+        for workflow in workflows:
+            workflow.status = "cancelled"
+            workflow.cancelled_at = datetime.utcnow()
+            cancelled_count += 1
+
+        await db.commit()
+
+        # TODO: Cancel all associated Celery tasks
+
+        logger.info(f"Cancelled {cancelled_count} OCR workflows for user {current_user.username}")
+
+        return {
+            "message": f"Cancelled {cancelled_count} workflows successfully",
+            "cancelled_count": cancelled_count
+        }
+
+    except Exception as e:
+        logger.error(f"Failed to clear all workflows: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to clear all workflows"
+        )
+
 # Queue Management Endpoints
 
 @router.get("/queue/status")
