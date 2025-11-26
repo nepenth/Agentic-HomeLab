@@ -40,7 +40,7 @@ router = APIRouter()
 # Pydantic models for request/response
 class OCRWorkflowCreate(BaseModel):
     workflow_name: Optional[str] = None
-    ocr_model: str = "deepseek-ocr"
+    ocr_model: str = "deepseek-ocr:3b"
     processing_options: Optional[dict] = None
 
 class OCRBatchCreate(BaseModel):
@@ -74,23 +74,34 @@ async def get_ocr_models(
     current_user: User = Depends(get_current_user)
 ) -> OCRModelsResponse:
     """
-    Get available OCR models from Ollama, filtered to vision-capable models.
+    Get available OCR models from the global models endpoint, filtered to vision-capable models.
     """
     try:
+        # Use the same model detection logic as the global endpoint
+        from app.services.ollama_client import ollama_client
+
         # Get all available models from Ollama
         ollama_response = await ollama_client.list_models()
 
-        # Filter for vision-capable models (models that support image processing)
+        # Filter for vision-capable models (same logic as global endpoint)
         vision_models = []
         for model in ollama_response.get("models", []):
             model_name = model.get("name", "")
+            model_details = model.get("details", {})
+            model_family = model_details.get("family", "").lower()
+            model_families_list = model_details.get("families", [])
 
-            # Check if model supports vision capabilities
-            # Vision-capable models typically include keywords like 'vision', 'vl', 'visual', etc.
-            is_vision_capable = any(keyword in model_name.lower() for keyword in [
-                'vision', 'vl', 'visual', 'llava', 'bakllava', 'moondream',
-                'deepseek-ocr', 'qwen2.5vl', 'llama3.2-vision'
-            ])
+            # Check for vision capabilities (same logic as global endpoint)
+            is_vision_capable = (
+                # Known vision model families
+                any(family in ['mllama', 'llava', 'qwen25vl', 'deepseekocr'] for family in [model_family] + model_families_list) or
+                # Models with vision in name
+                'vision' in model_name.lower() or 'ocr' in model_name.lower() or
+                # Specific known vision models
+                any(vision_model in model_name.lower() for vision_model in [
+                    'llama3.2-vision', 'qwen2.5vl', 'llava', 'deepseek-ocr'
+                ])
+            )
 
             if is_vision_capable:
                 vision_models.append({
@@ -98,48 +109,31 @@ async def get_ocr_models(
                     "display_name": model_name.replace('-', ' ').title(),
                     "description": f"Vision-capable OCR model: {model_name}",
                     "capabilities": ["vision", "ocr", "image-analysis"],
-                    "recommended": "deepseek-ocr" in model_name or "qwen2.5vl" in model_name,
+                    "recommended": "deepseek-ocr" in model_name or "llama3.2-vision" in model_name,
                     "size": model.get("size", "Unknown")
                 })
 
-        # Add some default OCR models if not found in Ollama
-        default_models = [
-            {
-                "name": "deepseek-ocr",
-                "display_name": "DeepSeek OCR",
-                "description": "Advanced OCR model optimized for document text extraction",
-                "capabilities": ["ocr", "document-processing", "text-extraction"],
-                "recommended": True,
-                "size": "Unknown"
-            }
-        ]
+        # Sort by recommended status first, then by name
+        vision_models.sort(key=lambda x: (not x["recommended"], x["name"]))
 
-        # Combine Ollama vision models with defaults
-        all_models = vision_models + default_models
-
-        # Remove duplicates
-        seen_names = set()
-        unique_models = []
-        for model in all_models:
-            if model["name"] not in seen_names:
-                seen_names.add(model["name"])
-                unique_models.append(model)
+        # Use the vision models directly
+        ocr_models = vision_models
 
         return OCRModelsResponse(
-            models=unique_models,
-            total_count=len(unique_models)
+            models=ocr_models,
+            total_count=len(ocr_models)
         )
 
     except Exception as e:
         logger.error(f"Failed to get OCR models: {e}")
-        # Return default models if Ollama is unavailable
+        # Return default models if service is unavailable
         return OCRModelsResponse(
             models=[
                 {
-                    "name": "deepseek-ocr",
-                    "display_name": "DeepSeek OCR",
+                    "name": "deepseek-ocr:3b",
+                    "display_name": "DeepSeek OCR:3B",
                     "description": "Advanced OCR model optimized for document text extraction",
-                    "capabilities": ["ocr", "document-processing", "text-extraction"],
+                    "capabilities": ["vision", "ocr", "image-analysis"],
                     "recommended": True,
                     "size": "Unknown"
                 }

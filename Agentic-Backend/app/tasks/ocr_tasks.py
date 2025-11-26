@@ -127,13 +127,18 @@ async def _process_ocr_workflow_async(
                         if ocr_model not in available_models:
                             logger.warning(f"Model {ocr_model} not available. Available models: {available_models}")
                             # Try to find a suitable vision-capable model
-                            vision_models = [m for m in available_models if any(keyword in m.lower() for keyword in ['vision', 'vl', 'visual', 'llava', 'bakllava', 'moondream', 'qwen2.5vl', 'llama3.2-vision'])]
+                            vision_models = [m for m in available_models if any(keyword in m.lower() for keyword in ['vision', 'vl', 'llava', 'qwen2.5vl', 'llama3.2-vision'])]
                             if vision_models:
-                                fallback_model = vision_models[0]
+                                # Prefer llama3.2-vision as primary fallback
+                                preferred_models = [m for m in vision_models if 'llama3.2-vision' in m]
+                                fallback_model = preferred_models[0] if preferred_models else vision_models[0]
                                 logger.info(f"Using fallback vision model: {fallback_model}")
                                 ocr_model = fallback_model
                             else:
                                 raise Exception(f"Model {ocr_model} not available and no suitable vision-capable fallback found. Available models: {available_models}")
+
+                        # Log the model being used
+                        logger.info(f"Starting OCR processing with model: {ocr_model}")
                     except Exception as model_check_error:
                         logger.warning(f"Could not check available models: {model_check_error}")
 

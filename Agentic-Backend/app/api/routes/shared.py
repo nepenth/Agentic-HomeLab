@@ -8,61 +8,9 @@ and components, such as model management, utilities, and shared resources.
 from fastapi import APIRouter, Query
 from typing import Optional, Dict, Any, List
 from datetime import datetime
+from app.services.ollama_client import ollama_client
 
 router = APIRouter()
-
-
-# Mock data for models - in a real implementation, this would come from Ollama
-MOCK_MODELS = [
-    {
-        "name": "qwen3",
-        "display_name": "Qwen 3",
-        "description": "Advanced general-purpose AI model",
-        "capabilities": ["text", "chat", "code"],
-        "recommended": True,
-        "ranking_score": 850
-    },
-    {
-        "name": "deepseek-r1",
-        "display_name": "DeepSeek R1",
-        "description": "Powerful reasoning model",
-        "capabilities": ["text", "chat", "reasoning"],
-        "recommended": True,
-        "ranking_score": 800
-    },
-    {
-        "name": "deepseek-ocr",
-        "display_name": "DeepSeek OCR",
-        "description": "Advanced OCR model optimized for document text extraction",
-        "capabilities": ["vision", "ocr", "text"],
-        "recommended": True,
-        "ranking_score": 750
-    },
-    {
-        "name": "qwen2.5",
-        "display_name": "Qwen 2.5",
-        "description": "Versatile AI model for various tasks",
-        "capabilities": ["text", "chat"],
-        "recommended": False,
-        "ranking_score": 720
-    },
-    {
-        "name": "phi4",
-        "display_name": "Phi 4",
-        "description": "Efficient coding and reasoning model",
-        "capabilities": ["text", "chat", "code"],
-        "recommended": False,
-        "ranking_score": 700
-    },
-    {
-        "name": "mistral-small3.1",
-        "display_name": "Mistral Small 3.1",
-        "description": "Lightweight and efficient model",
-        "capabilities": ["text", "chat"],
-        "recommended": False,
-        "ranking_score": 650
-    }
-]
 
 
 @router.get("/models/rich")
@@ -80,15 +28,88 @@ async def get_available_models_rich(capability_filter: Optional[str] = Query(Non
         Dict containing models list and metadata
     """
     try:
-        # Start with all models
-        filtered_models = MOCK_MODELS.copy()
+        # Get all available models from Ollama
+        ollama_response = await ollama_client.list_models()
+
+        # Convert Ollama models to our format
+        all_models = []
+        for model in ollama_response.get("models", []):
+            model_name = model.get("name", "")
+            model_details = model.get("details", {})
+            model_family = model_details.get("family", "").lower()
+            model_families = model_details.get("families", [])
+
+            # Determine capabilities based on model family and name
+            capabilities = ["text", "chat"]  # Default capabilities
+
+            # Check for vision capabilities
+            model_families_list = model_families or []
+            is_vision_capable = (
+                # Known vision model families
+                any(family in ['mllama', 'llava', 'qwen25vl', 'deepseekocr'] for family in [model_family] + model_families_list) or
+                # Models with vision in name
+                'vision' in model_name.lower() or 'ocr' in model_name.lower() or
+                # Specific known vision models
+                any(vision_model in model_name.lower() for vision_model in [
+                    'llama3.2-vision', 'qwen2.5vl', 'llava', 'deepseek-ocr'
+                ])
+            )
+
+
+            if is_vision_capable:
+                capabilities.extend(["vision", "ocr", "image-analysis"])
+
+            # Check for coding capabilities
+            if any(keyword in model_name.lower() for keyword in ['coder', 'code', 'phi']):
+                capabilities.append("code")
+
+            # Check for reasoning capabilities
+            if any(keyword in model_name.lower() for keyword in ['r1', 'reasoning', 'think']):
+                capabilities.append("reasoning")
+
+            # Remove duplicates
+            capabilities = list(set(capabilities))
+
+            # Determine ranking score based on model characteristics
+            ranking_score = 500  # Base score
+            if 'qwen3' in model_name.lower():
+                ranking_score = 850
+            elif 'deepseek-r1' in model_name.lower():
+                ranking_score = 800
+            elif is_vision_capable:
+                ranking_score = 750
+            elif 'qwen2.5' in model_name.lower():
+                ranking_score = 720
+            elif 'phi4' in model_name.lower():
+                ranking_score = 700
+            elif 'mistral' in model_name.lower():
+                ranking_score = 650
+
+            # Determine if recommended
+            recommended = (
+                'qwen3' in model_name.lower() or
+                'deepseek-r1' in model_name.lower() or
+                is_vision_capable
+            )
+
+            all_models.append({
+                "name": model_name,
+                "display_name": model_name.replace('-', ' ').title(),
+                "description": f"AI model: {model_name}",
+                "capabilities": capabilities,
+                "recommended": recommended,
+                "ranking_score": ranking_score,
+                "size": model.get("size", "Unknown")
+            })
 
         # Apply capability filter if specified
         if capability_filter:
             filtered_models = [
-                model for model in filtered_models
+                model for model in all_models
                 if capability_filter in model["capabilities"]
             ]
+        else:
+            filtered_models = all_models
 
         # Sort by ranking score (highest first)
         filtered_models.sort(key=lambda x: x["ranking_score"], reverse=True)
@@ -98,8 +119,18 @@ async def get_available_models_rich(capability_filter: Optional[str] = Query(Non
         ungrouped_models = []
 
         for model in filtered_models:
-            # Simple grouping logic
-            primary_capability = model["capabilities"][0] if model["capabilities"] else "general"
+            # Determine primary category based on capabilities
+            capabilities = model["capabilities"]
+            if "vision" in capabilities:
+                primary_capability = "vision"
+            elif "code" in capabilities:
+                primary_capability = "code"
+            elif "reasoning" in capabilities:
+                primary_capability = "reasoning"
+            elif "chat" in capabilities:
+                primary_capability = "chat"
+            else:
+                primary_capability = "general"
 
             if primary_capability not in model_groups:
                 model_groups[primary_capability] = []
@@ -112,7 +143,7 @@ async def get_available_models_rich(capability_filter: Optional[str] = Query(Non
             "ungrouped_models": filtered_models,  # Same as models for now
             "default_model": "qwen3",
             "total_available": len(filtered_models),
-            "filtered_out": len(MOCK_MODELS) - len(filtered_models),
+            "filtered_out": len(all_models) - len(filtered_models),
             "capability_filter": capability_filter,
             "groups_count": len(model_groups),
             "ungrouped_count": len(filtered_models),
