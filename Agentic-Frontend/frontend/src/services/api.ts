@@ -2685,6 +2685,22 @@ class ApiClient {
     const response = await this.client.get(`/api/v1/ocr/workflows/${workflowId}/logs`, { params });
     return response.data;
   }
+
+  // OCR Queue Management
+  async getOCRQueueStatus() {
+    const response = await this.client.get('/api/v1/ocr/queue/status');
+    return response.data;
+  }
+
+  async cancelOCRWorkflow(workflowId: string) {
+    const response = await this.client.delete(`/api/v1/ocr/workflows/${workflowId}`);
+    return response.data;
+  }
+
+  async clearAllOCRWorkflows() {
+    const response = await this.client.delete('/api/v1/ocr/queue/clear-all');
+    return response.data;
+  }
 }
 
 export const apiClient = new ApiClient();
