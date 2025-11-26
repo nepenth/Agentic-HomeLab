@@ -277,6 +277,9 @@ async def _process_ocr_workflow_async(
         workflow.completed_at = datetime.utcnow()
         await session.commit()
 
+        # Broadcast WebSocket update for workflow completion
+        await _broadcast_workflow_update(session, workflow_uuid, "completed", user_id)
+
         # Log completion
         await _log_workflow_progress(session, workflow_uuid, batch.id, None,
                                    f"OCR workflow completed: {processed_count} images processed", "info", user_id)
@@ -325,6 +328,60 @@ async def _log_workflow_progress(
     )
     session.add(log_entry)
     await session.commit()
+
+
+async def _broadcast_workflow_update(
+    session: AsyncSession,
+    workflow_id: UUID,
+    status: str,
+    user_id: str
+) -> None:
+    """Broadcast OCR workflow status update via WebSocket."""
+    try:
+        from app.api.routes.websocket import manager
+        from app.db.models.ocr_workflow import OCRBatch
+
+        # Get updated workflow data
+        workflow = await session.get(OCRWorkflow, workflow_id)
+        if not workflow:
+            return
+
+        # Get batch information
+        batches_result = await session.execute(
+            select(OCRBatch).where(OCRBatch.workflow_id == workflow_id)
+        )
+        batches = batches_result.scalars().all()
+
+        # Broadcast to WebSocket connections
+        message = {
+            "type": "ocr_workflow_status",
+            "workflow_id": str(workflow_id),
+            "status": status,
+            "progress": {
+                "total_images": workflow.total_images,
+                "processed_images": workflow.processed_images,
+                "total_pages": workflow.total_pages
+            },
+            "batches": [
+                {
+                    "batch_id": str(batch.id),
+                    "batch_name": batch.batch_name,
+                    "status": batch.status,
+                    "total_images": batch.total_images,
+                    "processed_images": batch.processed_images,
+                    "page_count": batch.page_count
+                }
+                for batch in batches
+            ],
+            "started_at": workflow.started_at.isoformat() if workflow.started_at else None,
+            "completed_at": workflow.completed_at.isoformat() if workflow.completed_at else None
+        }
+
+        # Broadcast to all connections subscribed to this workflow
+        await manager.broadcast_workflow_update(message, user_id, str(workflow_id))
+
+    except Exception as e:
+        logger.error(f"Failed to broadcast OCR workflow update: {e}")
 
 
 async def _send_completion_notification(

@@ -64,18 +64,30 @@ export const checkAuthStatus = createAsyncThunk(
   'auth/checkAuthStatus',
   async (_, { rejectWithValue }) => {
     try {
+      console.log('checkAuthStatus: Starting auth check...');
       const token = apiClient.getAuthToken();
+      console.log('checkAuthStatus: Token present:', !!token);
       if (!token) {
+        console.log('checkAuthStatus: No token found');
         throw new Error('No token found');
       }
 
-      // Fetch actual user data from the backend
-      const response = await apiClient.get('/api/v1/auth/me');
+      console.log('checkAuthStatus: Fetching user data from /api/v1/auth/me...');
+      // Fetch actual user data from the backend with timeout
+      const response = await Promise.race([
+        apiClient.get('/api/v1/auth/me'),
+        new Promise<never>((_, reject) =>
+          setTimeout(() => reject(new Error('Auth check timeout')), 10000)
+        )
+      ]);
       const userData = response.data;
+      console.log('checkAuthStatus: Got user data:', userData);
 
       // If successful, connect WebSocket
+      console.log('checkAuthStatus: Connecting WebSocket...');
       webSocketService.connect('logs', token);
 
+      console.log('checkAuthStatus: Auth check successful');
       return {
         user: {
           id: userData.id,
@@ -86,6 +98,7 @@ export const checkAuthStatus = createAsyncThunk(
         },
       };
     } catch (error: any) {
+      console.error('checkAuthStatus: Auth check failed:', error);
       apiClient.clearAuthToken();
       return rejectWithValue('Token invalid');
     }
