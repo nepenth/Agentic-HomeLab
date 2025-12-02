@@ -35,7 +35,7 @@ class OCRTask(Task):
         logger.info(f"OCR Task {task_id} completed successfully")
 
 
-@celery_app.task(base=OCRTask, bind=True, max_retries=3, default_retry_delay=60, time_limit=600, soft_time_limit=540)
+@celery_app.task(base=OCRTask, bind=True, max_retries=3, default_retry_delay=60, time_limit=3600, soft_time_limit=3000)
 def process_ocr_workflow_task(self, workflow_id: str, ocr_model: str, image_paths: List[str], batch_name: str = "Default Batch", user_id: str = "system"):
     """Celery task for processing OCR workflow."""
     logger.info(f"OCR task called with workflow_id={workflow_id}, user_id={user_id}, model={ocr_model}, images={len(image_paths)}")
@@ -142,30 +142,51 @@ def _process_ocr_workflow_sync(
                 """
 
             logger.info(f"Sending OCR request to Ollama model {ocr_model} for image {os.path.basename(image_path)}")
+            logger.info(f"Image size: {len(image_data)} bytes, base64 encoded length: {len(image_data)}")
             _log_workflow_progress_sync(db, workflow_uuid, batch.id, None,
                                        f"Sending image {i+1} to {ocr_model}...", "info", user_id)
+
+            # Add detailed logging for timeout configuration
+            logger.info(f"Current Celery task time limits - hard: {task.request.time_limit}, soft: {task.request.soft_time_limit}")
 
             try:
                 # Use shorter timeout for OCR operations (2 minutes total, 90 seconds read)
                 logger.info(f"Making Ollama API call to {selected_model} with image size: {len(image_data)} chars")
+                logger.info(f"Starting OCR processing at: {datetime.utcnow().isoformat()}")
                 start_time = datetime.utcnow()
 
-                response = sync_ollama_client.generate(
-                    prompt=prompt,
-                    model=selected_model,
-                    options={
-                        "images": [image_data],
-                        "temperature": 0.1,
-                        "top_p": 0.9,
-                        "num_ctx": 4096  # Ensure enough context for full page
-                    }
-                )
+                # Add explicit timeout handling for Ollama client
+                from app.services.ollama_client import ollama_client
+                import asyncio
+
+                # Set a generous timeout for OCR operations (30 minutes)
+                try:
+                    response = sync_ollama_client.generate(
+                        prompt=prompt,
+                        model=selected_model,
+                        options={
+                            "images": [image_data],
+                            "temperature": 0.1,
+                            "top_p": 0.9,
+                            "num_ctx": 4096  # Ensure enough context for full page
+                        },
+                        timeout=1800  # 30 minutes timeout for OCR
+                    )
+                except Exception as e:
+                    logger.error(f"Ollama client error with extended timeout: {str(e)}")
+                    raise
 
                 end_time = datetime.utcnow()
                 duration = (end_time - start_time).total_seconds()
                 logger.info(f"Received OCR response from Ollama in {duration:.2f} seconds")
                 logger.info(f"Response keys: {list(response.keys()) if response else 'None'}")
                 logger.info(f"Response has 'response' key: {'response' in response if response else False}")
+
+                # Log the actual response content for debugging
+                if response and 'response' in response:
+                    response_content = response['response']
+                    logger.info(f"OCR response length: {len(response_content)} characters")
+                    logger.info(f"OCR response preview: {response_content[:200] if len(response_content) > 200 else response_content}")
 
                 ocr_text = response.get('response', '').strip()
 
@@ -268,6 +289,12 @@ def _process_ocr_workflow_sync(
     workflow.processed_images = processed_count
     workflow.total_pages = processed_count
     workflow.completed_at = datetime.utcnow()
+
+    # Log final completion details
+    logger.info(f"OCR workflow completed - Total images: {len(image_paths)}, Processed: {processed_count}")
+    logger.info(f"Final combined markdown length: {len(combined_markdown)} characters")
+    logger.info(f"Final markdown preview: {combined_markdown[:500] if len(combined_markdown) > 500 else combined_markdown}")
+
     db.commit()
 
     # Broadcast WebSocket update for workflow completion
