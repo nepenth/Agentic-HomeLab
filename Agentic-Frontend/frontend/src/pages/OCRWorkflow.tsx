@@ -1046,7 +1046,16 @@ const OCRWorkflow: React.FC = () => {
                                 }
                                 secondary={
                                   <Typography variant="caption" color="text.secondary">
-                                    {new Date(log.timestamp).toLocaleString()} • {log.workflow_phase || 'General'}
+                                    {log.timestamp ? new Date(log.timestamp).toLocaleString('en-US', {
+                                      timeZone: 'America/New_York',
+                                      hour12: true,
+                                      year: 'numeric',
+                                      month: 'numeric',
+                                      day: 'numeric',
+                                      hour: '2-digit',
+                                      minute: '2-digit',
+                                      second: '2-digit'
+                                    }) : 'No timestamp'} • {log.workflow_phase || 'General'}
                                   </Typography>
                                 }
                               />
@@ -1185,7 +1194,16 @@ const OCRWorkflow: React.FC = () => {
                                 {item.total_images} images • {item.processed_images} processed
                               </Typography>
                               <Typography variant="caption" color="text.secondary">
-                                {new Date(item.created_at).toLocaleString()}
+                                {item.created_at ? new Date(item.created_at).toLocaleString('en-US', {
+                                  timeZone: 'America/New_York',
+                                  hour12: true,
+                                  year: 'numeric',
+                                  month: 'numeric',
+                                  day: 'numeric',
+                                  hour: '2-digit',
+                                  minute: '2-digit',
+                                  second: '2-digit'
+                                }) : 'No timestamp'}
                               </Typography>
                             </Box>
                             {item.batches && item.batches.length > 0 && (

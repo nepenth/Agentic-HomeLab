@@ -147,7 +147,7 @@ def _process_ocr_workflow_sync(
                                        f"Sending image {i+1} to {ocr_model}...", "info", user_id)
 
             # Add detailed logging for timeout configuration
-            logger.info(f"Current Celery task time limits - hard: {task.request.time_limit}, soft: {task.request.soft_time_limit}")
+            logger.info(f"Current Celery task time limits - hard: {task.request.time_limit if hasattr(task.request, 'time_limit') else 'N/A'}, soft: {task.request.soft_time_limit if hasattr(task.request, 'soft_time_limit') else 'N/A'}")
 
             try:
                 # Use shorter timeout for OCR operations (2 minutes total, 90 seconds read)
@@ -337,6 +337,17 @@ def _log_workflow_progress_sync(
     user_id: str = "system"
 ):
     """Log workflow progress synchronously."""
+    from datetime import datetime
+    import pytz
+
+    # Get current time in EST timezone
+    try:
+        est = pytz.timezone('America/New_York')
+        current_time_est = datetime.now(est)
+    except:
+        # Fallback to UTC if timezone conversion fails
+        current_time_est = datetime.utcnow()
+
     log_entry = OCRWorkflowLog(
         workflow_id=workflow_id,
         batch_id=batch_id,
@@ -344,7 +355,8 @@ def _log_workflow_progress_sync(
         user_id=user_id,
         level=level,
         message=message,
-        workflow_phase="processing"
+        workflow_phase="processing",
+        timestamp=current_time_est  # Use EST timezone timestamp
     )
     db.add(log_entry)
     db.commit()
