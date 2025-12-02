@@ -519,20 +519,44 @@ class WebSocketService {
     workflowId: string,
     callback: (update: any) => void
   ) {
+    console.log(`subscribeToOCRProgress: Subscribing to workflow ${workflowId}`);
+
     // Connect to OCR progress endpoint with workflow_id filter
     const endpoint = `ocr/progress?workflow_id=${workflowId}`;
 
+    console.log(`subscribeToOCRProgress: Connecting to endpoint ${endpoint}`);
+
     // Connect with authentication token
     const token = apiClient.getAuthToken();
+    console.log(`subscribeToOCRProgress: Using token ${token ? 'present' : 'not present'}`);
     this.connect(endpoint, token || undefined);
 
     // Add handlers for OCR progress messages
-    this.addMessageHandler('ocr_workflow_status', callback);
-    this.addMessageHandler('ocr_workflow_update', callback);
+    this.addMessageHandler('ocr_workflow_status', (data) => {
+      console.log('WebSocket: Received ocr_workflow_status update', data);
+      callback({ type: 'ocr_workflow_status', data });
+    });
+
+    this.addMessageHandler('ocr_workflow_update', (data) => {
+      console.log('WebSocket: Received ocr_workflow_update', data);
+      callback({ type: 'ocr_workflow_update', data });
+    });
+
+    // Add connection status monitoring
+    const statusUnsubscribe = this.onConnectionStatus((status, error) => {
+      console.log(`WebSocket connection status: ${status}`, error || '');
+      if (status === 'connected') {
+        console.log('WebSocket connected successfully for OCR progress');
+      } else if (status === 'disconnected' || status === 'error') {
+        console.warn('WebSocket disconnected or error - OCR updates may be missed');
+      }
+    });
 
     return () => {
+      console.log('Unsubscribing from OCR progress updates');
       this.removeMessageHandler('ocr_workflow_status', callback);
       this.removeMessageHandler('ocr_workflow_update', callback);
+      statusUnsubscribe();
     };
   }
 

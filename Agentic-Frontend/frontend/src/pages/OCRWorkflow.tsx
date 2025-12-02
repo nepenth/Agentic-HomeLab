@@ -210,20 +210,37 @@ const OCRWorkflow: React.FC = () => {
 
       // Subscribe to WebSocket updates for this workflow
       console.log('Subscribing to WebSocket updates for workflow:', workflowResponse.workflow_id);
+
+      // Check WebSocket connection status
+      const wsConnectionStatus = webSocketService.isConnected();
+      console.log('WebSocket connection status before subscribe:', wsConnectionStatus ? 'Connected' : 'Not connected');
+
       const unsubscribe = webSocketService.subscribeToOCRProgress(
         workflowResponse.workflow_id,
         (update: any) => {
           console.log('Received WebSocket update:', update);
+          console.log('WebSocket update type:', update.type);
+          console.log('WebSocket update data:', update.data || update);
 
           if (update.type === 'ocr_workflow_status') {
             const workflowData = update.data || update;
+            console.log('Processing workflow status update:', workflowData.status);
 
             if (workflowData.status === 'completed') {
               // Workflow completed successfully
+              console.log('Workflow completed - processed images:', workflowData.progress?.processed_images);
               if (workflowData.progress?.processed_images > 0) {
-                // Load final results
+                // Load final results with better error handling
+                console.log('Loading final results...');
                 apiClient.getOCRWorkflowResults(workflowResponse.workflow_id).then(resultResponse => {
-                  setResults(resultResponse.combined_markdown);
+                  console.log('Results received:', resultResponse);
+                  if (resultResponse.combined_markdown && resultResponse.combined_markdown.trim()) {
+                    setResults(resultResponse.combined_markdown);
+                    console.log('Results set - length:', resultResponse.combined_markdown.length);
+                  } else {
+                    console.warn('Empty results received, setting placeholder');
+                    setResults('[No OCR results available - processing may have timed out]');
+                  }
                   setStatus('completed');
                   setProgress(null);
                   setIsProcessing(false);
@@ -232,14 +249,17 @@ const OCRWorkflow: React.FC = () => {
                   loadLogs(true);
                 }).catch(err => {
                   console.error('Failed to load results:', err);
-                  setError('Failed to load OCR results');
+                  setError('Failed to load OCR results: ' + (err.message || String(err)));
+                  setResults('[Error loading OCR results - check logs for details]');
                   setIsProcessing(false);
                   setStatus('error');
                   setProgress(null);
                 });
               } else {
                 // No images processed - this is a failure
+                console.warn('No images processed - marking as failed');
                 setError('OCR processing failed - no images were successfully processed');
+                setResults('[OCR processing failed - no images processed]');
                 setIsProcessing(false);
                 setStatus('failed');
                 setProgress(null);
@@ -247,11 +267,14 @@ const OCRWorkflow: React.FC = () => {
 
               // Unsubscribe from WebSocket updates
               if (webSocketUnsubscribeRef.current) {
+                console.log('Unsubscribing from WebSocket updates');
                 webSocketUnsubscribeRef.current();
                 webSocketUnsubscribeRef.current = null;
               }
             } else if (workflowData.status === 'failed') {
+              console.error('Workflow failed update received');
               setError('OCR processing failed');
+              setResults('[OCR processing failed]');
               setIsProcessing(false);
               setStatus('failed');
               setProgress(null);
@@ -266,6 +289,7 @@ const OCRWorkflow: React.FC = () => {
               }
             } else {
               // Update progress for running workflows
+              console.log('Updating progress:', workflowData.progress);
               const totalImages = workflowData.progress?.total_images || images.length;
               const processedImages = workflowData.progress?.processed_images || 0;
               setProgress({
@@ -273,7 +297,18 @@ const OCRWorkflow: React.FC = () => {
                 total: totalImages,
                 message: `Processing ${processedImages}/${totalImages} images...`
               });
+
+              // Load logs periodically during processing
+              if (processedImages > 0 && processedImages % 2 === 0) {
+                console.log('Loading logs during processing');
+                loadLogs(true);
+              }
             }
+          } else if (update.type === 'ocr_workflow_update') {
+            console.log('Received OCR workflow update:', update);
+            // Handle additional update types
+          } else {
+            console.log('Received unknown WebSocket update type:', update.type);
           }
         }
       );
@@ -358,8 +393,25 @@ const OCRWorkflow: React.FC = () => {
       let logsResponse;
       if (workflowId) {
         console.log(`loadLogs: Fetching logs for workflow ${workflowId}`);
-        logsResponse = await apiClient.getOCRWorkflowLogs(workflowId);
-        console.log(`loadLogs: Got ${logsResponse.logs?.length || 0} logs from API`);
+        try {
+          logsResponse = await apiClient.getOCRWorkflowLogs(workflowId);
+          console.log(`loadLogs: API response received`, logsResponse);
+        } catch (apiError) {
+          console.error('loadLogs: API call failed, will retry:', apiError);
+          // If API call fails, don't set empty logs - keep existing logs
+          if (background && workflowId) {
+            console.log('loadLogs: API failed, retrying in 3 seconds...');
+            setTimeout(() => loadLogs(true), 3000);
+          }
+          return;
+        }
+
+        if (!logsResponse || !logsResponse.logs) {
+          console.warn('loadLogs: Invalid API response format', logsResponse);
+          logsResponse = { logs: [] };
+        } else {
+          console.log(`loadLogs: Got ${logsResponse.logs?.length || 0} logs from API`);
+        }
       } else {
         // If no workflowId yet, try to get recent logs for current user
         // This is a fallback for when logs are created before workflowId is set
@@ -373,8 +425,15 @@ const OCRWorkflow: React.FC = () => {
       );
 
       console.log(`loadLogs: Setting ${sortedLogs.length} logs in state`);
-      setLogsDebug(prev => [...prev, `Set ${sortedLogs.length} logs at ${new Date().toLocaleTimeString()}`]);
-      setLogs(sortedLogs);
+      console.log('loadLogs: Sample log entries:', sortedLogs.slice(0, 3).map(l => ({ timestamp: l.timestamp, message: l.message })));
+
+      // Only update logs if we actually have new logs, or if we're not in background mode
+      if (sortedLogs.length > 0 || !background) {
+        setLogsDebug(prev => [...prev, `Set ${sortedLogs.length} logs at ${new Date().toLocaleTimeString()}`]);
+        setLogs(sortedLogs);
+      } else {
+        console.log('loadLogs: No new logs found, keeping existing logs');
+      }
 
       // If no logs found and we're in background mode, try again in 1 second
       if (background && sortedLogs.length === 0 && workflowId) {
@@ -788,30 +847,96 @@ const OCRWorkflow: React.FC = () => {
                       borderRadius: '4px',
                     }
                   }}>
-                    <ReactMarkdown
-                      components={{
-                        code: ({ node, className, children, ...props }: any) => {
-                          const match = /language-(\w+)/.exec(className || '');
-                          const isInline = !match;
-                          return !isInline && match ? (
-                            <SyntaxHighlighter
-                              style={vscDarkPlus}
-                              language={match[1]}
-                              PreTag="div"
-                              {...props}
-                            >
-                              {String(children).replace(/\n$/, '')}
-                            </SyntaxHighlighter>
-                          ) : (
-                            <code className={className} {...props}>
-                              {children}
-                            </code>
-                          );
-                        },
-                      }}
-                    >
-                      {results}
-                    </ReactMarkdown>
+                    {results.includes('[OCR timed out') || results.includes('[No OCR results available') ? (
+                      <Alert severity="warning" sx={{ mb: 2 }}>
+                        {results}
+                        <br /><br />
+                        <Typography variant="body2">
+                          The OCR processing may have timed out. Please try again with fewer images or check the server logs for more details.
+                        </Typography>
+                      </Alert>
+                    ) : results.trim() === '' ? (
+                      <Alert severity="info" sx={{ mb: 2 }}>
+                        No OCR results available. The processing may still be in progress or no text was extracted.
+                      </Alert>
+                    ) : (
+                      <>
+                        <Typography variant="h6" sx={{ mb: 2, fontWeight: 600 }}>
+                          OCR Results - Structured Markdown
+                        </Typography>
+                        <ReactMarkdown
+                          components={{
+                            code: ({ node, className, children, ...props }: any) => {
+                              const match = /language-(\w+)/.exec(className || '');
+                              const isInline = !match;
+                              return !isInline && match ? (
+                                <SyntaxHighlighter
+                                  style={vscDarkPlus}
+                                  language={match[1]}
+                                  PreTag="div"
+                                  {...props}
+                                >
+                                  {String(children).replace(/\n$/, '')}
+                                </SyntaxHighlighter>
+                              ) : (
+                                <code className={className} {...props}>
+                                  {children}
+                                </code>
+                              );
+                            },
+                            // Custom heading components for better structure
+                            h1: ({ node, ...props }: any) => <Typography variant="h4" sx={{ mt: 3, mb: 2, fontWeight: 700, borderBottom: '2px solid rgba(0, 0, 0, 0.1)' }} {...props} />,
+                            h2: ({ node, ...props }: any) => <Typography variant="h5" sx={{ mt: 2, mb: 1.5, fontWeight: 600, borderBottom: '1px solid rgba(0, 0, 0, 0.1)' }} {...props} />,
+                            h3: ({ node, ...props }: any) => <Typography variant="h6" sx={{ mt: 2, mb: 1, fontWeight: 600 }} {...props} />,
+                            h4: ({ node, ...props }: any) => <Typography variant="subtitle1" sx={{ mt: 1.5, mb: 0.5, fontWeight: 600 }} {...props} />,
+                            h5: ({ node, ...props }: any) => <Typography variant="subtitle2" sx={{ mt: 1, mb: 0.5, fontWeight: 600 }} {...props} />,
+                            h6: ({ node, ...props }: any) => <Typography variant="body1" sx={{ mt: 0.5, mb: 0.5, fontWeight: 600 }} {...props} />,
+                            // Custom table styling
+                            table: ({ node, ...props }: any) => (
+                              <Box component="table" sx={{
+                                borderCollapse: 'collapse',
+                                width: '100%',
+                                mb: 2,
+                                '& th': {
+                                  backgroundColor: 'grey.200',
+                                  padding: '8px 12px',
+                                  textAlign: 'left',
+                                  border: '1px solid rgba(0, 0, 0, 0.1)'
+                                },
+                                '& td': {
+                                  padding: '8px 12px',
+                                  border: '1px solid rgba(0, 0, 0, 0.1)'
+                                },
+                                '& tr:nth-of-type(even)': {
+                                  backgroundColor: 'grey.50'
+                                }
+                              }} {...props} />
+                            ),
+                            // Custom list styling
+                            ul: ({ node, ...props }: any) => <Box component="ul" sx={{ pl: 3, mb: 1, '& li': { mb: 0.5 } }} {...props} />,
+                            ol: ({ node, ...props }: any) => <Box component="ol" sx={{ pl: 3, mb: 1, '& li': { mb: 0.5 } }} {...props} />,
+                            // Custom blockquote styling
+                            blockquote: ({ node, ...props }: any) => (
+                              <Box sx={{
+                                borderLeft: '4px solid rgba(0, 0, 0, 0.2)',
+                                pl: 2,
+                                py: 1,
+                                mb: 2,
+                                backgroundColor: 'grey.50',
+                                fontStyle: 'italic',
+                                color: 'text.secondary'
+                              }} {...props} />
+                            ),
+                            // Custom horizontal rule
+                            hr: ({ node, ...props }: any) => <Divider sx={{ my: 3 }} {...props} />,
+                            // Custom paragraph spacing
+                            p: ({ node, ...props }: any) => <Typography variant="body1" sx={{ mb: 1.5 }} {...props} />
+                          }}
+                        >
+                          {results}
+                        </ReactMarkdown>
+                      </>
+                    )}
                   </Box>
                 </Box>
               ) : (
