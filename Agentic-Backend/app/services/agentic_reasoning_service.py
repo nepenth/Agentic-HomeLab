@@ -239,6 +239,16 @@ When you have enough information to answer, respond with:
                         duration_ms=0
                     )
                     yield answer_step
+
+                    # Add completion signal
+                    completion_step = ReasoningStep(
+                        step_number=step_number + 2,
+                        step_type=ReasoningStepType.FINAL_ANSWER,
+                        description="Reasoning Complete",
+                        content="Chain-of-thought reasoning completed successfully.",
+                        duration_ms=0
+                    )
+                    yield completion_step
                     break
 
                 # This is a tool call

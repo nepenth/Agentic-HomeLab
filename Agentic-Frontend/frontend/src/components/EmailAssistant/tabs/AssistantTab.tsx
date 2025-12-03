@@ -301,10 +301,18 @@ export const AssistantTab: React.FC<AssistantTabProps> = ({ onNavigateToEmail })
                   content: finalContent,
                   metadata: {
                     thinking_content: finalThinkingContent,
+                    is_complete: true,
+                    step_type: 'final_answer'
                   },
                 }));
 
+                // Properly clean up reasoning state
                 setActiveReasoningMessageId(null);
+                setReasoningSteps(prev => {
+                  const newMap = new Map(prev);
+                  newMap.delete(messageId);
+                  return newMap;
+                });
                 break;
               }
 
@@ -343,6 +351,21 @@ export const AssistantTab: React.FC<AssistantTabProps> = ({ onNavigateToEmail })
       }
 
       console.log('[AGENTIC] Finished reading stream. Received any data:', receivedAnyData);
+
+      // If no data was received, show an error
+      if (!receivedAnyData) {
+        console.error('[AGENTIC] No data received from SSE stream - possible connection issue');
+
+        dispatch(updateLastMessage({
+          content: 'Chain-of-thought reasoning failed: No response received from server. Please check your connection and try again.',
+          metadata: {
+            thinking_content: 'Error: No data received from server',
+            is_error: true
+          },
+        }));
+
+        setActiveReasoningMessageId(null);
+      }
 
     } catch (error) {
       console.error('Agentic message error:', error);
