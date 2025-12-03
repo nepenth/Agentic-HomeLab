@@ -25,6 +25,85 @@ import markdown2
 logger = get_logger("ocr_tasks")
 
 
+def _post_process_deepseek_ocr_output(raw_output: str) -> str:
+    """
+    Post-process raw deepseek-ocr output to clean markdown.
+
+    The deepseek-ocr model may include grounding tags, bounding box coordinates,
+    and other artifacts that need to be cleaned up for proper markdown output.
+    """
+    if not raw_output:
+        return ""
+
+    try:
+        import re
+        cleaned = raw_output.strip()
+
+        # Remove grounding tags like <|grounding|> or similar
+        cleaned = re.sub(r'<\|[^>]+\|>', '', cleaned)
+
+        # Remove bounding box coordinates like image[[x, y, w, h]] or table[[x, y, w, h]]
+        cleaned = re.sub(r'(?:image|table|text)\[\[[^\]]+\]\]', '', cleaned)
+
+        # Remove HTML table artifacts and empty table cells
+        # Remove <table>, <tr>, <td> tags and their content if they're empty
+        cleaned = re.sub(r'<table[^>]*>.*?</table>', '', cleaned, flags=re.DOTALL | re.IGNORECASE)
+        cleaned = re.sub(r'<tr[^>]*>.*?</tr>', '', cleaned, flags=re.DOTALL | re.IGNORECASE)
+        cleaned = re.sub(r'<td[^>]*>\s*</td>', '', cleaned, flags=re.IGNORECASE)
+
+        # Remove any remaining HTML tags
+        cleaned = re.sub(r'<[^>]+>', '', cleaned)
+
+        # Remove unwanted prefixes
+        lines = cleaned.split('\n')
+        filtered_lines = []
+        for line in lines:
+            line = line.strip()
+            # Skip lines that are just artifacts
+            if (line.startswith('# document:') or
+                line.startswith('<|') or
+                line.endswith('|>') or
+                re.match(r'^\s*\[\[.*\]\]\s*$', line) or  # Lines that are just coordinates
+                re.match(r'^\s*$', line)):  # Empty lines
+                continue
+            filtered_lines.append(line)
+
+        cleaned = '\n'.join(filtered_lines).strip()
+
+        # Clean up multiple consecutive empty lines
+        cleaned = re.sub(r'\n\s*\n\s*\n+', '\n\n', cleaned)
+
+        # Extract text from any remaining structured data
+        # Look for patterns like "text content" within brackets or quotes
+        text_matches = re.findall(r'"([^"]+)"|\'([^\']+)\'', cleaned)
+        if text_matches and not cleaned.strip():
+            # If we only found quoted text and no other content, use it
+            extracted_text = []
+            for match in text_matches:
+                text = match[0] or match[1]
+                if text.strip():
+                    extracted_text.append(text.strip())
+            if extracted_text:
+                cleaned = '\n'.join(extracted_text)
+
+        # Final cleanup - ensure we have meaningful content
+        cleaned = cleaned.strip()
+
+        # If content is too short or looks like coordinates/artifacts, return placeholder
+        if (not cleaned or
+            len(cleaned.strip()) < 10 or
+            re.match(r'^[\[\]\d\s,]+$', cleaned.strip()) or  # Only coordinates
+            cleaned.lower().strip() in ['image', 'table', 'text']):  # Only detection types
+            return "[No readable text extracted from image - model returned layout detection data only]"
+
+        return cleaned
+
+    except Exception as e:
+        logger.error(f"Error post-processing deepseek-ocr output: {e}")
+        # Return the original output if post-processing fails
+        return raw_output.strip() if raw_output else "[Error processing OCR output]"
+
+
 class OCRTask(Task):
     """Base class for OCR tasks with enhanced error handling and logging."""
 
