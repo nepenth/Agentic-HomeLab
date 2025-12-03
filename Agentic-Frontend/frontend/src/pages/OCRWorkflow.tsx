@@ -65,49 +65,80 @@ import type { OCRWorkflow, OCRBatch, OCRImage } from '../types';
 
 // Timestamp utility functions
 const formatTimestamp = (timestamp: string, showRelative = true) => {
-  if (!timestamp) return 'No date';
+   if (!timestamp) return 'No date';
 
-  const date = new Date(timestamp);
-  const now = new Date();
+   // Ensure timestamp is parsed correctly - handle both ISO strings and other formats
+   let date: Date;
+   try {
+     // If it's already a valid date string, parse it
+     date = new Date(timestamp);
+     // Check if the date is valid
+     if (isNaN(date.getTime())) {
+       console.warn('Invalid timestamp format:', timestamp);
+       return 'Invalid date';
+     }
+   } catch (e) {
+     console.warn('Error parsing timestamp:', timestamp, e);
+     return 'Invalid date';
+   }
 
-  // Format absolute time
-  const absoluteTime = date.toLocaleString('en-US', {
-    timeZone: 'America/New_York',
-    hour12: true,
-    year: 'numeric',
-    month: 'short',
-    day: 'numeric',
-    hour: '2-digit',
-    minute: '2-digit'
-  });
+   const now = new Date();
 
-  // Calculate relative time
-  const diffInSeconds = Math.floor((now.getTime() - date.getTime()) / 1000);
-  let relativeTime = '';
+   // Format absolute time in EST
+   const absoluteTime = date.toLocaleString('en-US', {
+     timeZone: 'America/New_York',
+     hour12: true,
+     year: 'numeric',
+     month: 'short',
+     day: 'numeric',
+     hour: '2-digit',
+     minute: '2-digit'
+   });
 
-  if (showRelative) {
-    if (diffInSeconds < 60) {
-      relativeTime = `${diffInSeconds} second${diffInSeconds !== 1 ? 's' : ''} ago`;
-    } else if (diffInSeconds < 3600) {
-      const minutes = Math.floor(diffInSeconds / 60);
-      relativeTime = `${minutes} minute${minutes !== 1 ? 's' : ''} ago`;
-    } else if (diffInSeconds < 86400) {
-      const hours = Math.floor(diffInSeconds / 3600);
-      relativeTime = `${hours} hour${hours !== 1 ? 's' : ''} ago`;
-    } else {
-      const days = Math.floor(diffInSeconds / 86400);
-      relativeTime = `${days} day${days !== 1 ? 's' : ''} ago`;
-    }
-  }
+   // Calculate relative time using UTC timestamps (simpler and more reliable)
+   // The display is in EST, but we calculate relative time based on actual time difference
+   const diffInSeconds = Math.floor((now.getTime() - date.getTime()) / 1000);
+   let relativeTime = '';
 
-  // Add timezone indicator
-  const timezoneIndicator = 'EST';
+   if (showRelative) {
+     if (diffInSeconds < 0) {
+       // Future date (shouldn't happen normally)
+       console.warn('Future timestamp detected:', timestamp, 'diff:', diffInSeconds);
+       relativeTime = 'in the future';
+     } else if (diffInSeconds < 60) {
+       relativeTime = 'less than a minute ago';
+     } else if (diffInSeconds < 3600) {
+       const minutes = Math.floor(diffInSeconds / 60);
+       if (minutes === 1) {
+         relativeTime = '1 minute ago';
+       } else {
+         relativeTime = `${minutes} minutes ago`;
+       }
+     } else if (diffInSeconds < 86400) {
+       const hours = Math.floor(diffInSeconds / 3600);
+       if (hours === 1) {
+         relativeTime = '1 hour ago';
+       } else {
+         relativeTime = `${hours} hours ago`;
+       }
+     } else if (diffInSeconds < 604800) { // 7 days
+       const days = Math.floor(diffInSeconds / 86400);
+       if (days === 1) {
+         relativeTime = '1 day ago';
+       } else {
+         relativeTime = `${days} days ago`;
+       }
+     } else {
+       // For older dates, don't show relative time
+       relativeTime = '';
+     }
+   }
 
-  if (showRelative && relativeTime) {
-    return `${absoluteTime} (${relativeTime}) ${timezoneIndicator}`;
-  }
+   if (showRelative && relativeTime) {
+     return `${absoluteTime} (${relativeTime})`;
+   }
 
-  return `${absoluteTime} ${timezoneIndicator}`;
+   return `${absoluteTime} EST`;
 };
 
 // OCR Model Selector using the shared ModelSelector component
@@ -156,6 +187,7 @@ const OCRWorkflow: React.FC = () => {
   const [queueExpanded, setQueueExpanded] = useState(false);
   const [artifacts, setArtifacts] = useState<any[]>([]);
   const [artifactsLoading, setArtifactsLoading] = useState(false);
+  const [artifactsExpanded, setArtifactsExpanded] = useState(false);
   const [showSearch, setShowSearch] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [previewDialogOpen, setPreviewDialogOpen] = useState(false);
@@ -596,9 +628,12 @@ const OCRWorkflow: React.FC = () => {
 
   // Artifacts Management Functions
   const loadArtifacts = async () => {
+    console.log('loadArtifacts: Starting to load artifacts');
     try {
       setArtifactsLoading(true);
       const response = await apiClient.getOCRArtifacts();
+      console.log('loadArtifacts: API response:', response);
+      console.log('loadArtifacts: Artifacts count:', response.artifacts?.length || 0);
       setArtifacts(response.artifacts || []);
     } catch (err) {
       console.error('Failed to load artifacts:', err);
@@ -667,22 +702,32 @@ const OCRWorkflow: React.FC = () => {
   };
 
   const handleDeleteArtifact = (workflowId: string) => {
+    console.log('handleDeleteArtifact called with workflowId:', workflowId);
     setArtifactToDelete(workflowId);
     setDeleteConfirmOpen(true);
   };
 
   const confirmDeleteArtifact = async () => {
-    if (!artifactToDelete) return;
+    if (!artifactToDelete) {
+      console.log('confirmDeleteArtifact: No artifactToDelete set');
+      return;
+    }
+
+    console.log('confirmDeleteArtifact: Deleting artifact:', artifactToDelete);
 
     try {
-      await apiClient.deleteOCRArtifact(artifactToDelete);
+      const response = await apiClient.deleteOCRArtifact(artifactToDelete);
+      console.log('confirmDeleteArtifact: Delete response:', response);
       // Refresh artifacts list
       await loadArtifacts();
       setDeleteConfirmOpen(false);
       setArtifactToDelete(null);
-    } catch (err) {
+      setError(''); // Clear any previous errors
+    } catch (err: any) {
       console.error('Failed to delete artifact:', err);
-      setError('Failed to delete OCR artifact');
+      console.error('Error details:', err.response?.data || err.message || err);
+      const errorMessage = err.response?.data?.detail || err.message || 'Failed to delete OCR artifact';
+      setError(`Delete failed: ${errorMessage}`);
       setDeleteConfirmOpen(false);
       setArtifactToDelete(null);
     }
@@ -1405,185 +1450,191 @@ const OCRWorkflow: React.FC = () => {
                     <SearchIcon sx={{ fontSize: '1rem' }} />
                   </IconButton>
                 </Tooltip>
+                <IconButton size="small" onClick={() => setArtifactsExpanded(!artifactsExpanded)}>
+                  {artifactsExpanded ? <ExpandLessIcon /> : <ExpandMoreIcon />}
+                </IconButton>
               </Box>
             }
           />
-          <CardContent>
-            {/* Search Bar */}
-            {showSearch && (
-              <Box sx={{ mb: 2, display: 'flex', gap: 2, alignItems: 'center' }}>
-                <input
-                  type="text"
-                  placeholder="Search by name, date, or model..."
-                  value={searchQuery}
-                  onChange={(e) => setSearchQuery(e.target.value)}
-                  style={{
-                    flex: 1,
-                    padding: '8px 12px',
-                    border: '1px solid rgba(0, 0, 0, 0.12)',
-                    borderRadius: '8px',
-                    fontSize: '0.9rem',
-                    outline: 'none',
-                    backgroundColor: 'background.paper'
-                  }}
-                />
-                <Button
-                  variant="contained"
-                  size="small"
-                  onClick={searchArtifacts}
-                  startIcon={<SearchIcon />}
-                  sx={{ borderRadius: 2 }}
-                >
-                  Search
-                </Button>
-                <Button
-                  variant="outlined"
-                  size="small"
-                  onClick={() => {
-                    setSearchQuery('');
-                    setArtifacts([]);
-                    loadArtifacts();
-                  }}
-                  startIcon={<ClearIcon />}
-                  sx={{ borderRadius: 2 }}
-                >
-                  Clear
-                </Button>
-              </Box>
-            )}
-    
-            {/* Artifacts List */}
-            {artifactsLoading ? (
-              <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'center', py: 4 }}>
-                <CircularProgress size={24} />
-                <Typography variant="body2" sx={{ ml: 2 }}>
-                  Loading artifacts...
-                </Typography>
-              </Box>
-            ) : artifacts.length > 0 ? (
-              <List dense sx={{ py: 0 }}>
-                {artifacts.map((artifact, index) => (
-                  <ListItem
-                    key={index}
-                    sx={{
-                      py: 2,
-                      px: 2,
-                      borderBottom: '1px solid rgba(0, 0, 0, 0.08)',
-                      '&:last-child': { borderBottom: 'none' }
+
+          <Collapse in={artifactsExpanded} timeout="auto">
+            <CardContent>
+              {/* Search Bar */}
+              {showSearch && (
+                <Box sx={{ mb: 2, display: 'flex', gap: 2, alignItems: 'center' }}>
+                  <input
+                    type="text"
+                    placeholder="Search by name, date, or model..."
+                    value={searchQuery}
+                    onChange={(e) => setSearchQuery(e.target.value)}
+                    style={{
+                      flex: 1,
+                      padding: '8px 12px',
+                      border: '1px solid rgba(0, 0, 0, 0.12)',
+                      borderRadius: '8px',
+                      fontSize: '0.9rem',
+                      outline: 'none',
+                      backgroundColor: 'background.paper'
                     }}
+                  />
+                  <Button
+                    variant="contained"
+                    size="small"
+                    onClick={searchArtifacts}
+                    startIcon={<SearchIcon />}
+                    sx={{ borderRadius: 2 }}
                   >
-                    <Box sx={{ width: '100%', display: 'flex', flexDirection: 'column', gap: 1 }}>
-                      {/* Header */}
-                      <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
-                        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                          <Typography variant="subtitle1" sx={{ fontWeight: 600 }}>
-                            {artifact.workflow_name || `Artifact ${index + 1}`}
-                          </Typography>
-                          <Chip
-                            label={artifact.ocr_model}
-                            size="small"
-                            variant="outlined"
-                            sx={{ fontSize: '0.7rem' }}
-                          />
-                        </Box>
-                        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
-                          <Typography variant="caption" color="text.secondary">
-                            {formatTimestamp(artifact.completed_at)}
-                          </Typography>
-                          <Tooltip title="Delete Artifact">
-                            <IconButton
-                              size="small"
-                              onClick={() => handleDeleteArtifact(artifact.workflow_id)}
-                              sx={{ color: 'error.main' }}
-                            >
-                              <DeleteIcon sx={{ fontSize: '1rem' }} />
-                            </IconButton>
-                          </Tooltip>
-                        </Box>
-                      </Box>
-    
-                      {/* Metadata */}
-                      <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, flexWrap: 'wrap' }}>
-                        <Typography variant="caption" color="text.secondary">
-                          <strong>{artifact.total_images}</strong> images • <strong>{artifact.total_pages}</strong> pages
-                        </Typography>
-                        <Typography variant="caption" color="text.secondary">
-                          {artifact.batches.length} batch{artifact.batches.length !== 1 ? 'es' : ''}
-                        </Typography>
-                      </Box>
-    
-                      {/* Preview */}
-                      {artifact.preview_content && (
-                        <Box sx={{
-                          mt: 1,
-                          p: 2,
-                          bgcolor: 'grey.50',
-                          borderRadius: 1,
-                          border: '1px solid rgba(0, 0, 0, 0.08)'
-                        }}>
-                          <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 1 }}>
-                            Preview:
-                          </Typography>
-                          <Typography variant="body2" sx={{
-                            fontSize: '0.8rem',
-                            whiteSpace: 'pre-wrap',
-                            maxHeight: '100px',
-                            overflow: 'hidden',
-                            textOverflow: 'ellipsis'
-                          }}>
-                            {artifact.preview_content}
-                          </Typography>
-                        </Box>
-                      )}
-    
-                      {/* Actions */}
-                      <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mt: 1 }}>
-                        <Button
-                          variant="outlined"
-                          size="small"
-                          onClick={() => handleDownloadArtifact(artifact.workflow_id)}
-                          startIcon={<DownloadIcon />}
-                          sx={{ borderRadius: 2 }}
-                        >
-                          Download
-                        </Button>
-                        <Button
-                          variant="outlined"
-                          size="small"
-                          onClick={() => handlePreviewArtifact(artifact.workflow_id)}
-                          startIcon={<ImageIcon />}
-                          sx={{ borderRadius: 2 }}
-                        >
-                          Preview
-                        </Button>
-                        <Button
-                          variant="outlined"
-                          size="small"
-                          onClick={() => handleViewDetails(artifact.workflow_id)}
-                          startIcon={<InfoIcon />}
-                          sx={{ borderRadius: 2 }}
-                        >
-                          Details
-                        </Button>
-                      </Box>
-                    </Box>
-                  </ListItem>
-                ))}
-              </List>
-            ) : (
-              <Box sx={{ textAlign: 'center', py: 4 }}>
-                <ImageIcon sx={{ fontSize: '2rem', color: 'text.disabled', mb: 1 }} />
-                <Typography variant="body2" color="text.secondary">
-                  No OCR artifacts found
-                </Typography>
-                {searchQuery && (
-                  <Typography variant="caption" color="text.secondary" sx={{ mt: 1 }}>
-                    Try clearing your search or processing some documents first
+                    Search
+                  </Button>
+                  <Button
+                    variant="outlined"
+                    size="small"
+                    onClick={() => {
+                      setSearchQuery('');
+                      setArtifacts([]);
+                      loadArtifacts();
+                    }}
+                    startIcon={<ClearIcon />}
+                    sx={{ borderRadius: 2 }}
+                  >
+                    Clear
+                  </Button>
+                </Box>
+              )}
+
+              {/* Artifacts List */}
+              {artifactsLoading ? (
+                <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'center', py: 4 }}>
+                  <CircularProgress size={24} />
+                  <Typography variant="body2" sx={{ ml: 2 }}>
+                    Loading artifacts...
                   </Typography>
-                )}
-              </Box>
-            )}
-          </CardContent>
+                </Box>
+              ) : artifacts.length > 0 ? (
+                <List dense sx={{ py: 0 }}>
+                  {artifacts.map((artifact, index) => (
+                    <ListItem
+                      key={index}
+                      sx={{
+                        py: 2,
+                        px: 2,
+                        borderBottom: '1px solid rgba(0, 0, 0, 0.08)',
+                        '&:last-child': { borderBottom: 'none' }
+                      }}
+                    >
+                      <Box sx={{ width: '100%', display: 'flex', flexDirection: 'column', gap: 1 }}>
+                        {/* Header */}
+                        <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+                          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                            <Typography variant="subtitle1" sx={{ fontWeight: 600 }}>
+                              {artifact.workflow_name || `Artifact ${index + 1}`}
+                            </Typography>
+                            <Chip
+                              label={artifact.ocr_model}
+                              size="small"
+                              variant="outlined"
+                              sx={{ fontSize: '0.7rem' }}
+                            />
+                          </Box>
+                          <Box sx={{ display: 'flex', alignItems: 'center', gap: 1 }}>
+                            <Typography variant="caption" color="text.secondary">
+                              {formatTimestamp(artifact.completed_at)}
+                            </Typography>
+                            <Tooltip title="Delete Artifact">
+                              <IconButton
+                                size="small"
+                                onClick={() => handleDeleteArtifact(artifact.workflow_id)}
+                                sx={{ color: 'error.main' }}
+                              >
+                                <DeleteIcon sx={{ fontSize: '1rem' }} />
+                              </IconButton>
+                            </Tooltip>
+                          </Box>
+                        </Box>
+
+                        {/* Metadata */}
+                        <Box sx={{ display: 'flex', alignItems: 'center', gap: 2, flexWrap: 'wrap' }}>
+                          <Typography variant="caption" color="text.secondary">
+                            <strong>{artifact.total_images}</strong> images • <strong>{artifact.total_pages}</strong> pages
+                          </Typography>
+                          <Typography variant="caption" color="text.secondary">
+                            {artifact.batches.length} batch{artifact.batches.length !== 1 ? 'es' : ''}
+                          </Typography>
+                        </Box>
+
+                        {/* Preview */}
+                        {artifact.preview_content && (
+                          <Box sx={{
+                            mt: 1,
+                            p: 2,
+                            bgcolor: 'grey.50',
+                            borderRadius: 1,
+                            border: '1px solid rgba(0, 0, 0, 0.08)'
+                          }}>
+                            <Typography variant="caption" color="text.secondary" sx={{ display: 'block', mb: 1 }}>
+                              Preview:
+                            </Typography>
+                            <Typography variant="body2" sx={{
+                              fontSize: '0.8rem',
+                              whiteSpace: 'pre-wrap',
+                              maxHeight: '100px',
+                              overflow: 'hidden',
+                              textOverflow: 'ellipsis'
+                            }}>
+                              {artifact.preview_content}
+                            </Typography>
+                          </Box>
+                        )}
+
+                        {/* Actions */}
+                        <Box sx={{ display: 'flex', alignItems: 'center', gap: 1, mt: 1 }}>
+                          <Button
+                            variant="outlined"
+                            size="small"
+                            onClick={() => handleDownloadArtifact(artifact.workflow_id)}
+                            startIcon={<DownloadIcon />}
+                            sx={{ borderRadius: 2 }}
+                          >
+                            Download
+                          </Button>
+                          <Button
+                            variant="outlined"
+                            size="small"
+                            onClick={() => handlePreviewArtifact(artifact.workflow_id)}
+                            startIcon={<ImageIcon />}
+                            sx={{ borderRadius: 2 }}
+                          >
+                            Preview
+                          </Button>
+                          <Button
+                            variant="outlined"
+                            size="small"
+                            onClick={() => handleViewDetails(artifact.workflow_id)}
+                            startIcon={<InfoIcon />}
+                            sx={{ borderRadius: 2 }}
+                          >
+                            Details
+                          </Button>
+                        </Box>
+                      </Box>
+                    </ListItem>
+                  ))}
+                </List>
+              ) : (
+                <Box sx={{ textAlign: 'center', py: 4 }}>
+                  <ImageIcon sx={{ fontSize: '2rem', color: 'text.disabled', mb: 1 }} />
+                  <Typography variant="body2" color="text.secondary">
+                    No OCR artifacts found
+                  </Typography>
+                  {searchQuery && (
+                    <Typography variant="caption" color="text.secondary" sx={{ mt: 1 }}>
+                      Try clearing your search or processing some documents first
+                    </Typography>
+                  )}
+                </Box>
+              )}
+            </CardContent>
+          </Collapse>
         </Card>
       </Box>
     

@@ -1104,29 +1104,40 @@ async def delete_ocr_artifact(
                 detail="Only completed workflows can be deleted as artifacts"
             )
 
-        # Delete associated batches and images
+        # Delete associated data in correct order to handle foreign key constraints
         # Get batch IDs first
         batches_result = await db.execute(
             select(OCRBatch.id).where(OCRBatch.workflow_id == workflow_uuid)
         )
         batch_ids = [row[0] for row in batches_result.fetchall()]
 
-        # Delete images
+        # 1. Delete OCR documents that reference this workflow or its batches
+        await db.execute(
+            delete(OCRDocument).where(
+                (OCRDocument.workflow_id == workflow_uuid) |
+                (OCRDocument.batch_id.in_(batch_ids) if batch_ids else False)
+            )
+        )
+
+        # 2. Delete workflow logs (by workflow, batch, and image references)
+        await db.execute(
+            delete(OCRWorkflowLog).where(
+                (OCRWorkflowLog.workflow_id == workflow_uuid) |
+                (OCRWorkflowLog.batch_id.in_(batch_ids) if batch_ids else False)
+            )
+        )
+
+        # 3. Delete images (by workflow_id)
         await db.execute(
             delete(OCRImage).where(OCRImage.workflow_id == workflow_uuid)
         )
 
-        # Delete batches
+        # 4. Delete batches
         await db.execute(
             delete(OCRBatch).where(OCRBatch.workflow_id == workflow_uuid)
         )
 
-        # Delete workflow logs
-        await db.execute(
-            delete(OCRWorkflowLog).where(OCRWorkflowLog.workflow_id == workflow_uuid)
-        )
-
-        # Delete the workflow itself
+        # 5. Delete the workflow itself
         await db.execute(
             delete(OCRWorkflow).where(OCRWorkflow.id == workflow_uuid)
         )
