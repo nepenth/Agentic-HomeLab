@@ -110,77 +110,104 @@ class AgenticReasoningService:
         # Build system prompt
         system_prompt = f"""You are an advanced AI assistant that helps users understand and manage their emails through multi-step reasoning and tool usage.
 
-You have access to the following tools that you can use to gather information:
+        You have access to the following tools that you can use to gather information:
 
-{tools_description}
+        {tools_description}
 
-## Core Reasoning Framework
+        ## Core Reasoning Framework
 
-When answering a user's question, follow this systematic approach:
+        When answering a user's question, follow this systematic approach:
 
-### 1. **Problem Analysis**
-   - Understand what the user is asking for
-   - Identify the key entities, time ranges, and specific requirements
-   - Determine what information sources are needed
+        ### 1. **Problem Analysis**
+           - Understand what the user is asking for
+           - Identify the key entities, time ranges, and specific requirements
+           - Determine what information sources are needed
 
-### 2. **Information Gathering Strategy**
-   - Choose the most appropriate tools for the task
-   - Use semantic search (embeddings) when looking for content by meaning
-   - Apply entity extraction to identify specific data points (order numbers, dates, etc.)
-   - Retrieve full content when detailed analysis is needed
+        ### 2. **Information Gathering Strategy**
+           - Choose the most appropriate tools for the task
+           - Use semantic search (embeddings) when looking for content by meaning
+           - Apply entity extraction to identify specific data points (order numbers, dates, etc.)
+           - Retrieve full content when detailed analysis is needed
 
-### 3. **Multi-Step Tool Usage**
-   - **Search First**: Use `search_emails` to find relevant emails by semantic meaning
-   - **Extract Entities**: Use `extract_entities` to pull out specific data like order numbers, tracking numbers, dates
-   - **Get Full Content**: Use `get_email_thread` to retrieve complete email content for detailed analysis
-   - **Iterate**: Based on results, decide if more information is needed
+        ### 3. **Multi-Step Tool Usage**
+           - **Search First**: Use `search_emails` to find relevant emails by semantic meaning
+           - **Extract Entities**: Use `extract_entities` to pull out specific data like order numbers, tracking numbers, dates
+           - **Get Full Content**: Use `get_email_thread` to retrieve complete email content for detailed analysis
+           - **Iterate**: Based on results, decide if more information is needed
 
-### 4. **Synthesis and Analysis**
-   - Correlate information from multiple sources
-   - Deduplicate and organize findings
-   - Provide comprehensive answers with all relevant details
+        ### 4. **Synthesis and Analysis**
+           - Correlate information from multiple sources
+           - Deduplicate and organize findings
+           - Provide comprehensive answers with all relevant details
 
-## Tool Usage Guidelines
+        ## Tool Usage Guidelines
 
-### search_emails
-- Use semantic queries that capture the meaning (e.g., "Amazon order confirmations" not just "Amazon")
-- Set appropriate time ranges to focus results
-- Use reasonable max_results (10-20 for initial searches)
+        ### search_emails
+        - Use semantic queries that capture the meaning (e.g., "Amazon order confirmations" not just "Amazon")
+        - Set appropriate time ranges to focus results
+        - Use reasonable max_results (10-20 for initial searches)
 
-### extract_entities
-- Specify relevant entity types: ["order_number", "tracking_number", "date", "amount"]
-- Apply to specific email IDs from search results
-- Use when you need structured data extraction
+        ### extract_entities
+        - Specify relevant entity types: ["order_number", "tracking_number", "date", "amount"]
+        - Apply to specific email IDs from search results
+        - Use when you need structured data extraction
 
-### get_email_thread
-- Use when you need full email content for detailed analysis
-- Include_sent=false for most cases (focus on received emails)
-- Apply to specific emails identified through search/extraction
+        ### get_email_thread
+        - Use when you need full email content for detailed analysis
+        - Include_sent=false for most cases (focus on received emails)
+        - Apply to specific emails identified through search/extraction
 
-## Response Format
+        ## Response Format
 
-To use a tool, respond with a JSON object:
-{{
-    "reasoning": "Brief explanation of why you're using this tool and what you expect to find",
-    "tool": "tool_name",
-    "parameters": {{"param1": "value1", "param2": "value2"}}
-}}
+        To use a tool, respond with a JSON object:
+        {{
+            "reasoning": "Brief explanation of why you're using this tool and what you expect to find",
+            "tool": "tool_name",
+            "parameters": {{"param1": "value1", "param2": "value2"}}
+        }}
 
-When you have enough information to answer, respond with:
-{{
-    "reasoning": "Summary of findings and analysis approach",
-    "final_answer": "Your comprehensive answer in markdown format"
-}}
+        When you have enough information to answer, respond with:
+        {{
+            "reasoning": "Summary of findings and analysis approach",
+            "final_answer": "Your comprehensive answer in markdown format"
+        }}
 
-## Best Practices
+        If you need to provide intermediate reasoning without using tools, respond with:
+        {{
+            "reasoning": "Your analysis and reasoning so far",
+            "continue": true
+        }}
 
-- **Be Methodical**: Follow a clear search → extract → analyze → synthesize pattern
-- **Use Semantics**: Leverage embedding-based search for better relevance
-- **Be Specific**: Use targeted entity extraction rather than parsing everything manually
-- **Iterate Intelligently**: Use results from one tool to inform the next tool call
-- **Provide Context**: Explain your reasoning and approach at each step
-- **Handle Edge Cases**: If searches don't yield expected results, try alternative queries or approaches
-"""
+        ## Best Practices
+
+        - **Be Methodical**: Follow a clear search → extract → analyze → synthesize pattern
+        - **Use Semantics**: Leverage embedding-based search for better relevance
+        - **Be Specific**: Use targeted entity extraction rather than parsing everything manually
+        - **Iterate Intelligently**: Use results from one tool to inform the next tool call
+        - **Provide Context**: Explain your reasoning and approach at each step
+        - **Handle Edge Cases**: If searches don't yield expected results, try alternative queries or approaches
+
+        ## MANDATORY REQUIREMENTS FOR COMPLETE REASONING
+
+        ### Complete Reasoning Process
+        - You MUST use at least one tool call for every user query
+        - You MUST provide a comprehensive final answer with specific insights
+        - You MUST NOT stop reasoning until you have completed the full analysis
+        - You MUST use semantic search (embeddings) for email analysis
+
+        ### Tool Usage Requirements
+        - You MUST use search_emails for finding relevant emails
+        - You MUST use extract_entities for structured data extraction
+        - You MUST use get_email_thread for detailed content analysis
+        - You MUST use all three tools in sequence for comprehensive analysis
+
+        ### Final Answer Requirements
+        - You MUST provide a minimum of 500 words in your final answer
+        - You MUST include specific patterns, trends, and insights
+        - You MUST provide concrete examples from the email data
+        - You MUST use markdown formatting with clear sections
+        - You MUST include a summary, detailed analysis, and actionable insights
+        """
 
         # Initialize conversation with system prompt and user query
         messages = [
@@ -204,7 +231,8 @@ When you have enough information to answer, respond with:
                     messages=messages,
                     model=model_name,
                     format="json",  # Request JSON output
-                    timeout_ms=timeout_ms
+                    timeout_ms=timeout_ms,
+                    options={"temperature": 0.7, "top_p": 0.9, "num_predict": 8192, "repetition_penalty": 1.2}
                 )
 
                 response_content = response.get("message", {}).get("content", "")
@@ -216,6 +244,9 @@ When you have enough information to answer, respond with:
                     self.logger.warning(f"Failed to parse JSON response: {je}")
                     # If not valid JSON, treat as final answer
                     parsed_response = {"final_answer": response_content}
+
+                # Debug: Log the parsed response to understand what's happening
+                self.logger.info(f"Parsed LLM response: {parsed_response}")
 
                 # Check if this is the final answer
                 if "final_answer" in parsed_response:
@@ -230,12 +261,33 @@ When you have enough information to answer, respond with:
                     )
                     yield final_step
 
+                    # Validate final answer meets requirements
+                    final_answer = parsed_response["final_answer"]
+                    if len(final_answer) < 500:
+                        # Force model to provide more comprehensive answer
+                        messages.append({
+                            "role": "user",
+                            "content": f"Your answer is too brief. Please provide a comprehensive analysis with specific insights, patterns, and concrete examples. Minimum 500 words required. Include clear sections with markdown formatting."
+                        })
+                        continue
+
+                    # Validate answer has required structure
+                    required_sections = ["Summary", "Detailed Analysis", "Actionable Insights"]
+                    missing_sections = [section for section in required_sections if section not in final_answer]
+
+                    if missing_sections:
+                        messages.append({
+                            "role": "user",
+                            "content": f"Your answer is missing required sections: {', '.join(missing_sections)}. Please provide a complete analysis with all required sections."
+                        })
+                        continue
+
                     # Yield the actual answer as a separate step
                     answer_step = ReasoningStep(
                         step_number=step_number + 1,
                         step_type=ReasoningStepType.FINAL_ANSWER,
                         description="Final Answer",
-                        content=parsed_response["final_answer"],
+                        content=final_answer,
                         duration_ms=0
                     )
                     yield answer_step
@@ -251,9 +303,57 @@ When you have enough information to answer, respond with:
                     yield completion_step
                     break
 
+                # Check if this is just a reasoning step without final answer
+                elif "reasoning" in parsed_response and not "tool" in parsed_response:
+                    step_duration = int(timedelta_seconds(step_start) * 1000)
+
+                    reasoning_step = ReasoningStep(
+                        step_number=step_number,
+                        step_type=ReasoningStepType.ANALYSIS,
+                        description="Analysis and reasoning",
+                        content=parsed_response.get("reasoning", ""),
+                        duration_ms=step_duration
+                    )
+                    yield reasoning_step
+
+                    # Add the reasoning to conversation history
+                    messages.append({
+                        "role": "assistant",
+                        "content": json.dumps(parsed_response)
+                    })
+                    messages.append({
+                        "role": "user",
+                        "content": "Continue with your analysis. What's your next step? Remember: You MUST use tools for comprehensive analysis."
+                    })
+                    continue
+
                 # This is a tool call
                 if "tool" in parsed_response and tool_call_count < self.max_tool_calls:
                     tool_call_count += 1
+
+                # Handle continue response (intermediate reasoning without tools)
+                elif "continue" in parsed_response and parsed_response.get("continue") is True:
+                    step_duration = int(timedelta_seconds(step_start) * 1000)
+
+                    continue_step = ReasoningStep(
+                        step_number=step_number,
+                        step_type=ReasoningStepType.ANALYSIS,
+                        description="Continuing analysis",
+                        content=parsed_response.get("reasoning", ""),
+                        duration_ms=step_duration
+                    )
+                    yield continue_step
+
+                    # Add the reasoning to conversation history
+                    messages.append({
+                        "role": "assistant",
+                        "content": json.dumps(parsed_response)
+                    })
+                    messages.append({
+                        "role": "user",
+                        "content": "Continue with your analysis. What's your next step? Remember: You MUST use tools for comprehensive analysis."
+                    })
+                    continue
 
                     tool_name = parsed_response["tool"]
                     parameters = parsed_response.get("parameters", {})
@@ -337,8 +437,15 @@ When you have enough information to answer, respond with:
                     # Force conclusion
                     messages.append({
                         "role": "user",
-                        "content": "You've used the maximum number of tool calls. Please provide your final answer based on the information you've gathered."
+                        "content": "You've used the maximum number of tool calls. Please provide your final answer based on the information you've gathered. Your answer must be comprehensive with specific insights and patterns, minimum 500 words with concrete examples."
                     })
+
+                # Handle case where model doesn't provide expected JSON structure
+                else:
+                    self.logger.warning(f"Unexpected LLM response structure: {parsed_response}")
+                    # Treat as final answer to prevent infinite loop
+                    parsed_response = {"final_answer": "I'm sorry, I encountered an issue processing your request. Please try again with a more specific question and ensure you use the available tools for comprehensive analysis."}
+                    continue
 
             except Exception as e:
                 self.logger.error(f"Reasoning step error: {e}", exc_info=True)
