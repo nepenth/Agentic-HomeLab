@@ -796,39 +796,58 @@ async def clear_all_ocr_workflows(
                 "cancelled_count": 0
             }
 
-        # Update workflows
-        await db.execute(
-            update(OCRWorkflow).where(
-                and_(
-                    OCRWorkflow.user_id == current_user.username,
-                    OCRWorkflow.status.in_(["pending", "running"])
+        try:
+            # Update workflows
+            await db.execute(
+                update(OCRWorkflow).where(
+                    and_(
+                        OCRWorkflow.user_id == current_user.username,
+                        OCRWorkflow.status.in_(["pending", "running"])
+                    )
+                ).values(
+                    status="cancelled",
+                    completed_at=datetime.utcnow(),
+                    error_message="Cancelled by user - clear all"
                 )
-            ).values(
-                status="cancelled",
-                completed_at=datetime.utcnow(),
-                error_message="Cancelled by user - clear all"
             )
-        )
 
-        # Update associated batches
-        await db.execute(
-            update(OCRBatch).where(
-                OCRBatch.workflow_id.in_(workflow_ids)
-            ).values(
-                status="cancelled",
-                completed_at=datetime.utcnow()
+            # Update associated batches
+            await db.execute(
+                update(OCRBatch).where(
+                    OCRBatch.workflow_id.in_(workflow_ids)
+                ).values(
+                    status="cancelled",
+                    completed_at=datetime.utcnow()
+                )
             )
+
+            await db.commit()
+
+            logger.info(f"Cancelled {len(workflow_ids)} OCR workflows for user {current_user.username}")
+
+            return {
+                "message": f"Cancelled {len(workflow_ids)} workflows successfully",
+                "cancelled_count": len(workflow_ids),
+                "cancelled_workflows": [str(wid) for wid in workflow_ids]
+            }
+
+        except HTTPException:
+            raise
+        except Exception as e:
+            logger.error(f"Failed to clear all OCR workflows: {e}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Failed to clear all workflows"
+            )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to clear all OCR workflows: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to clear all workflows"
         )
-
-        await db.commit()
-
-        logger.info(f"Cancelled {len(workflow_ids)} OCR workflows for user {current_user.username}")
-
-        return {
-            "message": f"Cancelled {len(workflow_ids)} workflows successfully",
-            "cancelled_count": len(workflow_ids),
-            "cancelled_workflows": [str(wid) for wid in workflow_ids]
-        }
 
 @router.get("/artifacts")
 async def get_ocr_artifacts(
@@ -975,12 +994,15 @@ async def get_ocr_artifacts(
             "user_id": current_user.username
         }
 
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Failed to get OCR artifacts: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to get OCR artifacts"
         )
+
 
 @router.get("/artifacts/{workflow_id}/download")
 async def download_ocr_artifact(
