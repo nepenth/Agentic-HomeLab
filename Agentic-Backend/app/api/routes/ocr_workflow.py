@@ -14,7 +14,7 @@ from uuid import UUID, uuid4
 import os
 from datetime import datetime
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, and_, update
+from sqlalchemy import select, and_, update, delete, func
 from sqlalchemy.orm import selectinload
 from app.api.dependencies import get_db_session, get_current_user
 from app.db.models.user import User
@@ -720,70 +720,6 @@ async def clear_all_workflows(
             detail="Failed to clear all workflows"
         )
 
-# Queue Management Endpoints
-
-@router.get("/queue/status")
-async def get_ocr_queue_status(
-    current_user: User = Depends(get_current_user),
-    db: AsyncSession = Depends(get_db_session)
-):
-    """
-    Get OCR queue status and active workflows.
-    """
-    try:
-        # Get active workflows for the user
-        workflows_result = await db.execute(
-            select(OCRWorkflow).where(
-                and_(
-                    OCRWorkflow.user_id == current_user.username,
-                    OCRWorkflow.status.in_(["pending", "running"])
-                )
-            ).order_by(OCRWorkflow.created_at.desc())
-        )
-        workflows = workflows_result.scalars().all()
-
-        # Get workflow details with batch info
-        queue_items = []
-        for workflow in workflows:
-            batches_result = await db.execute(
-                select(OCRBatch).where(OCRBatch.workflow_id == workflow.id)
-            )
-            batches = batches_result.scalars().all()
-
-            queue_items.append({
-                "workflow_id": str(workflow.id),
-                "workflow_name": workflow.workflow_name,
-                "status": workflow.status,
-                "created_at": workflow.created_at.isoformat() if workflow.created_at else None,
-                "started_at": workflow.started_at.isoformat() if workflow.started_at else None,
-                "total_images": workflow.total_images,
-                "processed_images": workflow.processed_images,
-                "ocr_model": workflow.ocr_model,
-                "batches": [
-                    {
-                        "batch_id": str(batch.id),
-                        "batch_name": batch.batch_name,
-                        "status": batch.status,
-                        "total_images": batch.total_images,
-                        "processed_images": batch.processed_images,
-                        "created_at": batch.created_at.isoformat() if batch.created_at else None,
-                    }
-                    for batch in batches
-                ]
-            })
-
-        return {
-            "queue_items": queue_items,
-            "total_count": len(queue_items),
-            "user_id": current_user.username
-        }
-
-    except Exception as e:
-        logger.error(f"Failed to get OCR queue status: {e}")
-        raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to get queue status"
-        )
 
 @router.delete("/workflows/{workflow_id}")
 async def cancel_ocr_workflow(
@@ -894,9 +830,365 @@ async def clear_all_ocr_workflows(
             "cancelled_workflows": [str(wid) for wid in workflow_ids]
         }
 
+@router.get("/artifacts")
+async def get_ocr_artifacts(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db_session),
+    limit: int = 100,
+    offset: int = 0,
+    search: Optional[str] = None,
+    start_date: Optional[str] = None,
+    end_date: Optional[str] = None,
+    model_filter: Optional[str] = None
+) -> dict:
+    """
+    Get all OCR artifacts (completed workflows) for the current user.
+
+    This endpoint provides access to all completed OCR workflows and their associated
+    documents for artifact management, search, and retrieval.
+    """
+    try:
+        # Build base query for completed workflows
+        query = select(OCRWorkflow).where(
+            and_(
+                OCRWorkflow.user_id == current_user.username,
+                OCRWorkflow.status == "completed"
+            )
+        )
+
+        # Apply search filter if provided
+        if search:
+            query = query.where(
+                OCRWorkflow.workflow_name.ilike(f"%{search}%")
+            )
+
+        # Apply date range filters
+        if start_date:
+            try:
+                start_datetime = datetime.fromisoformat(start_date)
+                query = query.where(OCRWorkflow.completed_at >= start_datetime)
+            except ValueError:
+                pass
+
+        if end_date:
+            try:
+                end_datetime = datetime.fromisoformat(end_date)
+                query = query.where(OCRWorkflow.completed_at <= end_datetime)
+            except ValueError:
+                pass
+
+        # Apply model filter
+        if model_filter:
+            query = query.where(
+                OCRWorkflow.ocr_model.ilike(f"%{model_filter}%")
+            )
+
+        # Order by most recent first
+        query = query.order_by(OCRWorkflow.completed_at.desc())
+
+        # Apply pagination
+        query = query.limit(limit).offset(offset)
+
+        # Execute query
+        workflows_result = await db.execute(query)
+        workflows = workflows_result.scalars().all()
+
+        # Get total count for pagination
+        count_query = select(func.count()).select_from(OCRWorkflow).where(
+            and_(
+                OCRWorkflow.user_id == current_user.username,
+                OCRWorkflow.status == "completed"
+            )
+        )
+
+        # Apply same filters to count query
+        if search:
+            count_query = count_query.where(
+                OCRWorkflow.workflow_name.ilike(f"%{search}%")
+            )
+
+        if start_date:
+            try:
+                start_datetime = datetime.fromisoformat(start_date)
+                count_query = count_query.where(OCRWorkflow.completed_at >= start_datetime)
+            except ValueError:
+                pass
+
+        if end_date:
+            try:
+                end_datetime = datetime.fromisoformat(end_date)
+                count_query = count_query.where(OCRWorkflow.completed_at <= end_datetime)
+            except ValueError:
+                pass
+
+        if model_filter:
+            count_query = count_query.where(
+                OCRWorkflow.ocr_model.ilike(f"%{model_filter}%")
+            )
+
+        total_count_result = await db.execute(count_query)
+        total_count = total_count_result.scalar()
+
+        # Build response with workflow details and associated batches
+        artifacts = []
+        for workflow in workflows:
+            # Get batches for this workflow
+            batches_result = await db.execute(
+                select(OCRBatch).where(OCRBatch.workflow_id == workflow.id)
+            )
+            batches = batches_result.scalars().all()
+
+            # Get first batch's combined markdown as preview
+            preview_content = ""
+            if batches and batches[0].combined_markdown:
+                preview_content = batches[0].combined_markdown[:500] + "..." if len(batches[0].combined_markdown) > 500 else batches[0].combined_markdown
+
+            artifacts.append({
+                "workflow_id": str(workflow.id),
+                "workflow_name": workflow.workflow_name,
+                "ocr_model": workflow.ocr_model,
+                "status": workflow.status,
+                "total_images": workflow.total_images,
+                "total_pages": workflow.total_pages,
+                "created_at": workflow.created_at.isoformat() if workflow.created_at else None,
+                "completed_at": workflow.completed_at.isoformat() if workflow.completed_at else None,
+                "preview_content": preview_content,
+                "batches": [
+                    {
+                        "batch_id": str(batch.id),
+                        "batch_name": batch.batch_name,
+                        "status": batch.status,
+                        "total_images": batch.total_images,
+                        "page_count": batch.page_count,
+                        "document_title": batch.document_title,
+                        "has_markdown": bool(batch.combined_markdown)
+                    }
+                    for batch in batches
+                ]
+            })
+
+        return {
+            "artifacts": artifacts,
+            "total_count": total_count,
+            "limit": limit,
+            "offset": offset,
+            "user_id": current_user.username
+        }
+
     except Exception as e:
-        logger.error(f"Failed to clear all OCR workflows: {e}")
+        logger.error(f"Failed to get OCR artifacts: {e}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail="Failed to clear workflows"
+            detail="Failed to get OCR artifacts"
+        )
+
+@router.get("/artifacts/{workflow_id}/download")
+async def download_ocr_artifact(
+    workflow_id: str,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db_session)
+) -> dict:
+    """
+    Download OCR artifact content as markdown file.
+    """
+    try:
+        workflow_uuid = UUID(workflow_id)
+        workflow = await db.get(OCRWorkflow, workflow_uuid)
+
+        if not workflow or workflow.user_id != current_user.username:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Workflow not found"
+            )
+
+        if workflow.status != "completed":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Workflow is not completed yet"
+            )
+
+        # Get combined results from batches
+        batches_result = await db.execute(
+            select(OCRBatch).where(
+                and_(
+                    OCRBatch.workflow_id == workflow_uuid,
+                    OCRBatch.status == "completed"
+                )
+            )
+        )
+        batches = batches_result.scalars().all()
+
+        if not batches:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="No completed batches found for this workflow"
+            )
+
+        combined_markdown = ""
+        for batch in batches:
+            if batch.combined_markdown:
+                combined_markdown += f"\n\n--- {batch.batch_name} ---\n\n"
+                combined_markdown += batch.combined_markdown
+
+        if not combined_markdown.strip():
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="No OCR content available for download"
+            )
+
+        return {
+            "workflow_id": workflow_id,
+            "workflow_name": workflow.workflow_name,
+            "content": combined_markdown.strip(),
+            "content_length": len(combined_markdown),
+            "created_at": workflow.created_at.isoformat() if workflow.created_at else None,
+            "completed_at": workflow.completed_at.isoformat() if workflow.completed_at else None,
+            "ocr_model": workflow.ocr_model,
+            "total_pages": sum(batch.page_count for batch in batches),
+            "batches_count": len(batches)
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to download OCR artifact: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to download OCR artifact"
+        )
+
+@router.delete("/artifacts/{workflow_id}")
+async def delete_ocr_artifact(
+    workflow_id: str,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db_session)
+) -> dict:
+    """
+    Delete an OCR artifact (workflow and associated data).
+    """
+    try:
+        workflow_uuid = UUID(workflow_id)
+        workflow = await db.get(OCRWorkflow, workflow_uuid)
+
+        if not workflow or workflow.user_id != current_user.username:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Workflow not found"
+            )
+
+        if workflow.status != "completed":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Only completed workflows can be deleted as artifacts"
+            )
+
+        # Delete associated batches and images
+        # Get batch IDs first
+        batches_result = await db.execute(
+            select(OCRBatch.id).where(OCRBatch.workflow_id == workflow_uuid)
+        )
+        batch_ids = [row[0] for row in batches_result.fetchall()]
+
+        # Delete images
+        await db.execute(
+            delete(OCRImage).where(OCRImage.workflow_id == workflow_uuid)
+        )
+
+        # Delete batches
+        await db.execute(
+            delete(OCRBatch).where(OCRBatch.workflow_id == workflow_uuid)
+        )
+
+        # Delete workflow logs
+        await db.execute(
+            delete(OCRWorkflowLog).where(OCRWorkflowLog.workflow_id == workflow_uuid)
+        )
+
+        # Delete the workflow itself
+        await db.execute(
+            delete(OCRWorkflow).where(OCRWorkflow.id == workflow_uuid)
+        )
+
+        await db.commit()
+
+        return {
+            "message": "OCR artifact deleted successfully",
+            "workflow_id": workflow_id,
+            "deleted_batches": len(batch_ids),
+            "status": "deleted"
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to delete OCR artifact: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to delete OCR artifact"
+        )
+
+@router.get("/artifacts/{workflow_id}/preview")
+async def preview_ocr_artifact(
+    workflow_id: str,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db_session)
+) -> dict:
+    """
+    Get preview content for an OCR artifact.
+    """
+    try:
+        workflow_uuid = UUID(workflow_id)
+        workflow = await db.get(OCRWorkflow, workflow_uuid)
+
+        if not workflow or workflow.user_id != current_user.username:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Workflow not found"
+            )
+
+        if workflow.status != "completed":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Workflow is not completed yet"
+            )
+
+        # Get first batch for preview
+        batch_result = await db.execute(
+            select(OCRBatch).where(
+                and_(
+                    OCRBatch.workflow_id == workflow_uuid,
+                    OCRBatch.status == "completed"
+                )
+            ).order_by(OCRBatch.created_at.asc()).limit(1)
+        )
+        batch = batch_result.scalar()
+
+        if not batch or not batch.combined_markdown:
+            return {
+                "workflow_id": workflow_id,
+                "preview_available": False,
+                "preview_content": "",
+                "message": "No preview content available"
+            }
+
+        # Return first 1000 characters as preview
+        preview_content = batch.combined_markdown[:1000] + "..." if len(batch.combined_markdown) > 1000 else batch.combined_markdown
+
+        return {
+            "workflow_id": workflow_id,
+            "workflow_name": workflow.workflow_name,
+            "preview_available": True,
+            "preview_content": preview_content,
+            "total_content_length": len(batch.combined_markdown),
+            "ocr_model": workflow.ocr_model,
+            "completed_at": workflow.completed_at.isoformat() if workflow.completed_at else None
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Failed to preview OCR artifact: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to preview OCR artifact"
         )

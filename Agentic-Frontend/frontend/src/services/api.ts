@@ -2701,6 +2701,46 @@ class ApiClient {
     const response = await this.client.delete('/api/v1/ocr/queue/clear-all');
     return response.data;
   }
+
+  // OCR Artifacts Management
+  async getOCRArtifacts(params?: {
+    limit?: number;
+    offset?: number;
+    search?: string;
+    start_date?: string;
+    end_date?: string;
+    model_filter?: string;
+  }) {
+    const response = await this.client.get('/api/v1/ocr/artifacts', { params });
+    return response.data;
+  }
+
+  async searchOCRArtifacts(searchParams: {
+    search?: string;
+    limit?: number;
+    offset?: number;
+    start_date?: string;
+    end_date?: string;
+    model_filter?: string;
+  }) {
+    const response = await this.client.get('/api/v1/ocr/artifacts', { params: searchParams });
+    return response.data;
+  }
+
+  async downloadOCRArtifact(workflowId: string) {
+    const response = await this.client.get(`/api/v1/ocr/artifacts/${workflowId}/download`);
+    return response.data;
+  }
+
+  async previewOCRArtifact(workflowId: string) {
+    const response = await this.client.get(`/api/v1/ocr/artifacts/${workflowId}/preview`);
+    return response.data;
+  }
+
+  async deleteOCRArtifact(workflowId: string) {
+    const response = await this.client.delete(`/api/v1/ocr/artifacts/${workflowId}`);
+    return response.data;
+  }
 }
 
 export const apiClient = new ApiClient();
