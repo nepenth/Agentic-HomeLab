@@ -161,17 +161,40 @@ def _process_ocr_workflow_sync(
 
                 # Set a generous timeout for OCR operations (30 minutes)
                 try:
-                    response = sync_ollama_client.generate(
-                        prompt=prompt,
-                        model=selected_model,
-                        options={
-                            "images": [image_data],
-                            "temperature": 0.1,
-                            "top_p": 0.9,
-                            "num_ctx": 4096  # Ensure enough context for full page
-                        },
-                        timeout=1800  # 30 minutes timeout for OCR
-                    )
+                    # Use the chat API endpoint for deepseek-ocr model as recommended
+                    if 'deepseek-ocr' in selected_model.lower():
+                        # Use chat API with proper prompt format for deepseek-ocr
+                        logger.info(f"Using chat API endpoint for deepseek-ocr model")
+                        response = sync_ollama_client.chat(
+                            model=selected_model,
+                            messages=[
+                                {
+                                    "role": "user",
+                                    "content": "# document: <image>\n<|grounding|>Convert the document to markdown.",
+                                    "images": [image_data]
+                                }
+                            ],
+                            options={
+                                "temperature": 0.1,
+                                "top_p": 0.9,
+                                "num_ctx": 4096  # Ensure enough context for full page
+                            },
+                            timeout=1800  # 30 minutes timeout for OCR
+                        )
+                    else:
+                        # Use generate API for other models
+                        logger.info(f"Using generate API endpoint for {selected_model} model")
+                        response = sync_ollama_client.generate(
+                            prompt=prompt,
+                            model=selected_model,
+                            options={
+                                "images": [image_data],
+                                "temperature": 0.1,
+                                "top_p": 0.9,
+                                "num_ctx": 4096  # Ensure enough context for full page
+                            },
+                            timeout=1800  # 30 minutes timeout for OCR
+                        )
                 except Exception as e:
                     logger.error(f"Ollama client error with extended timeout: {str(e)}")
                     raise
@@ -183,12 +206,29 @@ def _process_ocr_workflow_sync(
                 logger.info(f"Response has 'response' key: {'response' in response if response else False}")
 
                 # Log the actual response content for debugging
-                if response and 'response' in response:
-                    response_content = response['response']
-                    logger.info(f"OCR response length: {len(response_content)} characters")
-                    logger.info(f"OCR response preview: {response_content[:200] if len(response_content) > 200 else response_content}")
+                if response:
+                    if 'response' in response:
+                        response_content = response['response']
+                        logger.info(f"OCR response length: {len(response_content)} characters")
+                        logger.info(f"OCR response preview: {response_content[:200] if len(response_content) > 200 else response_content}")
+                        ocr_text = response_content.strip()
+                    elif 'message' in response and 'content' in response['message']:
+                        # Handle chat API response format
+                        response_content = response['message']['content']
+                        logger.info(f"OCR response length: {len(response_content)} characters")
+                        logger.info(f"OCR response preview: {response_content[:200] if len(response_content) > 200 else response_content}")
 
-                ocr_text = response.get('response', '').strip()
+                        # Post-process deepseek-ocr raw output to clean markdown
+                        if 'deepseek-ocr' in selected_model.lower():
+                            ocr_text = _post_process_deepseek_ocr_output(response_content)
+                        else:
+                            ocr_text = response_content.strip()
+                    else:
+                        logger.warning(f"Unexpected response format: {list(response.keys())}")
+                        ocr_text = f"[Unexpected response format: {list(response.keys())}]"
+                else:
+                    logger.error("Empty response received from Ollama API")
+                    ocr_text = "[Empty response received from Ollama API]"
 
                 if not ocr_text:
                     logger.warning(f"Empty OCR response for image {os.path.basename(image_path)}")
@@ -338,15 +378,9 @@ def _log_workflow_progress_sync(
 ):
     """Log workflow progress synchronously."""
     from datetime import datetime
-    import pytz
 
-    # Get current time in EST timezone
-    try:
-        est = pytz.timezone('America/New_York')
-        current_time_est = datetime.now(est)
-    except:
-        # Fallback to UTC if timezone conversion fails
-        current_time_est = datetime.utcnow()
+    # Use UTC timezone for all backend timestamps (best practice)
+    current_time_utc = datetime.utcnow()
 
     log_entry = OCRWorkflowLog(
         workflow_id=workflow_id,
@@ -356,7 +390,7 @@ def _log_workflow_progress_sync(
         level=level,
         message=message,
         workflow_phase="processing",
-        timestamp=current_time_est  # Use EST timezone timestamp
+        timestamp=current_time_utc  # Use UTC timezone timestamp (backend standard)
     )
     db.add(log_entry)
     db.commit()
@@ -407,7 +441,9 @@ def _broadcast_workflow_update_sync(
         }
 
         # Broadcast to all connections subscribed to this workflow
-        manager.broadcast_workflow_update(message, user_id, str(workflow_id))
+        # Fix async await issue
+        import asyncio
+        asyncio.run(manager.broadcast_workflow_update(message, user_id, str(workflow_id)))
 
     except Exception as e:
         logger.error(f"Failed to broadcast OCR workflow update: {e}")
@@ -422,10 +458,11 @@ def _send_completion_notification_sync(
 ) -> None:
     """Send completion notification synchronously."""
     try:
+        # Fix notification parameter names to match Notification model
         notification = Notification(
             user_id=user_id,
-            title="OCR Processing Complete",
-            message=f"Your OCR workflow has completed processing {processed_count} images.",
+            notification_title="OCR Processing Complete",
+            notification_message=f"Your OCR workflow has completed processing {processed_count} images.",
             notification_type="ocr_complete",
             metadata={
                 "workflow_id": str(workflow_id),
