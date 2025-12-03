@@ -319,6 +319,17 @@ export const AssistantTab: React.FC<AssistantTabProps> = ({ onNavigateToEmail })
               if (data.step_type === 'error') {
                 console.error('[AGENTIC] Streaming error:', data.error);
                 setActiveReasoningMessageId(null);
+
+                // Update with error information
+                dispatch(updateLastMessage({
+                  content: `Chain-of-thought reasoning failed: ${data.error || 'Unknown error'}`,
+                  metadata: {
+                    thinking_content: `Error during reasoning: ${data.error || 'Unknown error'}`,
+                    is_error: true,
+                    progress: 'Error encountered',
+                  },
+                }));
+
                 break;
               }
 
@@ -332,14 +343,19 @@ export const AssistantTab: React.FC<AssistantTabProps> = ({ onNavigateToEmail })
                 });
 
                 // Update the assistant message with current reasoning steps
-                const currentSteps = reasoningSteps.get(messageId) || [];
-                const newSteps = [...currentSteps, data as ReasoningStep];
-                const thinkingContent = formatReasoningStepsForDisplay(newSteps);
+                // Use the updated reasoningSteps state that was just set
+                const updatedSteps = reasoningSteps.get(messageId) || [];
+                const thinkingContent = formatReasoningStepsForDisplay(updatedSteps);
+
+                // Add step progress indicator
+                const progressText = `Step ${data.step_number} of ${Math.max(10, data.step_number + 2)} completed`;
 
                 dispatch(updateLastMessage({
                   content: '',
                   metadata: {
                     thinking_content: thinkingContent,
+                    progress: progressText,
+                    current_step: data.step_number,
                   },
                 }));
               }
@@ -360,7 +376,8 @@ export const AssistantTab: React.FC<AssistantTabProps> = ({ onNavigateToEmail })
           content: 'Chain-of-thought reasoning failed: No response received from server. Please check your connection and try again.',
           metadata: {
             thinking_content: 'Error: No data received from server',
-            is_error: true
+            is_error: true,
+            progress: 'Connection error - no data received',
           },
         }));
 
@@ -707,6 +724,18 @@ export const AssistantTab: React.FC<AssistantTabProps> = ({ onNavigateToEmail })
                                     }}
                                   >
                                     💭 Thinking Process
+                                    {message.metadata?.progress && (
+                                      <Typography
+                                        variant="caption"
+                                        sx={{
+                                          ml: 1,
+                                          color: theme.palette.text.secondary,
+                                          fontStyle: 'italic',
+                                        }}
+                                      >
+                                        ({message.metadata.progress})
+                                      </Typography>
+                                    )}
                                     {!expandedThinking.has(message.id) && !isStreaming && (
                                       <CheckCircleIcon sx={{ fontSize: 14, ml: 0.5 }} />
                                     )}
