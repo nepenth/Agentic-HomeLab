@@ -248,6 +248,7 @@ class ModelRegistryService:
             'deepseek-r1': 80,
             'phi4': 70,
             'mistral-small3.1': 65,
+            'ministral-3': 68,  # Add support for ministral-3
             'codellama': 60,
             'llama3.3': 55,
             'granite4': 70,
@@ -472,6 +473,18 @@ class ModelRegistryService:
                     'math_score': 68.0,
                     'humaneval_score': 62.0,
                     'bbh_score': 58.0,
+                    'raw_data': json.dumps({'source': 'static_fallback'}),
+                    'last_updated': datetime.now()
+                },
+                {
+                    'model_name': 'ministral-3:14b',
+                    'source': 'fallback',
+                    'average_score': 68.0,
+                    'mmlu_score': 66.0,
+                    'gpqa_score': 63.0,
+                    'math_score': 70.0,
+                    'humaneval_score': 65.0,
+                    'bbh_score': 60.0,
                     'raw_data': json.dumps({'source': 'static_fallback'}),
                     'last_updated': datetime.now()
                 },
