@@ -1,1 +1,17 @@
 CLAUDE.md
+
+# Local runtime data and credentials
+.env
+.env.*
+!.env.example
+venv/
+.venv/
+*.db
+*.sqlite*
+*.log
+logs/
+ssl/
+certs/
+*.key
+*.pem
+*.crt
